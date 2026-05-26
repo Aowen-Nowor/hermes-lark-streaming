@@ -90,7 +90,9 @@ grep hermes-lark-streaming ~/.hermes/logs/gateway.log
 
 All configuration items are located under the `streaming:` section in `~/.hermes/config.yaml`.
 
-> **Note**: Hermes also has a native `display.streaming: false` config which controls **CLI/TUI terminal** output. This is unrelated to this plugin's streaming cards. This plugin only reads from the `streaming:` section.
+> **Auto-injection**: When this plugin is first loaded, it automatically adds the `streaming:` section to your `config.yaml` top-level with the defaults below. On uninstall, this section is automatically removed. You only need to manually edit if you want to override specific values.
+
+> **Note**: Hermes also has a native `display.streaming: false` config which controls **CLI/TUI terminal** output. This is unrelated to this plugin's streaming cards.
 
 ### Plugin Enable Configuration
 

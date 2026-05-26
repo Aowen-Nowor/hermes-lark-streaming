@@ -2,6 +2,28 @@
 
 ---
 
+## v0.8.6 — 2026-05-26
+
+### 修复
+
+| 问题 | 说明 |
+|------|------|
+| 安装后无卡片效果 | 插件 Config 读不到顶层 `streaming` 配置，`enabled` 始终为 `False` |
+| 卸载残留配置 | 卸载后 `streaming` 配置段和 `plugins.enabled` 中的条目未清理 |
+
+### 改动
+
+1. **`config.py`** — `_streaming_sec()` 只查顶层 `streaming`，不再查无关的 `display` 层
+2. **`plugin.py`** — 新增 `unregister()`，卸载时：
+   - 删除顶层 `streaming` 配置段
+   - 从 `plugins.enabled` 列表中移除 `hermes-lark-streaming`
+3. **`plugin.py`** — `register()` 新增 `_ensure_streaming_config()`，首次加载时自动注入 `streaming` 配置段（含默认值）
+4. **README 文档** — 更新中英文配置说明，标注自动注入/清理行为
+
+# hermes-lark-streaming Changelog
+
+---
+
 ## v0.8.5 — 2026-05-26
 
 包含以下 5 个修复：

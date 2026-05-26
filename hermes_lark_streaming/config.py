@@ -106,7 +106,7 @@ class Config:
 
     def _streaming_sec(self) -> dict[str, Any]:
         raw = self._load()
-        sec = raw.get("streaming") or {}
+        sec = raw.get("streaming")
         if isinstance(sec, dict):
             return sec
         return {}
