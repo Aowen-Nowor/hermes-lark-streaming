@@ -5,7 +5,7 @@
   <a href="https://larkcommunity.feishu.cn/wiki/DKkpwgMcJiglIhk88N4cqJEan5f?from=from_copylink"><img src="https://img.shields.io/badge/docs-知识库-3370FF?logo=feishu&logoColor=white" alt="知识库文档"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-0.8.5-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.8.6-ff9800.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@ English | <a href="README.zh-CN.md">中文版</a>
 
 Feishu/Lark CardKit v2.0 streaming cards plugin for Hermes Agent — real-time AI response display with typing effect, tool panels, reasoning, and more.
 
-> Forked from [Cheerwhy/hermes-lark-streaming](https://github.com/Cheerwhy/hermes-lark-streaming)
+> Based on [Cheerwhy/hermes-lark-streaming](https://github.com/Cheerwhy/hermes-lark-streaming) v0.7.0, with extensive refactoring and optimizations
 
 ---
 
@@ -68,7 +68,7 @@ hermes gateway restart
 
 ```bash
 # 1. Clean up injected config first (while plugin code is still available)
-python -m hermes_lark_streaming cleanup
+$(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming cleanup
 
 # 2. Remove plugin files
 hermes plugins uninstall hermes-lark-streaming
@@ -81,10 +81,10 @@ hermes gateway restart
 
 ```bash
 # Check plugin status
-python -m hermes_lark_streaming status
+$(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming status
 
 # Verify environment compatibility
-python -m hermes_lark_streaming verify
+$(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming verify
 
 # View gateway logs
 grep hermes-lark-streaming ~/.hermes/logs/gateway.log
@@ -180,7 +180,7 @@ display:
 **Solution**:
 1. Check if plugin is correctly installed: `hermes plugins list`
 2. View gateway logs: `grep hermes-lark-streaming ~/.hermes/logs/gateway.log`
-3. Verify Feishu credentials: `python -m hermes_lark_streaming status`
+3. Verify Feishu credentials: `$(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming status`
 4. Check for backup directory interference: `ls -la ~/.hermes/plugins/ | grep bak`, delete if exists
 
 ### Duplicate Card Content
@@ -215,7 +215,7 @@ display:
 |---|---------|------------|-----|
 | 1 | No card effect after install | Plugin Config cannot find top-level `streaming` section, `enabled` always `False` | `register()` auto-injects top-level `streaming` config section |
 | 2 | Config file format error | `footer.fields` serialized as 2D array format | `_prepare_config()` flattens to 1D list before writing |
-| 3 | Config leftover after uninstall | Hermes `plugins uninstall` only removes directory, doesn't call `unregister` | New `python -m hermes_lark_streaming cleanup` command, clean config first then uninstall |
+| 3 | Config leftover after uninstall | Hermes `plugins uninstall` only removes directory, doesn't call `unregister` | New `$(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming cleanup` command, clean config first then uninstall |
 
 ### v0.8.5 (2026-05-26)
 

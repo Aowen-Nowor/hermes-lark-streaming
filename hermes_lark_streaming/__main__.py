@@ -26,7 +26,7 @@ def main() -> int:
 
 
 def _print_usage() -> None:
-    print("Usage: python -m hermes_lark_streaming <command>")
+    print("Usage: $(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming <command>")
     print()
     print("Commands:")
     print("  status     Show current configuration and credentials status")
@@ -82,7 +82,9 @@ def _cmd_cleanup() -> int:
     from .plugin import _cleanup_config
 
     _cleanup_config()
-    print("Cleanup complete. Run 'hermes gateway restart' to apply.")
+    print("Cleanup complete. Next steps:")
+    print("  1. hermes plugins uninstall hermes-lark-streaming")
+    print("  2. hermes gateway restart")
     return 0
 
 
