@@ -65,7 +65,13 @@ hermes gateway restart
 ### 卸载
 
 ```bash
+# 1. 先清理注入的配置（插件代码还在，可以跑）
+python -m hermes_lark_streaming cleanup
+
+# 2. 卸载插件
 hermes plugins uninstall hermes-lark-streaming
+
+# 3. 重启网关
 hermes gateway restart
 ```
 
@@ -161,128 +167,6 @@ display:
 
 ---
 
-## 架构设计
-
-本插件使用**运行时 monkey patching**而非 AST 源码注入。当插件通过 `hermes plugins install` 加载时，会在运行时包装 `GatewayRunner`、`AIAgent` 和 `Scheduler` 的方法 — **不修改磁盘上的任何源文件**。
-
-### 注入点
-
-```
-hermes-agent
-  │
-  ├─ gateway/run.py              ← hermes-lark-streaming 在导入时包装
-  │   └─ GatewayRunner._handle_message          → NORMALIZE
-  │   └─ GatewayRunner._handle_message_with_agent → START + ABORT + INTERRUPT
-  │   └─ GatewayRunner._run_agent               → COMPLETE + context
-  │
-  ├─ agent/conversation_loop.py
-  │   └─ run_conversation                       → 包装所有 6 个回调（模块级）
-  │
-  ├─ run_agent.py
-  │   └─ AIAgent.run_conversation               → 包装所有 6 个回调（实例级双重保险）
-  │       ├─ stream_delta_callback              → ANSWER
-  │       ├─ interim_assistant_callback         → THINKING
-  │       ├─ tool_progress_callback             → TOOL
-  │       ├─ reasoning_callback                 → REASONING
-  │       └─ background_review_callback         → BACKGROUND_REVIEW
-  │
-  ├─ cron/scheduler.py
-  │   └─ Scheduler._deliver_result              → CRON（仅飞书）
-  │
-  └─ hermes-lark-streaming 插件
-      ├─ plugin.yaml          — 清单（名称、版本、hooks）
-      ├─ __init__.py          — 包根目录 + register 导出
-      ├─ __main__.py          — CLI（status / verify）
-      ├─ plugin.py            — register(ctx) 入口点（Hermes 插件发现）
-      ├─ monkey_patch.py      — 运行时 monkey patching（方法包装器）
-      ├─ patch.py             — 11 个 hook 函数（由包装器调用）
-      ├─ config.py            — 配置读取器
-      ├─ controller.py        — StreamCardController（会话管理）
-      ├─ controller_mixin.py  — 重试/降级混入（非线性模式）
-      ├─ controller_linear_mixin.py — 线性模式卡片编排
-      ├─ feishu.py            — 飞书 Open API 客户端（lark-oapi SDK）
-      ├─ cardkit.py           — CardKit v2.0 卡片构建器
-      ├─ cardkit_i18n.py      — 中英文国际化
-      ├─ cardkit_md.py        — Markdown 处理
-      ├─ linear.py            — 线性模式状态追踪
-      ├─ text.py              — 增量文本累加器
-      ├─ tooluse.py           — 工具调用追踪和可视化
-      ├─ image.py             — 异步图片上传
-      ├─ flush.py             — 节流刷新调度器
-      └─ unavailable_guard.py — 消息不可用保护
-```
-
-### 依赖项
-
-| 包名 | 版本 | 用途 |
-|------|------|------|
-| `lark-oapi` | >= 1.4.0 | 飞书 Open API SDK |
-| `PyYAML` | >= 6.0 | YAML 配置解析 |
-
----
-
-## 线性模式
-
-线性模式是默认模式，在单张动态更新的卡片中渲染所有内容（思考、工具调用、答案）。
-
-### 工作原理
-
-1. **分段渲染**：内容按段组织（reasoning、answer、tool）
-2. **自动拆卡**：当接近飞书 200 元素限制时，卡片自动拆分
-3. **平滑过渡**：旧卡片被封存，新卡片继续对话
-
-### 优势
-
-- 更好的用户体验，连续滚动
-- 在单一视图中保留上下文
-- 自动处理飞书元素限制
-
-### 拆卡行为
-
-插件监控元素数量，在以下情况自动拆卡：
-- 元素数量超过 180（为 footer 和波动预留 20）
-- 工具段可在步骤边界拆分
-- 答案段在溢出时触发拆卡
-
----
-
-## 技术细节
-
-### 运行时 Monkey Patching
-
-插件通过包装 Hermes 核心类的方法来实现功能注入，而非修改源文件：
-
-- **线程安全**：使用 `contextvars.ContextVar` 传播消息上下文，并支持 `threading.local()` 作为 fallback（用于线程池场景）
-- **幂等性**：通过函数属性标记（`_hls_wrapper`）防止重复包装
-- **双重保险**：同时在模块级别和实例级别应用 patch，确保回调被正确拦截
-- **延迟加载**：5 秒延迟后重试直接 patch，确保 Hermes 模块完全加载
-
-### 消息保护（UnavailableGuard）
-
-检测消息被删除/撤回后终止更新管道：
-
-- 监控飞书 API 错误码（231003、1000023、230011）
-- 缓存不可用消息状态（30 分钟 TTL）
-- 避免对已删除消息的无效 API 调用
-
-### 节流刷新（FlushController）
-
-控制卡片更新频率，避免 API 限流：
-
-- CardKit 模式：50ms 节流
-- IM PATCH 模式：150ms 节流
-- 等待机制：确保所有更新在完成前刷新
-
-### 文本状态管理（TextState）
-
-增量文本累加和边界检测：
-
-- 追踪已刷新和待刷新文本
-- 推理标签分离（`<thinking>`/`</thinking>`）
-- 避免重复渲染相同内容
-
----
-
 ## 常见问题
 
 ### 插件加载失败
@@ -321,39 +205,22 @@ hermes-agent
 
 ## 更新日志
 
+### v0.8.6 (2026-05-26)
+
+| # | 问题 | 原因 | 修复 |
+|---|------|------|------|
+| 1 | 安装后无卡片效果 | 插件 Config 读不到顶层 `streaming` 配置，`enabled` 始终为 `False` | `register()` 自动注入顶层 `streaming` 配置段 |
+| 2 | 配置文件格式错误 | `footer.fields` 被序列化为二维数组格式 | `_prepare_config()` 展平为一维列表后写入 |
+| 3 | 卸载后配置残留 | Hermes 的 `plugins uninstall` 只删目录不调 `unregister` | 新增 `python -m hermes_lark_streaming cleanup` 命令，先清配置再卸载 |
+
 ### v0.8.5 (2026-05-26)
 
-- 修复 `_set_thread_local_ctx()` 未定义问题
-- 添加双重保险：直接 patch `AIAgent.run_conversation` 方法（5秒延迟执行）
-- 修复线程池场景下上下文传递问题
-
-### v0.8.0-fix4 (2026-05-26)
-
-- 恢复 `apply_patches()` 中对 `conversation_loop.run_conversation` 的 patch
-- 引入 `threading.local()` 作为 `contextvars` 的 fallback 存储
-- 在 `_wrap_run_agent` 中将 msg context 复制到 thread-local
-
-### v0.8.0-fix3 (2026-05-25)
-
-- 修复 `monkey_patch.py` 中 `setattr` 缩进错误导致的语法异常
-
-### v0.8.0-fix2 (2026-05-25)
-
-- 修复回调重复包装导致内容重复的问题
-- 添加防重复包装守卫
-
-### v0.8.0-fix1 (2026-05-25)
-
-- 修复插件根目录缺少 `__init__.py` 导致加载失败的问题
-
-### v0.8.0
-
-- 重构为运行时 monkey patching 架构
-- 新增线性模式支持
-- 新增 UnavailableGuard 消息保护
-- 新增 FlushController 节流刷新
-- 新增 TextState 回复边界检测
-
----
+| # | 问题 | 原因 | 修复 |
+|---|------|------|------|
+| fix1 | 插件加载失败 | 仓库缺少根目录 `__init__.py` | 新增根目录 `__init__.py` 桥接导入 |
+| fix2 | 卡片内容重复 | 回调被多次包装，每段文本被处理两次 | 防重复包装守卫 `_hls_wrapped` 标记 |
+| fix3 | 语法异常 | `setattr` 错位缩进到 `except` 内部 | 修复缩进位置 |
+| fix4 | 后续消息无流式更新 | `contextvars` 不跨线程，`_set_thread_local_ctx()` 未定义 | 引入 `threading.local()` fallback |
+| fix5 | 重启后所有消息无流式更新 | 备份目录干扰命名空间 + `_set_thread_local_ctx()` 未定义 | 删除备份目录 + 定义 `_thread_local_ctx` + 双重保险直接 patch |
 
 ## 致谢

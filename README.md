@@ -67,7 +67,13 @@ hermes gateway restart
 ### Uninstallation
 
 ```bash
+# 1. Clean up injected config first (while plugin code is still available)
+python -m hermes_lark_streaming cleanup
+
+# 2. Remove plugin files
 hermes plugins uninstall hermes-lark-streaming
+
+# 3. Restart gateway
 hermes gateway restart
 ```
 
@@ -165,128 +171,6 @@ display:
 
 ---
 
-## Architecture
-
-This plugin uses **runtime monkey patching** instead of AST source injection. When loaded via `hermes plugins install`, it wraps `GatewayRunner`, `AIAgent`, and `Scheduler` methods at runtime — **without modifying any source files on disk**.
-
-### Injection Points
-
-```
-hermes-agent
-  │
-  ├─ gateway/run.py              ← wrapped by hermes-lark-streaming at import
-  │   └─ GatewayRunner._handle_message          → NORMALIZE
-  │   └─ GatewayRunner._handle_message_with_agent → START + ABORT + INTERRUPT
-  │   └─ GatewayRunner._run_agent               → COMPLETE + context
-  │
-  ├─ agent/conversation_loop.py
-  │   └─ run_conversation                       → wraps all 6 callbacks (module-level)
-  │
-  ├─ run_agent.py
-  │   └─ AIAgent.run_conversation               → wraps all 6 callbacks (instance-level backup)
-  │       ├─ stream_delta_callback              → ANSWER
-  │       ├─ interim_assistant_callback         → THINKING
-  │       ├─ tool_progress_callback             → TOOL
-  │       ├─ reasoning_callback                 → REASONING
-  │       └─ background_review_callback         → BACKGROUND_REVIEW
-  │
-  ├─ cron/scheduler.py
-  │   └─ Scheduler._deliver_result              → CRON (Feishu only)
-  │
-  └─ hermes-lark-streaming plugin
-      ├─ plugin.yaml          — manifest (name, version, hooks)
-      ├─ __init__.py          — root package + register export
-      ├─ __main__.py          — CLI (status / verify)
-      ├─ plugin.py            — register(ctx) entry point (Hermes plugin discovery)
-      ├─ monkey_patch.py      — runtime monkey patching (method wrappers)
-      ├─ patch.py             — 11 hook functions (called by wrappers)
-      ├─ config.py            — config reader
-      ├─ controller.py        — StreamCardController (session management)
-      ├─ controller_mixin.py  — retry/fallback mixin (non-linear mode)
-      ├─ controller_linear_mixin.py — linear mode card orchestration
-      ├─ feishu.py            — Feishu Open API client (lark-oapi SDK)
-      ├─ cardkit.py           — CardKit v2.0 card builder
-      ├─ cardkit_i18n.py      — Chinese/English i18n
-      ├─ cardkit_md.py        — Markdown processing
-      ├─ linear.py            — linear mode state tracking
-      ├─ text.py              — incremental text accumulator
-      ├─ tooluse.py           — tool call tracking and visualization
-      ├─ image.py             — async image upload
-      ├─ flush.py             — throttle refresh scheduler
-      └─ unavailable_guard.py — message unavailable protection
-```
-
-### Dependencies
-
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `lark-oapi` | >= 1.4.0 | Feishu Open API SDK |
-| `PyYAML` | >= 6.0 | YAML config parsing |
-
----
-
-## Linear Mode
-
-Linear mode is the default mode, rendering all content (thinking, tool calls, answer) in a single dynamically updated card.
-
-### How It Works
-
-1. **Segmented Rendering** — Content organized by segments (reasoning, answer, tool)
-2. **Auto Card Splitting** — Cards automatically split when approaching Feishu's 200-element limit
-3. **Smooth Transition** — Old cards are archived, new cards continue the conversation
-
-### Benefits
-
-- Better user experience with continuous scrolling
-- Context preserved in a single view
-- Automatic handling of Feishu element limits
-
-### Card Splitting Behavior
-
-The plugin monitors element count and auto-splits in these cases:
-- Element count exceeds 180 (reserving 20 for footer and fluctuations)
-- Tool segments can split at step boundaries
-- Answer segments trigger splitting on overflow
-
----
-
-## Technical Details
-
-### Runtime Monkey Patching
-
-The plugin injects functionality by wrapping Hermes core class methods instead of modifying source files:
-
-- **Thread Safety** — Uses `contextvars.ContextVar` to propagate message context, with `threading.local()` as fallback (for thread pool scenarios)
-- **Idempotency** — Prevents duplicate wrapping via function attribute markers (`_hls_wrapper`)
-- **Dual Backup** — Applies patches at both module and instance levels to ensure callbacks are intercepted correctly
-- **Delayed Loading** — Retries direct patch after 5 seconds to ensure Hermes modules are fully loaded
-
-### Message Protection (UnavailableGuard)
-
-Terminates update pipeline when messages are deleted/recalled:
-
-- Monitors Feishu API error codes (231003, 1000023, 230011)
-- Caches unavailable message states (30-minute TTL)
-- Avoids invalid API calls on deleted messages
-
-### Throttle Refresh (FlushController)
-
-Controls card update frequency to avoid API rate limiting:
-
-- CardKit mode: 50ms throttle
-- IM PATCH mode: 150ms throttle
-- Wait mechanism: Ensures all updates are flushed before completion
-
-### Text State Management (TextState)
-
-Incremental text accumulation and boundary detection:
-
-- Tracks flushed and pending text
-- Reasoning tag separation (`<thinking>`/`</thinking>`)
-- Avoids duplicate rendering of same content
-
----
-
 ## FAQ
 
 ### Plugin Loading Failed
@@ -325,17 +209,23 @@ Incremental text accumulation and boundary detection:
 
 ## Changelog
 
+### v0.8.6 (2026-05-26)
+
+| # | Problem | Root Cause | Fix |
+|---|---------|------------|-----|
+| 1 | No card effect after install | Plugin Config cannot find top-level `streaming` section, `enabled` always `False` | `register()` auto-injects top-level `streaming` config section |
+| 2 | Config file format error | `footer.fields` serialized as 2D array format | `_prepare_config()` flattens to 1D list before writing |
+| 3 | Config leftover after uninstall | Hermes `plugins uninstall` only removes directory, doesn't call `unregister` | New `python -m hermes_lark_streaming cleanup` command, clean config first then uninstall |
+
 ### v0.8.5 (2026-05-26)
 
-Contains 5 bug fixes:
-
-| Fix | Date | Issue |
-|-----|------|-------|
-| fix1 | 2026-05-25 | Plugin root missing `__init__.py` causing load failure |
-| fix2 | 2026-05-25 | Callback duplicate wrapping causing content duplication |
-| fix3 | 2026-05-25 | `setattr` indentation error causing syntax exception |
-| fix4 | 2026-05-26 | `contextvars` not crossing threads causing subsequent messages to lose streaming |
-| fix5 | 2026-05-26 | `_set_thread_local_ctx()` undefined + backup directory interference |
+| # | Problem | Root Cause | Fix |
+|---|---------|------------|-----|
+| fix1 | Plugin load failure | Repository missing root `__init__.py` | Added root `__init__.py` bridge import |
+| fix2 | Duplicate card content | Callbacks wrapped multiple times, each text processed twice | Anti-duplicate guard with `_hls_wrapped` flag |
+| fix3 | Syntax exception | `setattr` misplaced indentation inside `except` block | Fixed indentation position |
+| fix4 | Subsequent messages lose streaming | `contextvars` doesn't cross threads, `_set_thread_local_ctx()` undefined | Introduced `threading.local()` fallback |
+| fix5 | All messages lose streaming after restart | Backup directory namespace collision + `_set_thread_local_ctx()` undefined | Removed backup dir + defined `_thread_local_ctx` + double-belt direct patch |
 
 ---
 

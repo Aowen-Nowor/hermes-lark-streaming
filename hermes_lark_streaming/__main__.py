@@ -1,4 +1,4 @@
-"""CLI 入口: python -m hermes_lark_streaming [status|verify]。"""
+"""CLI 入口: python -m hermes_lark_streaming [status|verify|cleanup]。"""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ def main() -> int:
         return _cmd_status()
     if cmd == "verify":
         return _cmd_verify()
+    if cmd == "cleanup":
+        return _cmd_cleanup()
 
     print(f"Unknown command: {cmd}")
     _print_usage()
@@ -29,6 +31,7 @@ def _print_usage() -> None:
     print("Commands:")
     print("  status     Show current configuration and credentials status")
     print("  verify     Verify environment compatibility")
+    print("  cleanup    Remove plugin-injected config from config.yaml (run after uninstall)")
     print()
     print("Note: This plugin uses runtime monkey patching (no file modification).")
     print("      Install/uninstall via: hermes plugins install/uninstall")
@@ -67,6 +70,19 @@ def _cmd_verify() -> int:
     except ImportError as e:
         print(f"run_agent.AIAgent: NOT importable ({e})")
 
+    return 0
+
+
+def _cmd_cleanup() -> int:
+    """Remove plugin-injected config entries from config.yaml.
+
+    Run this after ``hermes plugins uninstall hermes-lark-streaming``
+    to clean up the ``streaming`` config section and ``plugins.enabled`` entry.
+    """
+    from .plugin import _cleanup_config
+
+    _cleanup_config()
+    print("Cleanup complete. Run 'hermes gateway restart' to apply.")
     return 0
 
 

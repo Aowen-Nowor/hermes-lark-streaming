@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-lark-streaming"
-version = "0.8.5"
+version = "0.8.6"
 description = "Feishu/Lark CardKit v2.0 streaming cards for Hermes Agent — plugin edition"
 readme = "README.md"
 license = {text = "MIT"}
