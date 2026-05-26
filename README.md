@@ -87,7 +87,7 @@ $(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming status
 $(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming verify
 
 # View gateway logs
-grep hermes-lark-streaming ~/.hermes/logs/gateway.log
+grep hermes_lark_streaming ~/.hermes/logs/agent.log
 ```
 
 ---
@@ -179,7 +179,7 @@ display:
 
 **Solution**:
 1. Check if plugin is correctly installed: `hermes plugins list`
-2. View gateway logs: `grep hermes-lark-streaming ~/.hermes/logs/gateway.log`
+2. View gateway logs: `grep hermes_lark_streaming ~/.hermes/logs/agent.log`
 3. Verify Feishu credentials: `$(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming status`
 4. Check for backup directory interference: `ls -la ~/.hermes/plugins/ | grep bak`, delete if exists
 

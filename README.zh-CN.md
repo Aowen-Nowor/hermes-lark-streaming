@@ -84,8 +84,8 @@ $(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming status
 # 验证环境兼容性
 $(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming verify
 
-# 查看网关日志
-grep hermes-lark-streaming ~/.hermes/logs/gateway.log
+# 查看日志
+grep hermes_lark_streaming ~/.hermes/logs/agent.log
 ```
 
 ---
@@ -175,7 +175,7 @@ display:
 
 **解决**：
 1. 检查插件是否正确安装：`hermes plugins list`
-2. 查看网关日志：`grep hermes-lark-streaming ~/.hermes/logs/gateway.log`
+2. 查看日志：`grep hermes_lark_streaming ~/.hermes/logs/agent.log`
 3. 验证飞书凭据：`$(dirname $(readlink -f $(which hermes)))/python -m hermes_lark_streaming status`
 4. 检查是否存在备份目录干扰：`ls -la ~/.hermes/plugins/ | grep bak`，如有则删除
 
