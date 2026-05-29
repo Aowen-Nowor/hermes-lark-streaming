@@ -27,7 +27,23 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-_HERMES_CONFIG_PATH = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "config.yaml"
+
+def _get_hermes_config_path() -> Path:
+    """动态获取 Hermes 配置文件路径。
+    
+    在多 Profile 场景下，HERMES_HOME 环境变量会在 Gateway 启动时
+    通过 _apply_profile_override() 设置。如果在模块导入时就读取
+    该变量，可能会读到错误的路径。
+    
+    此函数每次调用时都重新读取环境变量，确保始终使用正确的路径。
+    """
+    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "config.yaml"
+
+
+# 向后兼容：保留常量名，但改为使用 getter 函数
+# 注意：这仍然在模块导入时求值，但大多数场景下是正确的
+# 对于多 Profile 场景，请使用 _get_hermes_config_PATH()
+_HERMES_CONFIG_PATH = _get_hermes_config_path()
 
 _PLUGIN_NAME = "hermes-lark-streaming"
 
@@ -54,12 +70,14 @@ def _backup_config() -> None:
     Backup filename format: config.yaml.YYYYMMDD_HHMMSS.hermes-lark-streaming
     Only creates one backup per plugin installation (skips if a backup already exists).
     """
-    if not _HERMES_CONFIG_PATH.exists():
+    # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
+    config_path = _get_hermes_config_path()
+    if not config_path.exists():
         return
 
     # Check if a backup for this plugin already exists
     backup_pattern = f"config.yaml.*.{_PLUGIN_NAME}"
-    parent = _HERMES_CONFIG_PATH.parent
+    parent = config_path.parent
     existing_backups = list(parent.glob(backup_pattern))
     if existing_backups:
         _logger.info("Backup already exists: %s, skipping", existing_backups[0].name)
@@ -70,7 +88,7 @@ def _backup_config() -> None:
     backup_path = parent / backup_name
 
     try:
-        shutil.copy2(_HERMES_CONFIG_PATH, backup_path)
+        shutil.copy2(config_path, backup_path)
         _logger.info("Backed up config.yaml to %s", backup_path)
     except Exception:
         _logger.exception("Failed to back up config.yaml to %s", backup_path)
@@ -94,12 +112,14 @@ def _prepare_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
 def _ensure_streaming_config() -> None:
     """Ensure ``config.yaml`` has a clean top-level ``streaming`` section."""
-    if not _HERMES_CONFIG_PATH.exists():
-        _logger.warning("config.yaml not found at %s, skipping config injection", _HERMES_CONFIG_PATH)
+    # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
+    config_path = _get_hermes_config_path()
+    if not config_path.exists():
+        _logger.warning("config.yaml not found at %s, skipping config injection", config_path)
         return
 
     try:
-        text = _HERMES_CONFIG_PATH.read_text(encoding="utf-8")
+        text = config_path.read_text(encoding="utf-8")
         raw = yaml.safe_load(text) or {}
         changed = False
 
@@ -110,7 +130,7 @@ def _ensure_streaming_config() -> None:
 
             raw["streaming"] = dict(_DEFAULT_STREAMING_CONFIG)
             changed = True
-            _logger.info("Injected top-level streaming config into %s", _HERMES_CONFIG_PATH)
+            _logger.info("Injected top-level streaming config into %s", config_path)
 
         # Ensure plugins.enabled includes this plugin
         plugins = raw.get("plugins")
@@ -126,7 +146,7 @@ def _ensure_streaming_config() -> None:
 
         if changed:
             prepped = _prepare_config(raw)
-            with open(_HERMES_CONFIG_PATH, "w", encoding="utf-8") as f:
+            with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(prepped, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     except Exception:
         _logger.exception("Failed to ensure streaming config in config.yaml")
@@ -137,18 +157,20 @@ def _cleanup_config() -> None:
 
     Called via ``unregister()`` when Hermes plugin system supports it.
     """
-    if not _HERMES_CONFIG_PATH.exists():
+    # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
+    config_path = _get_hermes_config_path()
+    if not config_path.exists():
         return
 
     try:
-        text = _HERMES_CONFIG_PATH.read_text(encoding="utf-8")
+        text = config_path.read_text(encoding="utf-8")
         raw = yaml.safe_load(text) or {}
         changed = False
 
         if "streaming" in raw:
             del raw["streaming"]
             changed = True
-            _logger.info("Removed top-level streaming config from %s", _HERMES_CONFIG_PATH)
+            _logger.info("Removed top-level streaming config from %s", config_path)
 
         plugins = raw.get("plugins")
         if isinstance(plugins, dict):
@@ -159,7 +181,7 @@ def _cleanup_config() -> None:
                 _logger.info("Removed hermes-lark-streaming from plugins.enabled")
 
         if changed:
-            with open(_HERMES_CONFIG_PATH, "w", encoding="utf-8") as f:
+            with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(raw, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
     except Exception:
         _logger.exception("Failed to clean up streaming config / plugins.enabled")

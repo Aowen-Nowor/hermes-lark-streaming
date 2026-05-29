@@ -9,7 +9,23 @@ from typing import Any
 
 import yaml
 
-_HERMES_CONFIG_PATH = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "config.yaml"
+
+def _get_hermes_config_path() -> Path:
+    """动态获取 Hermes 配置文件路径。
+    
+    在多 Profile 场景下，HERMES_HOME 环境变量会在 Gateway 启动时
+    通过 _apply_profile_override() 设置。如果在模块导入时就读取
+    该变量，可能会读到错误的路径。
+    
+    此函数每次调用时都重新读取环境变量，确保始终使用正确的路径。
+    """
+    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "config.yaml"
+
+
+# 向后兼容：保留常量名，但改为使用 getter 函数
+# 注意：这仍然在模块导入时求值，但大多数场景下是正确的
+# 对于多 Profile 场景，请使用 _get_hermes_config_path()
+_HERMES_CONFIG_PATH = _get_hermes_config_path()
 
 _RELOAD_CACHE_TTL = 5.0  # 运行时可变配置的缓存 TTL（秒）
 
@@ -154,8 +170,10 @@ class Config:
     def _load(self) -> dict[str, Any]:
         if self._raw is not None:
             return self._raw
-        if _HERMES_CONFIG_PATH.exists():
-            text = _HERMES_CONFIG_PATH.read_text(encoding="utf-8")
+        # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
+        config_path = _get_hermes_config_path()
+        if config_path.exists():
+            text = config_path.read_text(encoding="utf-8")
             self._raw = yaml.safe_load(text) or {}
         else:
             self._raw = {}
@@ -171,8 +189,10 @@ class Config:
         now = time.monotonic()
         if self._reload_cache is not None and (now - self._reload_cache_at) < _RELOAD_CACHE_TTL:
             return self._reload_cache
-        if _HERMES_CONFIG_PATH.exists():
-            text = _HERMES_CONFIG_PATH.read_text(encoding="utf-8")
+        # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
+        config_path = _get_hermes_config_path()
+        if config_path.exists():
+            text = config_path.read_text(encoding="utf-8")
             self._reload_cache = yaml.safe_load(text) or {}
         else:
             self._reload_cache = {}
