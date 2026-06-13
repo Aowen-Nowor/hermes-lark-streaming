@@ -11,3 +11,4 @@ tests/samples/
 .mypy_cache/
 .ruff_cache/
 .deps/
+.local-backup/

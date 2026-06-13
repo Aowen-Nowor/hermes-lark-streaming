@@ -516,6 +516,42 @@ class TestOnMessageInterrupted:
         assert result is None
         ctrl.on_interrupted.assert_not_called()
 
+    def test_completing_session_skips_abort(self) -> None:
+        """Hotfix: 如果旧 session 已经在 COMPLETING 状态(on_completed 已触发),
+        on_interrupted 应短路退出,不调 abort 路径,避免卡片被覆盖成"已停止"。
+
+        Reproduces: gateway.log 中看到 "on_interrupted: abort old msg=...
+        (after flush wait)" 紧跟 "linear complete with fallback failed"
+        的链路 — 就是因为没检查 COMPLETING 状态。
+        """
+        # Mock 一个 CardSession-like 对象,state="completing" 模拟 drain 阶段
+        completing_session = SimpleNamespace(
+            state="completing",
+            _was_aborted=False,
+            error_message=None,
+            flush=MagicMock(_flush_in_progress=False),
+        )
+        ctrl = _make_ctrl(enabled=True)
+        ctrl._get_active_session = MagicMock(return_value=completing_session)
+
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
+            on_message_interrupted(
+                message_id="completing_msg",
+                new_message_id="new_msg",
+                chat_id="c1",
+                anchor_id="a1",
+            )
+
+        # 关键断言: 不应该 mark aborted,也不应该改 state
+        assert completing_session._was_aborted is False, (
+            "COMPLETING session must NOT be marked as aborted"
+        )
+        assert completing_session.state == "completing", (
+            "COMPLETING session state must not be overwritten"
+        )
+        # _complete_session 也不应该被调
+        ctrl._complete_session.assert_not_called()
+
 
 # ── on_cron_deliver (async) ──
 
