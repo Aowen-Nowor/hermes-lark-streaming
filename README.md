@@ -18,8 +18,6 @@ English | <a href="README.zh-CN.md">中文版</a>
 
 Feishu/Lark CardKit v2.0 streaming cards plugin for Hermes Agent — real-time AI response display with typing effect, unified collapsible panel, chronological reasoning/tool display, and more.
 
-> **Note**: When a streaming card completes, the card's summary text (shown in the Feishu conversation list) is automatically updated from "处理中..." to a snippet of the answer content (or reasoning text as fallback). Per Feishu CardKit 2.0 documentation, the conversation list preview is **atomically** updated when `streaming_mode` transitions from `true` to `false` — the `summary.content` must be included in the `close_streaming` request itself. Both `content` and `i18n_content` (zh_cn + en_us) are updated to ensure the conversation list reflects the completed card's actual content for all users, regardless of their Feishu language setting.
-
 > Based on [Cheerwhy/hermes-lark-streaming](https://github.com/Cheerwhy/hermes-lark-streaming) v0.7.0, with extensive refactoring and optimizations
 >
 > ⚠️ **Incompatible with the upstream plugin** — if you have the original `Cheerwhy/hermes-lark-streaming` installed, please uninstall it first before installing this version.
@@ -28,10 +26,10 @@ Feishu/Lark CardKit v2.0 streaming cards plugin for Hermes Agent — real-time A
 
 ## Effect Preview
 
-<img src="assets/img1.png" width="22%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
-<img src="assets/img2.png" width="22%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
-<img src="assets/img3.png" width="22%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
-<img src="assets/img4.png" width="22%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
+<img src="assets/img1.png" width="20%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
+<img src="assets/img2.png" width="20%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
+<img src="assets/img3.png" width="20%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
+<img src="assets/img4.png" width="20%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
 
 ---
 
@@ -148,6 +146,13 @@ hermes_lark_streaming:
 
 When `inject_time: true`, the plugin prepends `<time>HH:MM:SS</time>` to each user message so the AI can perceive the current time without calling `date`. XML tags are used because LLMs understand them as metadata and won't mimic them in output. Prefix-cache safe (~6 tokens/message). See [SKILL.md](docs/SKILL.md) for full details.
 
+### Reasoning Panel Display
+
+```yaml
+display:
+  show_reasoning: true  # Show reasoning content in the unified panel
+```
+
 ### Feishu Credentials
 
 | Priority | Source | Example |
@@ -161,13 +166,6 @@ When `inject_time: true`, the plugin prepends `<time>HH:MM:SS</time>` to each us
 FEISHU_APP_ID=cli_xxxxxx
 FEISHU_APP_SECRET=xxxxxx
 FEISHU_BASE_URL=https://open.feishu.cn/open-apis
-```
-
-### Reasoning Panel Display
-
-```yaml
-display:
-  show_reasoning: true  # Show reasoning content in the unified panel
 ```
 
 ---

@@ -61,8 +61,11 @@ jobs:
           if [ "$SHA_BEFORE" != "$SHA_AFTER" ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
             git diff --name-only "$SHA_BEFORE" "$SHA_AFTER" > changed_files.txt
+            # 提取提交日志（oneline 格式，最多 10 条）
+            git log "$SHA_BEFORE".."$SHA_AFTER" --pretty=format:"%s" --max-count=10 > commit_log.txt
           else
             echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "" > commit_log.txt
           fi
 
       - name: Set up Python

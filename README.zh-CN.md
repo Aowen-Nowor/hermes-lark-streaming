@@ -18,8 +18,6 @@
 
 为 Hermes Agent 提供飞书/Lark CardKit v2.0 流式消息卡片插件 — 实时 AI 响应展示，支持打字机效果、统一可折叠面板、按时间线交错显示推理与工具调用等。
 
-> **提示**：流式卡片完成时，卡片的摘要文本（在飞书会话列表中显示）会自动从"处理中..."更新为回答内容的摘要（如无回答则使用推理文本作为回退）。根据飞书 CardKit 2.0 文档，会话列表预览在 `streaming_mode` 从 `true` 变为 `false` 时**原子地**更新——`summary.content` 必须包含在 `close_streaming` 请求本身中。同时更新 `content` 和 `i18n_content`（zh_cn + en_us），确保无论用户的飞书语言设置如何，会话列表都能正确显示已完成卡片的实际内容。
-
 > 基于 [Cheerwhy/hermes-lark-streaming](https://github.com/Cheerwhy/hermes-lark-streaming) v0.7.0 版本 fork 后进行改造和优化
 >
 > ⚠️ **与上游插件不兼容** — 如已安装原版 `Cheerwhy/hermes-lark-streaming`，请先卸载后再安装本插件。
@@ -28,10 +26,10 @@
 
 ## 效果预览
 
-<img src="assets/img1.png" width="22%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
-<img src="assets/img2.png" width="22%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
-<img src="assets/img3.png" width="22%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
-<img src="assets/img4.png" width="22%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
+<img src="assets/img1.png" width="20%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
+<img src="assets/img2.png" width="20%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
+<img src="assets/img3.png" width="20%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
+<img src="assets/img4.png" width="20%" style="max-height: 250px; object-fit: contain; margin: 5px;" />
 
 ---
 
@@ -143,6 +141,13 @@ hermes_lark_streaming:
 
 开启 `inject_time: true` 后，插件在每条用户消息前添加 `<time>HH:MM:SS</time>` 时间前缀，让 AI 无需调用 `date` 工具即可感知当前时间。使用 XML 标签是因为 LLM 普遍将其理解为结构化元数据，不会在回复中模仿。Prefix Cache 安全（每条约 6 tokens）。详见 [SKILL.md](docs/SKILL.md)。
 
+### 推理面板显示
+
+```yaml
+display:
+  show_reasoning: true  # 在统一面板中显示推理内容
+```
+
 ### 飞书凭据
 
 | 优先级 | 来源 | 示例 |
@@ -156,13 +161,6 @@ hermes_lark_streaming:
 FEISHU_APP_ID=cli_xxxxxx
 FEISHU_APP_SECRET=xxxxxx
 FEISHU_BASE_URL=https://open.feishu.cn/open-apis
-```
-
-### 推理面板显示
-
-```yaml
-display:
-  show_reasoning: true  # 在统一面板中显示推理内容
 ```
 
 ---

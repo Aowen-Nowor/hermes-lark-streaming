@@ -146,6 +146,33 @@ try:
 except Exception:
     print("无变更文件记录")
 
+print("\n" + "=" * 60)
+print("📝 提交日志:")
+print("=" * 60)
+try:
+    with open("commit_log.txt", "r") as f:
+        print(f.read())
+except Exception:
+    print("无提交日志")
+
+
+# ── 读取提交日志 ──
+
+commit_lines = []
+try:
+    with open("commit_log.txt", "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                commit_lines.append(line)
+except Exception:
+    pass
+
+commit_summary = ""
+if commit_lines:
+    # 飞书卡片单条消息过长会被截断，限制每条 80 字符
+    items = [f"> `{c[:80]}`" for c in commit_lines]
+    commit_summary = "\n".join(items)
 
 # ── 构建飞书卡片 ──
 
@@ -164,6 +191,17 @@ elements = [
         },
     },
 ]
+
+# 提交说明区块
+if commit_summary:
+    elements.append({"tag": "hr"})
+    elements.append({
+        "tag": "div",
+        "text": {
+            "tag": "lark_md",
+            "content": f"**📝 提交说明**:\n{commit_summary}",
+        },
+    })
 
 # 只有失败时才展示失败文件列表
 if failed_summary:

@@ -56,7 +56,7 @@ _DEFAULT_STREAMING_CONFIG: dict[str, Any] = {
     "inject_time": False,
     "footer": {
         "fields": [
-            ["status", "elapsed", "model", "compression_exhausted"],
+            ["status", "elapsed", "model", "cost", "compression_exhausted"],
         ],
         "show_label": False,
     },
