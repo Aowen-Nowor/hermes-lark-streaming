@@ -103,6 +103,10 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
     @functools.wraps(orig)
     async def wrapper(self, event, source, *args, **kwargs):
+        platform_name = getattr(getattr(source, "platform", None), "value", "").lower()
+        if platform_name not in ("feishu", "lark"):
+            return await orig(self, event, source, *args, **kwargs)
+
         mid = event.message_id
         anchor_id = self._reply_anchor_for_event(event)
         chat_id = source.chat_id if hasattr(source, "chat_id") else ""
