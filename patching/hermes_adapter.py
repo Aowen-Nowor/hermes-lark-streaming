@@ -80,10 +80,23 @@ class HermesCompat:
             _logger.debug("HLS: AIAgent not available yet")
         
         # FeishuAdapter
-        try:
-            from gateway.platforms.feishu import FeishuAdapter
-            self.feishu_adapter_class = FeishuAdapter
-        except (ImportError, AttributeError):
+        # CRITICAL: The gateway loads feishu adapter via hermes_plugins namespace
+        # (importlib creates a separate module object). Patching plugins.platforms.feishu.adapter
+        # won't affect the gateway's instance. We MUST find the class through hermes_plugins.
+        _feishu_import_paths = [
+            ("hermes_plugins.feishu_platform.adapter", "FeishuAdapter"),
+            ("gateway.platforms.feishu", "FeishuAdapter"),
+            ("plugins.platforms.feishu.adapter", "FeishuAdapter"),
+        ]
+        for _mod_path, _cls_name in _feishu_import_paths:
+            try:
+                mod = importlib.import_module(_mod_path)
+                if hasattr(mod, _cls_name):
+                    self.feishu_adapter_class = getattr(mod, _cls_name)
+                    break
+            except (ImportError, AttributeError):
+                continue
+        if self.feishu_adapter_class is None:
             _logger.debug("HLS: FeishuAdapter not available")
         
         # Cron scheduler
