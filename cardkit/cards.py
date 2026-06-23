@@ -139,11 +139,22 @@ def _enforce_card_element_limit(
                 hint_idx = i
                 break
         if hint_idx is not None:
+            # Parse existing trimmed count from hint, then add new trimmed count
+            # e.g. "⚡ 还有 5 项已折叠" → existing_count=5, trimmed_count=3 → "⚡ 还有 8 项已折叠"
             old_hint = children[hint_idx]["content"]
-            # Remove the exact suffix "已折叠" (not char-by-char like rstrip)
-            # and append new count. removesuffix is exact-match, safe for CJK.
-            base = old_hint.removesuffix("已折叠")
-            children[hint_idx]["content"] = base + f"、{trimmed_count} 项已折叠"
+            # Extract the number before "项" — simple string parsing, no regex needed
+            existing_count = 0
+            _idx = old_hint.find("项")
+            if _idx > 0:
+                # Walk backwards to find the number
+                _end = _idx
+                _start = _end
+                while _start > 0 and old_hint[_start - 1].isdigit():
+                    _start -= 1
+                if _start < _end:
+                    existing_count = int(old_hint[_start:_end])
+            total_trimmed = existing_count + trimmed_count
+            children[hint_idx]["content"] = f"⚡ 还有 {total_trimmed} 项已折叠"
         else:
             children.insert(0, {
                 "tag": "markdown",

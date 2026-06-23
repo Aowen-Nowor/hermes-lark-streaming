@@ -351,10 +351,12 @@ def _truncate_reasoning(text: str) -> str:
     """截断过长推理文本，防止飞书渲染卡顿.
 
     所有推理文本渲染路径都应调用此函数，确保截断逻辑一致。
+    保证返回值总长度不超过 _REASONING_DISPLAY_LIMIT。
     """
-    if len(text) > _REASONING_DISPLAY_LIMIT:
-        return text[:_REASONING_DISPLAY_LIMIT] + "\n\n... (已截断，共 {} 字)".format(len(text))
-    return text
+    if len(text) <= _REASONING_DISPLAY_LIMIT:
+        return text
+    suffix = "\n\n... (已截断，共 {} 字)".format(len(text))
+    return text[:_REASONING_DISPLAY_LIMIT - len(suffix)] + suffix
 
 
 def build_panel_children(

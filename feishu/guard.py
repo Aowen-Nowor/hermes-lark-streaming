@@ -65,6 +65,9 @@ def _get_cached_code(message_id: str | None) -> int | None:
         return entry.get("code") if entry else None
 
 
+_RE_API_CODE = re.compile(r"code[=:]\s*(\d+)")
+
+
 def extract_api_code(err: Exception | None) -> int | None:
     """从异常中提取 API 错误码."""
     if err is None:
@@ -77,7 +80,7 @@ def extract_api_code(err: Exception | None) -> int | None:
         first = err.args[0]
         if isinstance(first, str):
             # 尝试从字符串中提取 code=数字
-            match = re.search(r"code[=:]\s*(\d+)", first)
+            match = _RE_API_CODE.search(first)
             if match:
                 return int(match.group(1))
     return None

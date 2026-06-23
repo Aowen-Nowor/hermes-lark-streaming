@@ -274,11 +274,28 @@ def _apply_gateway_runner_patches() -> bool:
         return False  # Not available yet
 
     try:
-        GatewayRunner._handle_message = _wrap_handle_message(GatewayRunner._handle_message)
-        GatewayRunner._handle_message_with_agent = _wrap_handle_message_with_agent(
-            GatewayRunner._handle_message_with_agent
-        )
-        GatewayRunner._run_agent = _wrap_run_agent(GatewayRunner._run_agent)
+        # Patch each method individually so one missing method
+        # doesn't prevent the others from being patched.
+        _patched_methods = []
+        if hasattr(GatewayRunner, '_handle_message'):
+            GatewayRunner._handle_message = _wrap_handle_message(GatewayRunner._handle_message)
+            _patched_methods.append('_handle_message')
+        else:
+            _logger.warning("hermes-lark-streaming: GatewayRunner._handle_message not found, skipping patch")
+
+        if hasattr(GatewayRunner, '_handle_message_with_agent'):
+            GatewayRunner._handle_message_with_agent = _wrap_handle_message_with_agent(
+                GatewayRunner._handle_message_with_agent
+            )
+            _patched_methods.append('_handle_message_with_agent')
+        else:
+            _logger.warning("hermes-lark-streaming: GatewayRunner._handle_message_with_agent not found, skipping patch")
+
+        if hasattr(GatewayRunner, '_run_agent'):
+            GatewayRunner._run_agent = _wrap_run_agent(GatewayRunner._run_agent)
+            _patched_methods.append('_run_agent')
+        else:
+            _logger.warning("hermes-lark-streaming: GatewayRunner._run_agent not found, skipping patch")
 
         # ── Background task patch ──
         # Wraps _run_background_task to inject START/COMPLETE hooks
@@ -287,11 +304,22 @@ def _apply_gateway_runner_patches() -> bool:
             GatewayRunner._run_background_task = _wrap_run_background_task(
                 GatewayRunner._run_background_task
             )
-            _logger.info("hermes-lark-streaming: GatewayRunner._run_background_task patched ✓")
+            _patched_methods.append('_run_background_task')
         except AttributeError:
             _logger.debug("hermes-lark-streaming: _run_background_task not found, background cards disabled")
 
+        if not _patched_methods:
+            _logger.error(
+                "hermes-lark-streaming: GatewayRunner patch FAILED — "
+                "no methods found. Streaming cards will NOT work."
+            )
+            return False
+
         _gw_runner_patched = True
+        _logger.info(
+            "hermes-lark-streaming: GatewayRunner patched methods: %s",
+            ', '.join(_patched_methods),
+        )
         return True
     except (ImportError, AttributeError) as e:
         _logger.error(

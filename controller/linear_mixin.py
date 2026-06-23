@@ -1203,7 +1203,19 @@ class UnifiedControllerMixin:
                                 break
                         if hint_idx is not None:
                             old_hint = children[hint_idx]["content"]
-                            children[hint_idx]["content"] = old_hint.rstrip("已折叠") + f"、{trimmed_count} 项已折叠"
+                            # Parse existing trimmed count, then add new count
+                            # (same logic as _enforce_card_element_limit in cards.py)
+                            existing_count = 0
+                            _idx = old_hint.find("项")
+                            if _idx > 0:
+                                _end = _idx
+                                _start = _end
+                                while _start > 0 and old_hint[_start - 1].isdigit():
+                                    _start -= 1
+                                if _start < _end:
+                                    existing_count = int(old_hint[_start:_end])
+                            total_trimmed = existing_count + trimmed_count
+                            children[hint_idx]["content"] = f"⚡ 还有 {total_trimmed} 项已折叠"
                         else:
                             children.insert(0, {
                                 "tag": "markdown",
