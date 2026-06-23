@@ -1,4 +1,4 @@
-## v1.3.0 (2026-06-24)
+## v1.2.1 (2026-06-24)
 
 | 类型 | 问题/功能 | 原因 | 修复/说明 |
 |------|-----------|------|-----------|
@@ -29,7 +29,7 @@
 | 🔧 Fix | 错误卡片未显示调试 ID | `_build_error_panel` 调用时未传 `card_trace_id`，错误卡片不显示调试 ID，用户报 issue 时无法提供 trace 关联日志 | `build_unified_complete_card`/`build_preservative_seal_actions` 加 `card_trace_id` 参数，传给 `_build_error_panel`。错误卡片显示"调试 ID: xxx"并提示"如果反复出错，请把调试 ID 反馈给开发者" |
 | 🔧 Fix | 错误卡片技术详情区显示 HTML 标签乱码 | v1.1.0 错误面板用 `<details><summary>` HTML 标签实现折叠，但飞书 markdown 组件不支持 HTML 标签，标签会显示成乱码文本 | 去掉 `<details>` 标签，技术详情用分隔线 + 标题区分。外层 `collapsible_panel` 已提供折叠能力，无需嵌套 HTML 标签 |
 
-> **延后到 v1.3.0**：TextState 死方法精简（C3）、prune 日志显示更长 msg_id（M1）、on_completed 日志降级（M2）、`_sessions` 并发锁（M3）、Config `on_reload()` dead code 清理、`patching._get_config()` 缓存简化。
+> **延后到 v1.3.0**：TextState 死方法精简（C3）、prune 日志显示更长 msg_id（M1）、on_completed 日志降级（M2）、`_sessions` 并发锁（M3，已在 v1.2.1 部分修复）、Config `on_reload()` dead code 清理、`patching._get_config()` 缓存简化。
 
 ---
 

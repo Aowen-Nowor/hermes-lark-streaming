@@ -154,7 +154,7 @@ hermes_lark_streaming:
   inject_time: false
   print_strategy: delay
   header:
-    enabled: false              # v1.3.0：卡片头部（默认关）
+    enabled: false              # v1.2.1：卡片头部（默认关）
   footer:
     show_label: false
     fields:
