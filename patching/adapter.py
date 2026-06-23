@@ -7,7 +7,8 @@ Split from monkey_patch.py — contains:
   - _wrap_feishu_adapter_edit()
   - _REACTION_STATUS_MAP / _wrap_feishu_adapter_add_reaction() / _wrap_feishu_adapter_delete_reaction()
   - _clarify_* registry / _wrap_feishu_adapter_send_clarify()
-  - _wrap_feishu_card_action_trigger() / _handle_clarify_card_action() / _schedule_confirm_card()
+  - _wrap_feishu_adapter_send_exec_approval()
+  - _wrap_feishu_card_action_trigger() / _handle_clarify_card_action() / _handle_approval_card_action()
 """
 
 from __future__ import annotations
@@ -484,6 +485,98 @@ def _wrap_feishu_adapter_delete_reaction(orig_delete_reaction: Callable) -> Call
     return _intercepted_delete_reaction
 
 
+# ── Approval interactive card registry ────────────────────────────────
+# Stores CardKit approval cards sent by this plugin. Hermes keeps the
+# authoritative session state in the adapter's own _approval_state.
+_approval_card_msg_ids: dict[int, str] = {}
+
+
+def _send_result(success: bool, message_id: str | None = None, error: str | None = None):
+    try:
+        from gateway.platforms.base import SendResult
+        return SendResult(success=success, message_id=message_id, error=error)
+    except (ImportError, AttributeError):
+        return None
+
+
+def _wrap_feishu_adapter_send_exec_approval(orig_send_exec_approval: Callable) -> Callable:
+    """Intercept ``FeishuAdapter.send_exec_approval()`` — render CardKit 2.0 approval card."""
+
+    async def _intercepted_send_exec_approval(
+        self_feishu,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: dict[str, Any] | None = None,
+        **kwargs,
+    ):
+        _logger.info(
+            "approval card: send_exec_approval intercepted chat=%s description=%r",
+            (chat_id or "?")[:12],
+            description,
+        )
+        try:
+            from ..controller import get_controller
+            from ..cardkit import build_approval_card
+
+            ctrl = get_controller()
+            if not ctrl or not ctrl.enabled or not ctrl._client_ok():
+                _logger.debug("approval card: controller unavailable, falling back")
+                return await orig_send_exec_approval(
+                    self_feishu,
+                    chat_id,
+                    command,
+                    session_key,
+                    description=description,
+                    metadata=metadata,
+                    **kwargs,
+                )
+
+            approval_id = next(self_feishu._approval_counter)
+            card = build_approval_card(
+                command=command,
+                description=description,
+                approval_id=approval_id,
+            )
+            reply_to = None
+            if metadata and isinstance(metadata, dict):
+                reply_to = metadata.get("reply_to") or metadata.get("message_id")
+            if reply_to:
+                card_msg_id = await ctrl._client.reply_card(reply_to, card)
+            else:
+                card_msg_id = await ctrl._client.send_card_to_chat(chat_id, card)
+
+            if card_msg_id:
+                self_feishu._approval_state[approval_id] = {
+                    "session_key": session_key,
+                    "message_id": card_msg_id,
+                    "chat_id": chat_id,
+                }
+                _approval_card_msg_ids[approval_id] = card_msg_id
+                _register_gateway_card(card_msg_id, chat_id=chat_id, card_id=None, category="approval")
+
+            _logger.info(
+                "approval card: card sent approval_id=%s card_msg_id=%s",
+                approval_id,
+                (card_msg_id or "?")[:12],
+            )
+            return _send_result(True, message_id=card_msg_id)
+        except Exception as exc:
+            _logger.warning("approval card: failed, falling back to original: %s", exc, exc_info=True)
+            return await orig_send_exec_approval(
+                self_feishu,
+                chat_id,
+                command,
+                session_key,
+                description=description,
+                metadata=metadata,
+                **kwargs,
+            )
+
+    return _intercepted_send_exec_approval
+
+
 # ── Clarify interactive card registry ──────────────────────────────────
 # Stores the choices list for each clarify_id so the card action callback
 # handler can look up the choice text from the option index.
@@ -623,7 +716,10 @@ def _wrap_feishu_card_action_trigger(original_method: Callable) -> Callable:
         action_value = getattr(action, "value", {}) or {}
 
         clarify_action = action_value.get("hermes_clarify_action") if isinstance(action_value, dict) else None
+        approval_action = action_value.get("hermes_action") if isinstance(action_value, dict) else None
 
+        if approval_action and "approval_id" in action_value:
+            return _handle_approval_card_action(self, data, action_value)
         if clarify_action:
             return _handle_clarify_card_action(self, data, clarify_action, action_value)
 
@@ -631,6 +727,89 @@ def _wrap_feishu_card_action_trigger(original_method: Callable) -> Callable:
         return original_method(self, data)
 
     return _wrapped
+
+
+def _get_callback_classes(adapter_instance):
+    module = __import__(adapter_instance.__class__.__module__, fromlist=["CallBackCard", "P2CardActionTriggerResponse"])
+    response_cls = getattr(module, "P2CardActionTriggerResponse", None)
+    card_cls = getattr(module, "CallBackCard", None)
+    if response_cls is not None and card_cls is not None:
+        return response_cls, card_cls
+    try:
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            CallBackCard,
+            P2CardActionTriggerResponse,
+        )
+        return P2CardActionTriggerResponse, CallBackCard
+    except ImportError:
+        return None, None
+
+
+def _handle_approval_card_action(adapter_instance, data: Any, action_value: dict) -> Any:
+    """Handle CardKit approval callback and return a resolved CardKit card."""
+    P2CardActionTriggerResponse, CallBackCard = _get_callback_classes(adapter_instance)
+
+    def _empty_response():
+        if P2CardActionTriggerResponse is None:
+            return None
+        return P2CardActionTriggerResponse()
+
+    approval_id = action_value.get("approval_id")
+    if approval_id is None:
+        _logger.debug("approval card: callback missing approval_id")
+        return _empty_response()
+
+    state = getattr(adapter_instance, "_approval_state", {}).get(approval_id)
+    if not state:
+        _logger.debug("approval card: approval %s already resolved or unknown", approval_id)
+        return _empty_response()
+
+    event = getattr(data, "event", None)
+    operator = getattr(event, "operator", None)
+    open_id = str(getattr(operator, "open_id", "") or "")
+    user_name = str(getattr(operator, "name", "") or getattr(operator, "tenant_key", "") or open_id or "用户")
+    if hasattr(adapter_instance, "_is_interactive_operator_authorized"):
+        if not adapter_instance._is_interactive_operator_authorized(open_id):
+            _logger.warning("approval card: unauthorized click by %s", open_id or "<unknown>")
+            return _empty_response()
+
+    choice_map = {
+        "approve_once": "once",
+        "approve_session": "session",
+        "approve_always": "always",
+        "deny": "deny",
+    }
+    choice = choice_map.get(action_value.get("hermes_action"), "deny")
+
+    loop = getattr(adapter_instance, "_loop", None)
+    if loop is not None:
+        try:
+            from agent.async_utils import safe_schedule_threadsafe
+            safe_schedule_threadsafe(
+                adapter_instance._resolve_approval(approval_id, choice, user_name),
+                loop,
+                logger=_logger,
+                log_message="approval card: failed to schedule approval resolution",
+                log_level=logging.WARNING,
+            )
+        except Exception as exc:
+            _logger.warning("approval card: resolution scheduling failed: %s", exc)
+            return _empty_response()
+    else:
+        _logger.warning("approval card: adapter loop unavailable")
+        return _empty_response()
+
+    if P2CardActionTriggerResponse is None or CallBackCard is None:
+        return _empty_response()
+    from ..cardkit import build_approval_resolved_card
+
+    response = P2CardActionTriggerResponse()
+    card = CallBackCard()
+    card.type = "raw"
+    card.data = build_approval_resolved_card(choice=choice, user_name=user_name)
+    response.card = card
+    _approval_card_msg_ids.pop(approval_id, None)
+    return response
 
 
 async def _schedule_confirm_card(*, cid: str) -> None:

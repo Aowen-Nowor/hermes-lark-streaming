@@ -23,6 +23,8 @@ __all__ = [
     'build_clarify_card',
     'build_clarify_submitted_card',
     'build_clarify_confirmed_card',
+    'build_approval_card',
+    'build_approval_resolved_card',
 ]
 
 def build_cron_card(content: str) -> dict[str, Any]:
@@ -108,6 +110,109 @@ def build_gateway_card(
         card["header"] = _build_header(header_status)
 
     return card
+
+
+def build_approval_card(
+    *,
+    command: str,
+    description: str,
+    approval_id: int,
+) -> dict[str, Any]:
+    """构建命令审批卡片 — CardKit JSON 2.0."""
+    cmd_preview = command[:3000] + "..." if len(command) > 3000 else command
+
+    def _button(label: str, action_name: str, button_type: str = "default") -> dict[str, Any]:
+        return {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": label},
+            "type": button_type,
+            "behaviors": [{
+                "type": "callback",
+                "value": {"hermes_action": action_name, "approval_id": approval_id},
+            }],
+        }
+
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "icon": {
+                "tag": "standard_icon",
+                "token": "warning_outlined",
+                "size": "20px 20px",
+                "color": "orange",
+            },
+            "text": {"tag": "lark_md", "content": "**命令审批确认**"},
+        },
+        {
+            "tag": "markdown",
+            "content": f"```\n{cmd_preview}\n```\n**原因：** {description}",
+        },
+        {
+            "tag": "action",
+            "actions": [
+                _button("允许一次", "approve_once", "primary"),
+                _button("本次会话", "approve_session"),
+                _button("始终允许", "approve_always"),
+                _button("拒绝", "deny", "danger"),
+            ],
+        },
+    ]
+    return {
+        "schema": "2.0",
+        "config": {
+            "streaming_mode": False,
+            "locales": _LOCALES,
+            "summary": {"content": "命令审批确认"},
+        },
+        "header": {
+            "title": {"content": "命令审批确认", "tag": "plain_text"},
+            "template": "orange",
+        },
+        "body": {"elements": elements},
+    }
+
+
+def build_approval_resolved_card(
+    *,
+    choice: str,
+    user_name: str,
+) -> dict[str, Any]:
+    """构建审批完成态卡片 — CardKit JSON 2.0."""
+    label_map = {
+        "once": "已允许一次",
+        "session": "已允许本次会话",
+        "always": "已始终允许",
+        "deny": "已拒绝",
+    }
+    denied = choice == "deny"
+    label = label_map.get(choice, "已处理")
+    icon_token = "close_outlined" if denied else "resolve_filled"
+    color = "red" if denied else "green"
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "icon": {
+                "tag": "standard_icon",
+                "token": icon_token,
+                "size": "20px 20px",
+                "color": color,
+            },
+            "text": {"tag": "lark_md", "content": f"**{label}** 由 {user_name} 操作"},
+        }
+    ]
+    return {
+        "schema": "2.0",
+        "config": {
+            "streaming_mode": False,
+            "locales": _LOCALES,
+            "summary": {"content": label},
+        },
+        "header": {
+            "title": {"content": label, "tag": "plain_text"},
+            "template": "red" if denied else "green",
+        },
+        "body": {"elements": elements},
+    }
 
 
 def build_clarify_card(

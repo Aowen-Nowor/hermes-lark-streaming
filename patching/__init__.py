@@ -87,6 +87,7 @@ __all__ = [
     '_wrap_feishu_adapter_edit',
     '_wrap_feishu_adapter_add_reaction',
     '_wrap_feishu_adapter_delete_reaction',
+    '_wrap_feishu_adapter_send_exec_approval',
     '_wrap_feishu_adapter_send_clarify',
     '_wrap_feishu_card_action_trigger',
     '_handle_clarify_card_action',
@@ -216,6 +217,7 @@ from .adapter import (  # noqa: E402
     _wrap_feishu_adapter_edit,
     _wrap_feishu_adapter_add_reaction,
     _wrap_feishu_adapter_delete_reaction,
+    _wrap_feishu_adapter_send_exec_approval,
     _wrap_feishu_adapter_send_clarify,
     _wrap_feishu_card_action_trigger,
     _handle_clarify_card_action,
@@ -484,6 +486,13 @@ def apply_patches() -> None:
             # The three zombie functions (_try_add_image_to_session,
             # _wrap_feishu_adapter_send_image_file, _wrap_feishu_adapter_send_image)
             # have been fully removed from patching/ sub-package.
+
+            # ── Approval interactive card patches ──
+            try:
+                FeishuAdapter.send_exec_approval = _wrap_feishu_adapter_send_exec_approval(FeishuAdapter.send_exec_approval)
+                _logger.info("hermes-lark-streaming: FeishuAdapter.send_exec_approval patched ✓ (approval CardKit card)")
+            except AttributeError:
+                _logger.debug("hermes-lark-streaming: FeishuAdapter.send_exec_approval not found, approval card skipped")
 
             # ── Clarify interactive card patches ──
             # Patch send_clarify to render interactive CardKit cards instead of
