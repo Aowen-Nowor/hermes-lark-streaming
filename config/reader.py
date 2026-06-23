@@ -158,11 +158,13 @@ class Config:
     def flush_interval_ms(self) -> float:
         """流式卡片刷新间隔（毫秒），用于诊断日志.
 
-        最小值 70ms：对齐飞书 CardKit 官方默认 print_frequency_ms（70ms），
-        避免服务端 flush 间隔低于客户端渲染间隔导致过度缓冲或频控问题。
+        默认值 200ms（v1.2.1 从 100ms 上调）：生产日志显示单次对话
+        571 次 API 调用（每 ~500ms 实际间隔），用户感知上 200ms 和
+        100ms 的打字机效果无差别，但 API 调用量减半。
+        最小值 70ms：对齐飞书 CardKit 官方默认 print_frequency_ms。
         """
         sec = self._plugin_sec()
-        ms = float(sec.get("flush_interval_ms", 100))
+        ms = float(sec.get("flush_interval_ms", 200))
         return max(70.0, min(2000.0, ms))
 
     @property
@@ -330,8 +332,12 @@ class Config:
         # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
         config_path = _get_hermes_config_path()
         if config_path.exists():
-            text = config_path.read_text(encoding="utf-8")
-            self._raw = yaml.safe_load(text) or {}
+            try:
+                text = config_path.read_text(encoding="utf-8")
+                self._raw = yaml.safe_load(text) or {}
+            except yaml.YAMLError:
+                _logger.warning("HLS: config YAML syntax error in %s, using empty config", config_path)
+                self._raw = {}
         else:
             self._raw = {}
         return self._raw
@@ -349,8 +355,12 @@ class Config:
         # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
         config_path = _get_hermes_config_path()
         if config_path.exists():
-            text = config_path.read_text(encoding="utf-8")
-            self._reload_cache = yaml.safe_load(text) or {}
+            try:
+                text = config_path.read_text(encoding="utf-8")
+                self._reload_cache = yaml.safe_load(text) or {}
+            except yaml.YAMLError:
+                _logger.warning("HLS: config YAML syntax error in %s (reload), using empty config", config_path)
+                self._reload_cache = {}
         else:
             self._reload_cache = {}
         self._reload_cache_at = now

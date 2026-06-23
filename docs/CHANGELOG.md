@@ -7,6 +7,14 @@
 | 🐛 Bug Fix (P0-03) | 卡片元素裁剪计数偏差 + 折叠提示拼接错误 | 折叠提示预留空间硬编码为 1（不随模板变化）；`rstrip("已折叠")` 逐字符匹配会多删 CJK 字符 | 预计算折叠提示模板的实际 tag 数量（`_count_tag_objects`）；`rstrip` → `removesuffix`（精确后缀匹配） |
 | 🐛 Bug Fix (P0-04) | 监控计数器高并发丢数 | `_metrics["cards_created"] += 1` 非原子操作，多线程并发可丢失计数 | 新增 `threading.Lock`（`_metrics_lock`），所有 `record_*`/`set_*`/`get_metrics`/`_do_reset` 函数加锁 |
 | 🐛 Bug Fix (P0-05) | 可用性缓存无锁保护 + code=0 逻辑错误 | `_unavailable_cache` 字典并发读写可触发 `RuntimeError: dictionary changed size during iteration`；`or` 运算符吞掉 `code=0` | 新增 `threading.Lock`（`_unavailable_cache_lock`），`mark_unavailable`/`is_unavailable`/`_prune_cache` 加锁；新增 `_get_cached_code()` 线程安全读取函数；`or` → `is None` 精确判断 |
+| 🔧 Fix (P1-01) | 刷新频率过高 | 生产日志显示单次对话 571 次 API 调用（~500ms 间隔），用户感知上 200ms 与 100ms 打字机效果无差别 | `flush_interval_ms` 默认值从 100 上调至 200；answer-only 间隔从 70ms 上调至 150ms |
+| 🔧 Fix (P1-02) | 推理文本截断保护不一致 | 仅 timeline 路径的 in-progress reasoning 有 2000 字截断，其余 3 条渲染路径无截断保护，超长推理文本可致飞书 API 报错 | 提取 `_truncate_reasoning()` 函数（`cardkit/elements.py`），4 处推理文本渲染全部调用 |
+| 🔧 Fix (P1-03) | `hasattr()` 不检查可调用性 | `feishu/client.py` 用 `hasattr()` 检查 SDK `acontent` 方法，仅验证属性存在不验证可调用 | `hasattr()` → `callable(getattr(..., 'acontent', None))` |
+| 🔧 Fix (P1-04) | 后台任务标志并发不安全 | `_hls_bg_sending`/`_hls_cron_sending` 布尔标志在并发场景下，先结束的任务会重置标志，后结束的任务失去保护 | 布尔标志 → 计数器（`getattr(adapter, '_hls_bg_sending', 0) + 1`），读取处改为 `> 0` 判断 |
+| 🔧 Fix (P1-05) | 追问选项超过 26 个时标签变特殊符号 | `chr(ord("A") + 26)` = `[`，不是有效字母 | `i < 26` 时用字母标签，否则用数字标签（27, 28...） |
+| 🔧 Fix (P1-06) | 配置文件语法错误导致插件崩溃 | `yaml.safe_load()` 无 try/except，YAML 语法错误直接崩溃 | `_load()` 和 `_reload_cached()` 加 `try/except yaml.YAMLError`，解析失败用空配置继续运行 + 警告日志 |
+| 🔧 Fix (P1-07) | 流式 API 日志过于 verbose | 每次 `stream_element` 成功打 INFO 日志，单次会话可产生数十条 | `stream_element OK` 日志从 INFO 降为 DEBUG |
+| 🔧 Fix (P1-08) | 会话字典无上限导致内存泄漏 | `_interrupt_map` 无容量限制；`_clarify_*` 字典无 TTL 清理 | `_interrupt_map` 加 200 条上限；`_clarify_*` 加 30 分钟 TTL 清理（`_prune_expired_clarify()`） |
 
 ---
 

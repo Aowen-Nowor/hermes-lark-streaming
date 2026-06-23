@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Callable
 
 from .. import __version__
@@ -98,7 +99,7 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
         # the (now-wrapped) send method. In that case we should
         # NOT try to make another card — just send plain text.
         # Detection: cron/bg sets a flag on the adapter instance.
-        if getattr(self_feishu, "_hls_cron_sending", False) or getattr(self_feishu, "_hls_bg_sending", False):
+        if getattr(self_feishu, "_hls_cron_sending", 0) or getattr(self_feishu, "_hls_bg_sending", 0):
             return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
 
         # ── Agent path: suppress duplicate text reply ──
@@ -491,10 +492,28 @@ _clarify_choices: dict[str, list[str]] = {}  # clarify_id → choices list
 _clarify_questions: dict[str, str] = {}  # clarify_id → question text
 _clarify_card_msg_ids: dict[str, str] = {}  # clarify_id → card_msg_id (for server-side confirm update)
 _clarify_selections: dict[str, str] = {}  # clarify_id → user's selected/input text (for retry)
+_clarify_timestamps: dict[str, float] = {}  # clarify_id → creation time (for TTL cleanup)
+_CLARIFY_TTL_SEC = 30 * 60  # 30 分钟后未确认的追问自动清除
 
 # Backward-compatible aliases (old names used in tests)
 _clarify_answers = _clarify_selections  # noqa: F841
 _clarify_card_info = _clarify_card_msg_ids  # noqa: F841
+
+
+def _prune_expired_clarify() -> None:
+    """清理过期的追问数据（超过 _CLARIFY_TTL_SEC 未确认的条目）."""
+    if not _clarify_timestamps:
+        return
+    now = time.time()
+    expired = [cid for cid, ts in _clarify_timestamps.items() if now - ts > _CLARIFY_TTL_SEC]
+    for cid in expired:
+        _clarify_choices.pop(cid, None)
+        _clarify_questions.pop(cid, None)
+        _clarify_card_msg_ids.pop(cid, None)
+        _clarify_selections.pop(cid, None)
+        _clarify_timestamps.pop(cid, None)
+    if expired:
+        _logger.debug("HLS: pruned %d expired clarify entries", len(expired))
 
 
 def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
@@ -521,6 +540,9 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
             (clarify_id or "?")[:12],
         )
 
+        # Prune expired clarify data before creating new entries
+        _prune_expired_clarify()
+
         try:
             from ..controller import get_controller
             ctrl = get_controller()
@@ -543,6 +565,7 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
             if choices:
                 _clarify_choices[clarify_id] = list(choices)
             _clarify_questions[clarify_id] = question
+            _clarify_timestamps[clarify_id] = time.time()
 
             # Send the card via FeishuClient
             reply_to = None
@@ -712,6 +735,7 @@ async def _schedule_confirm_card(*, cid: str) -> None:
         _clarify_questions.pop(cid, None)
         _clarify_card_msg_ids.pop(cid, None)
         _clarify_selections.pop(cid, None)
+        _clarify_timestamps.pop(cid, None)
 
 
 def _handle_clarify_card_action(

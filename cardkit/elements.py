@@ -344,6 +344,19 @@ def build_panel_header(
     }
 
 
+_REASONING_DISPLAY_LIMIT = 2000  # 单条推理文本最大显示字数
+
+
+def _truncate_reasoning(text: str) -> str:
+    """截断过长推理文本，防止飞书渲染卡顿.
+
+    所有推理文本渲染路径都应调用此函数，确保截断逻辑一致。
+    """
+    if len(text) > _REASONING_DISPLAY_LIMIT:
+        return text[:_REASONING_DISPLAY_LIMIT] + "\n\n... (已截断，共 {} 字)".format(len(text))
+    return text
+
+
 def build_panel_children(
     *,
     reasoning_rounds: list,  # list of ReasoningRound objects
@@ -454,7 +467,7 @@ def build_panel_children(
                         "margin": "0px 0px 0px 22px",
                         "text": {
                             "tag": "lark_md",
-                            "content": round_.text,
+                            "content": _truncate_reasoning(round_.text),
                             "text_size": "notation",
                         },
                     })
@@ -471,16 +484,12 @@ def build_panel_children(
                 in_progress_idx, 0, finalized=False,
             ))
             if current_reasoning_text.strip():
-                # 截断过长推理文本，防止飞书渲染卡顿
-                display_text = current_reasoning_text
-                if len(display_text) > 2000:
-                    display_text = display_text[:2000] + "\n\n... (已截断，共 {} 字)".format(len(current_reasoning_text))
                 children.append({
                     "tag": "div",
                     "margin": "0px 0px 0px 22px",
                     "text": {
                         "tag": "lark_md",
-                        "content": display_text,
+                        "content": _truncate_reasoning(current_reasoning_text),
                         "text_size": "notation",
                     },
                 })
@@ -507,7 +516,7 @@ def build_panel_children(
                         "margin": "0px 0px 0px 22px",
                         "text": {
                             "tag": "lark_md",
-                            "content": round_.text,
+                            "content": _truncate_reasoning(round_.text),
                             "text_size": "notation",
                         },
                     })
@@ -524,7 +533,7 @@ def build_panel_children(
                         "margin": "0px 0px 0px 22px",
                         "text": {
                             "tag": "lark_md",
-                            "content": current_reasoning_text,
+                            "content": _truncate_reasoning(current_reasoning_text),
                             "text_size": "notation",
                         },
                     })

@@ -158,7 +158,7 @@ async def _fallback_write_answer(
 # Feishu at this interval, and Feishu renders it character-by-character
 # at print_frequency_ms pace.  We keep this at 70ms to align with the
 # official print_frequency_ms default, avoiding over-buffering.
-_ANSWER_FAST_STREAM_MS = 0.070
+_ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 70ms 上调）
 
 
 class UnifiedControllerMixin:

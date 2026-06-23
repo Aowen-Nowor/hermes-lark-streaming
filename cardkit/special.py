@@ -151,7 +151,7 @@ def build_clarify_card(
         # ── Markdown 全量展示选项列表 ──
         option_lines = []
         for i, choice in enumerate(choices):
-            label = chr(ord("A") + i)  # A, B, C, ...
+            label = chr(ord("A") + i) if i < 26 else str(i + 1)  # A-Z, then 27, 28...
             option_lines.append(f"{label}. {choice}")
         options_md = "\n".join(option_lines)
         elements.append({
@@ -162,7 +162,7 @@ def build_clarify_card(
         # ── 快速选择: select_static 下拉框（无 "其他" 选项） ──
         options: list[dict] = []
         for i, choice in enumerate(choices):
-            label = chr(ord("A") + i)
+            label = chr(ord("A") + i) if i < 26 else str(i + 1)  # A-Z, then 27, 28...
             options.append({
                 "text": {"tag": "plain_text", "content": f"{label}. {choice}"},
                 "value": str(i),

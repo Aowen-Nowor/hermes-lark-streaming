@@ -816,14 +816,17 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                 return await original_send(chat_id_send, content, **send_kwargs)
 
             adapter.send = _intercepting_send
-            adapter._hls_bg_sending = True
+            # Use counter instead of boolean flag — if two background tasks
+            # run concurrently on the same adapter, the first to finish must
+            # not reset the flag while the second is still running.
+            adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 0) + 1
 
         try:
             result = await orig(self, prompt, source, task_id, **kwargs)
         finally:
             if original_send and adapter:
                 adapter.send = original_send
-                adapter._hls_bg_sending = False
+                adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 1) - 1
 
         # ── Fire COMPLETE hook ──
         ctx = _msg_ctx.get()
@@ -997,14 +1000,13 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
             return await original_send(chat_id_send, content_text, **send_kwargs)
 
         feishu_adapter.send = _card_sending_send
-        # Set flag so the class-level send wrapper knows not to
-        # re-intercept cron's fallback plain-text sends.
-        feishu_adapter._hls_cron_sending = True
+        # Use counter instead of boolean flag — same rationale as _hls_bg_sending.
+        feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 0) + 1
         try:
             return orig(job, content, adapters=adapters, loop=loop, **kwargs)
         finally:
             feishu_adapter.send = original_send
-            feishu_adapter._hls_cron_sending = False
+            feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 1) - 1
 
     return wrapper
 

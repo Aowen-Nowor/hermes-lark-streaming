@@ -479,6 +479,13 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         for key, val in list(self._interrupt_map.items()):
             if val == old_message_id:
                 self._interrupt_map[key] = new_message_id
+        # Prevent unbounded growth: keep only the most recent 200 entries
+        _INTERRUPT_MAP_MAX = 200
+        if len(self._interrupt_map) > _INTERRUPT_MAP_MAX:
+            # Remove oldest entries (first inserted)
+            excess = len(self._interrupt_map) - _INTERRUPT_MAP_MAX
+            for old_key in list(self._interrupt_map.keys())[:excess]:
+                self._interrupt_map.pop(old_key, None)
 
     def on_completed(
         self,
