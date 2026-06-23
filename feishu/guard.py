@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -24,6 +25,7 @@ _TERMINAL_MESSAGE_CODES = {
 
 
 _unavailable_cache: dict[str, dict[str, Any]] = {}
+_unavailable_cache_lock = threading.Lock()
 _UNENHANCED_CACHE_TTL_SEC = 30 * 60  # 30 分钟 TTL
 
 
@@ -37,19 +39,30 @@ def _prune_cache() -> None:
 
 def mark_unavailable(message_id: str, code: int, operation: str = "") -> None:
     """标记消息为不可用."""
-    _unavailable_cache[message_id] = {
-        "code": code,
-        "operation": operation,
-        "at": time.time(),
-    }
+    with _unavailable_cache_lock:
+        _unavailable_cache[message_id] = {
+            "code": code,
+            "operation": operation,
+            "at": time.time(),
+        }
 
 
 def is_unavailable(message_id: str | None) -> bool:
     """检查消息是否已知不可用."""
     if not message_id:
         return False
-    _prune_cache()
-    return message_id in _unavailable_cache
+    with _unavailable_cache_lock:
+        _prune_cache()
+        return message_id in _unavailable_cache
+
+
+def _get_cached_code(message_id: str | None) -> int | None:
+    """线程安全地从缓存读取错误码（修复 code=0 被 or 吞掉的 bug）."""
+    if not message_id:
+        return None
+    with _unavailable_cache_lock:
+        entry = _unavailable_cache.get(message_id)
+        return entry.get("code") if entry else None
 
 
 def extract_api_code(err: Exception | None) -> int | None:
@@ -115,9 +128,11 @@ class UnavailableGuard:
 
         # 从错误码或缓存中判断
         if code is None and (is_unavailable(self._reply_to_message_id) or is_unavailable(card_msg_id)):
-            code = _unavailable_cache.get(self._reply_to_message_id or "", {}).get("code") or _unavailable_cache.get(
-                card_msg_id or "", {}
-            ).get("code")
+            # Fix: use is-None check instead of `or` — `0 or X` returns X,
+            # but code=0 is a valid error code that should not be skipped.
+            code = _get_cached_code(self._reply_to_message_id)
+            if code is None:
+                code = _get_cached_code(card_msg_id)
 
         if not is_terminal_api_code(code):
             return False

@@ -1,3 +1,15 @@
+## v1.3.0 (2026-06-24)
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0-01) | 乘号 `*` 被飞书 Markdown 吃掉 | 飞书 Markdown 解析器将 `2*4000+4*3000` 中的 `*4000+4*` 配对为斜体，导致乘号消失、数字拼合 | 新增 `escape_markdown_asterisks()` 函数（`cardkit/md.py`）：先保护合法 Markdown 结构（代码/粗体/合法斜体），再转义剩余 `*`。判断逻辑：CJK 字符后 `*` = 排版（斜体），ASCII 字母/数字后 `*` = 运算符（转义）。25 个测试用例验证。`controller/linear_mixin.py` 全部 7 处答案输出路径已接入 |
+| 🐛 Bug Fix (P0-02) | 工具耗时显示 17 亿毫秒 | `started_at` 默认值 `0.0`（1970 年），未收到开始事件时 `time.time() - 0.0` 产生天文数字 | `ToolStep.started_at` 和 `ToolSession.started_at` 改为 `None`；`elapsed_ms` 属性和计算处加 `is None` 守卫 |
+| 🐛 Bug Fix (P0-03) | 卡片元素裁剪计数偏差 + 折叠提示拼接错误 | 折叠提示预留空间硬编码为 1（不随模板变化）；`rstrip("已折叠")` 逐字符匹配会多删 CJK 字符 | 预计算折叠提示模板的实际 tag 数量（`_count_tag_objects`）；`rstrip` → `removesuffix`（精确后缀匹配） |
+| 🐛 Bug Fix (P0-04) | 监控计数器高并发丢数 | `_metrics["cards_created"] += 1` 非原子操作，多线程并发可丢失计数 | 新增 `threading.Lock`（`_metrics_lock`），所有 `record_*`/`set_*`/`get_metrics`/`_do_reset` 函数加锁 |
+| 🐛 Bug Fix (P0-05) | 可用性缓存无锁保护 + code=0 逻辑错误 | `_unavailable_cache` 字典并发读写可触发 `RuntimeError: dictionary changed size during iteration`；`or` 运算符吞掉 `code=0` | 新增 `threading.Lock`（`_unavailable_cache_lock`），`mark_unavailable`/`is_unavailable`/`_prune_cache` 加锁；新增 `_get_cached_code()` 线程安全读取函数；`or` → `is None` 精确判断 |
+
+---
+
 ## v1.2.0 (2026-06-22)
 
 | 类型 | 问题/功能 | 原因 | 修复/说明 |

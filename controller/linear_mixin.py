@@ -52,7 +52,7 @@ from ..cardkit import (
     _count_tag_objects,
     _enforce_card_element_limit,
 )
-from ..cardkit.md import _downgrade_tables, optimize_markdown_style
+from ..cardkit.md import _downgrade_tables, escape_markdown_asterisks, optimize_markdown_style
 from ..state.linear import UnifiedLinearState
 from ..state.text import split_reasoning_text
 from ..feishu import (
@@ -437,7 +437,7 @@ class UnifiedControllerMixin:
             if error_message:
                 content = error_message
             elif state and state.answer_text:
-                content = _downgrade_tables(optimize_markdown_style(state.answer_text)) or state.answer_text
+                content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(state.answer_text))) or state.answer_text
             else:
                 content = "完成"
 
@@ -635,7 +635,7 @@ class UnifiedControllerMixin:
             # Note: skip markdown optimization during streaming for performance;
             # it will be applied on seal via _preservative_seal.
             if state.answer_dirty:
-                content = state.answer_text or " "
+                content = escape_markdown_asterisks(state.answer_text or " ")
                 session.sequence += 1
                 _logger.debug(
                     "unified stream: msg=%s seq=%d type=answer len=%d",
@@ -786,7 +786,7 @@ class UnifiedControllerMixin:
         # Note: skip markdown optimization during streaming for performance;
         # it will be applied on seal via _preservative_seal.
         if state.answer_dirty and "answer" in session._creation_stages:
-            content = state.answer_text or " "
+            content = escape_markdown_asterisks(state.answer_text or " ")
             session.sequence += 1
             _logger.debug(
                 "unified stream: msg=%s seq=%d type=answer len=%d",
@@ -1041,7 +1041,7 @@ class UnifiedControllerMixin:
 
                 # ── Flush remaining answer text ──
                 if state.answer_dirty and "answer" in session._creation_stages and not session._streaming_closed:
-                    content = state.answer_text or " "
+                    content = escape_markdown_asterisks(state.answer_text or " ")
                     try:
                         session.sequence += 1
                         _logger.info(
@@ -1112,7 +1112,7 @@ class UnifiedControllerMixin:
             # for performance. Now that streaming is about to be closed, update the answer
             # element with the fully optimized markdown content.
             if state is not None and state.answer_text and "answer" in session._creation_stages:
-                optimized_content = _downgrade_tables(optimize_markdown_style(state.answer_text)) or " "
+                optimized_content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(state.answer_text))) or " "
                 seal_actions.append({
                     "action": "partial_update_element",
                     "params": {
@@ -1366,7 +1366,7 @@ class UnifiedControllerMixin:
                                 })
                             # Update answer element with optimized markdown
                             if state.answer_text and "answer" in session._creation_stages:
-                                optimized_content = _downgrade_tables(optimize_markdown_style(state.answer_text)) or " "
+                                optimized_content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(state.answer_text))) or " "
                                 retry_actions.append({
                                     "action": "partial_update_element",
                                     "params": {
@@ -1557,7 +1557,7 @@ class UnifiedControllerMixin:
 
             # ── Drain answer text ──
             if state.answer_dirty and "answer" in session._creation_stages:
-                content = state.answer_text or " "
+                content = escape_markdown_asterisks(state.answer_text or " ")
                 try:
                     session.sequence += 1
                     _logger.info(

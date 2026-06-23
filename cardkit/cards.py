@@ -112,15 +112,20 @@ def _enforce_card_element_limit(
         if isinstance(child.get("content"), str) and "已折叠" in child["content"]:
             hint_idx = i
             break
-    # If no hint exists yet, we'll need to add one (1 element), so account for it
+    # If no hint exists yet, we'll need to add one, so reserve its exact tag count.
+    # Pre-calculate the hint template's tag object count instead of hardcoding,
+    # so the reservation stays correct if the hint template changes.
+    _HINT_TEMPLATE = {"tag": "markdown", "content": "⚡ 还有 0 项已折叠", "text_size": "notation"}
+    _HINT_TAG_COUNT = _count_tag_objects(_HINT_TEMPLATE)  # typically 1
     if hint_idx is None:
-        total += 1  # Reserve space for the new collapse hint
+        total += _HINT_TAG_COUNT  # Reserve exact space for the new collapse hint
 
     # ── Trim oldest items from panel children until under threshold ──
     trimmed_count = 0
     while total > threshold and len(children) > 1:
-        # Skip the collapse hint (first child if it contains "已折叠")
-        remove_idx = 1 if children[0].get("content", "").endswith("已折叠") else 0
+        # Skip the collapse hint (first child if it ends with "已折叠")
+        first_content = children[0].get("content", "")
+        remove_idx = 1 if isinstance(first_content, str) and first_content.endswith("已折叠") else 0
         removed = children.pop(remove_idx)
         total -= _count_tag_objects([removed])
         trimmed_count += 1
@@ -135,8 +140,10 @@ def _enforce_card_element_limit(
                 break
         if hint_idx is not None:
             old_hint = children[hint_idx]["content"]
-            # Parse existing count(s) and merge
-            children[hint_idx]["content"] = old_hint.rstrip("已折叠") + f"、{trimmed_count} 项已折叠"
+            # Remove the exact suffix "已折叠" (not char-by-char like rstrip)
+            # and append new count. removesuffix is exact-match, safe for CJK.
+            base = old_hint.removesuffix("已折叠")
+            children[hint_idx]["content"] = base + f"、{trimmed_count} 项已折叠"
         else:
             children.insert(0, {
                 "tag": "markdown",

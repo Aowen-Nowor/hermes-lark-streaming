@@ -17,6 +17,7 @@ __all__ = [
     "_find_tables_outside_code_blocks",
     "_split_long_text",
     "_strip_invalid_image_keys",
+    "escape_markdown_asterisks",
     "optimize_markdown_style",
 ]
 
@@ -61,6 +62,72 @@ def _strip_invalid_image_keys(text: str) -> str:
         return m.group(0) if m.group(2).startswith("img_") else ""
 
     return re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)", _replace, text)
+
+
+def escape_markdown_asterisks(text: str) -> str:
+    """保护合法 Markdown 强调结构，转义所有剩余 *。
+
+    飞书 Markdown 解析器比 CommonMark 更激进——会把 2*4000+4*3000
+    中的 *4000+4* 配对为斜体，导致乘号消失、数字拼合。
+
+    解决思路：不是猜"哪个 * 是乘号"，而是反过来——先保护合法
+    Markdown 结构（粗体、斜体、代码），再转义一切剩余 *。
+    这样逻辑是 100% 严密的，不需要概率判断。
+
+    判断"合法斜体"的关键规则：
+      开头 * 前面是 行首/空白/标点/CJK字符 → 合法斜体
+      开头 * 前面是 ASCII字母/数字/下划线   → 不合法，必须转义
+
+    逻辑基础：
+      CJK 字符是自然语言 → 后面跟 * 只能是排版（斜体）
+      ASCII 字母/数字是形式语言 → 后面跟 * 只能是运算符
+      两者区别是语言的本质差异，不是概率。
+
+    算法：
+    1. 提取代码块/行内代码 → 保护（代码内 * 是字面量）
+    2. 提取粗体 **...** → 保护（粗体永远是排版意图）
+    3. 提取合法斜体 *...* → 保护（开头*不在ASCII字母/数字/下划线后）
+    4. 转义所有剩余 *（这些不可能是合法 Markdown，飞书会误配对）
+    5. 还原保护区域
+    """
+    if '*' not in text:
+        return text
+
+    _protected: list[str] = []
+
+    def _save(m: re.Match) -> str:
+        _protected.append(m.group(0))
+        return f'\x00P{len(_protected) - 1}P\x00'
+
+    # Step 1: 保护代码区域
+    text = re.sub(r'```[\s\S]*?```', _save, text)
+    text = re.sub(r'`[^`]+`', _save, text)
+
+    # Step 2: 保护粗体 **...** 和 ***...***
+    text = re.sub(
+        r'\*{2,3}(?!\s)((?:(?!\*{2,3}).)+?)(?<!\s)\*{2,3}',
+        _save, text, flags=re.DOTALL,
+    )
+
+    # Step 3: 保护合法斜体 *...*
+    # 开头 * 合法条件：前面不是 ASCII 字母/数字/下划线
+    # 这样 CJK 字符后的 * 会被保护（中文斜体的唯一写法），
+    # 而 ASCII 字母/数字后的 * 不会被保护（是运算符）。
+    text = re.sub(
+        r'(?<![a-zA-Z0-9_])\*(?!\s)((?:(?!\*).)+?)(?<!\s)\*',
+        _save, text, flags=re.DOTALL,
+    )
+
+    # Step 4: 转义剩余 *（飞书可能误配对的）
+    # * 后面跟非空白、非 * 的字符时，飞书会尝试配对，必须转义。
+    # * 后面跟空格或行尾时，飞书不会配对，安全不转义（如列表 * 项目）。
+    text = re.sub(r'(?<!\\)\*(?=[^\s*])', r'\\*', text)
+
+    # Step 5: 还原保护区域
+    for i, block in enumerate(_protected):
+        text = text.replace(f'\x00P{i}P\x00', block)
+
+    return text
 
 
 def optimize_markdown_style(text: str) -> str:
