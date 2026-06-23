@@ -800,20 +800,20 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
         if adapter:
             original_send = adapter.send
 
-            async def _intercepting_send(chat_id_send, content, **send_kwargs):
+            async def _intercepting_send(chat_id, content, **send_kwargs):
                 """Suppress plain text delivery when our card was sent."""
                 ctx = _msg_ctx.get()
                 if ctx and ctx.get("card_sent"):
                     _logger.debug(
                         "background task: suppressing adapter.send (card already sent), chat=%s",
-                        chat_id_send[:12] if chat_id_send else "?",
+                        chat_id[:12] if chat_id else "?",
                     )
                     try:
                         from gateway.platforms.base import SendResult
                         return SendResult(success=True)
                     except (ImportError, AttributeError):
                         return None
-                return await original_send(chat_id_send, content, **send_kwargs)
+                return await original_send(chat_id, content, **send_kwargs)
 
             adapter.send = _intercepting_send
             adapter._hls_bg_sending = True
@@ -939,7 +939,7 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
         # ── Temporarily replace Feishu adapter.send with card-sending version ──
         original_send = feishu_adapter.send
 
-        async def _card_sending_send(chat_id_send, content_text, **send_kwargs):
+        async def _card_sending_send(chat_id, content, **send_kwargs):
             """Redirect Feishu adapter.send to CardKit card delivery.
 
             This async function replaces the Feishu adapter's ``send`` method.
@@ -961,23 +961,23 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
                 _logger.info(
                     "cron _card_sending_send: ctrl.enabled=%s chat=%s content_len=%d",
                     ctrl.enabled,
-                    chat_id_send[:12] if chat_id_send else "?",
-                    len(content_text) if content_text else 0,
+                    chat_id[:12] if chat_id else "?",
+                    len(content) if content else 0,
                 )
-                if ctrl.enabled and content_text:
-                    cleaned = content_text
+                if ctrl.enabled and content:
+                    cleaned = content
                     if not cleaned.strip():
-                        cleaned = content_text
+                        cleaned = content
 
                     # We are running on the event loop (scheduled via
                     # safe_schedule_threadsafe by _deliver_result), so we
                     # can await the card delivery directly.
-                    await ctrl._do_cron_deliver(chat_id_send, cleaned.strip())
+                    await ctrl._do_cron_deliver(chat_id, cleaned.strip())
 
                     _logger.info(
                         "hermes-lark-streaming v%s: cron card delivered: chat=%s",
                         __version__,
-                        chat_id_send[:12],
+                        chat_id[:12],
                     )
                     # Return a success result so the original _deliver_result
                     # thinks the send succeeded
@@ -994,7 +994,7 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
                 )
 
             # Fallback: send plain text via the original adapter
-            return await original_send(chat_id_send, content_text, **send_kwargs)
+            return await original_send(chat_id, content, **send_kwargs)
 
         feishu_adapter.send = _card_sending_send
         # Set flag so the class-level send wrapper knows not to
