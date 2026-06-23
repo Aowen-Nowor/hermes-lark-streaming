@@ -16,6 +16,11 @@ from ..controller import get_controller
 _logger = logging.getLogger("hermes_lark_streaming")
 
 
+def _is_feishu_topic_thread_id(thread_id: Any) -> bool:
+    """Return True for real Feishu topic thread IDs."""
+    return isinstance(thread_id, str) and thread_id.startswith("omt_")
+
+
 def _safe_hook(
     default_return: Any = None,
     log_level: str = "warning",
@@ -88,7 +93,7 @@ def on_feishu_normalize(
         reply_to,
     )
 
-    if reply_to and source_thread_id and not real_thread_id:
+    if reply_to and source_thread_id and not real_thread_id and not _is_feishu_topic_thread_id(source_thread_id):
         source.thread_id = None
         event.source = source
 

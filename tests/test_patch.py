@@ -643,6 +643,24 @@ class TestOnFeishuNormalize:
         assert source.thread_id is None
         assert event.source is source
 
+    def test_keeps_feishu_topic_thread_id_when_reply_to_has_no_raw_thread(self) -> None:
+        """Real Feishu topic threads should keep session isolation even for replies."""
+        ctrl = _make_ctrl(enabled=True)
+        source = self._make_source(thread_id="omt_195fb217bd8edce7")
+        event = self._make_event(
+            reply_to="om_x100b6c97e32434bcb4b92d43defbc72",
+            raw_message={"event": {"message": {}}},
+        )
+
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
+            on_feishu_normalize(
+                message_id="m1",
+                source=source,
+                event=event,
+            )
+
+        assert source.thread_id == "omt_195fb217bd8edce7"
+
     def test_does_not_clear_thread_id_when_real_thread_id_exists(self) -> None:
         """When raw_message has a real thread_id, source.thread_id should remain."""
         ctrl = _make_ctrl(enabled=True)
