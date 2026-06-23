@@ -80,10 +80,19 @@ class HermesCompat:
             _logger.debug("HLS: AIAgent not available yet")
         
         # FeishuAdapter
-        try:
-            from gateway.platforms.feishu import FeishuAdapter
-            self.feishu_adapter_class = FeishuAdapter
-        except (ImportError, AttributeError):
+        for mod_name in (
+            "hermes_plugins.feishu_platform.adapter",
+            "gateway.platforms.feishu",
+        ):
+            try:
+                mod = importlib.import_module(mod_name)
+                FeishuAdapter = getattr(mod, "FeishuAdapter")
+                self.feishu_adapter_class = FeishuAdapter
+                _logger.debug("HLS: FeishuAdapter resolved via %s", mod_name)
+                break
+            except (ImportError, AttributeError):
+                continue
+        if self.feishu_adapter_class is None:
             _logger.debug("HLS: FeishuAdapter not available")
         
         # Cron scheduler

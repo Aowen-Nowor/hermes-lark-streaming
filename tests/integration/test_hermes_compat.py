@@ -100,6 +100,32 @@ def _ast_module_has_function(tree: ast.Module, func_name: str) -> bool:
     return False
 
 
+def _import_class(module_path: str, class_name: str) -> Any | None:
+    """Import class from a dotted module path, returning None if unavailable."""
+    try:
+        mod = __import__(module_path, fromlist=[class_name])
+        return getattr(mod, class_name, None)
+    except (ImportError, AttributeError):
+        return None
+
+
+def _class_exists(src_dir: Path, module_path: str, class_name: str) -> bool:
+    """Check class existence via import first, then AST fallback."""
+    if _import_class(module_path, class_name) is not None:
+        return True
+    tree = _parse_ast(src_dir, module_path)
+    return tree is not None and _ast_has_class(tree, class_name)
+
+
+def _class_has_method(src_dir: Path, module_path: str, class_name: str, method_name: str) -> bool:
+    """Check class method existence via import first, then AST fallback."""
+    cls = _import_class(module_path, class_name)
+    if cls is not None:
+        return hasattr(cls, method_name)
+    tree = _parse_ast(src_dir, module_path)
+    return tree is not None and _ast_class_has_method(tree, class_name, method_name)
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────
 
 
@@ -315,57 +341,43 @@ class TestAIAgent:
 # ── Tests: FeishuAdapter ─────────────────────────────────────────────
 
 
+FEISHU_ADAPTER_MODULES = (
+    "hermes_plugins.feishu_platform.adapter",
+    "gateway.platforms.feishu",
+)
+
+
 class TestFeishuAdapter:
     """Verify that FeishuAdapter class and its patched methods still exist."""
 
     def test_feishu_adapter_class_exists(self, hermes_src: Path) -> None:
-        """FeishuAdapter class should exist in gateway.platforms.feishu."""
-        # Try import first
-        try:
-            from gateway.platforms.feishu import FeishuAdapter  # noqa: F401
-
-            return
-        except (ImportError, AttributeError):
-            pass
-        # Fallback: AST analysis
-        tree = _parse_ast(hermes_src, "gateway.platforms.feishu")
-        assert tree is not None, (
-            "gateway/platforms/feishu.py (or __init__.py) not found in Hermes source"
-        )
-        assert _ast_has_class(tree, "FeishuAdapter"), (
-            "FeishuAdapter class not found in gateway/platforms/feishu (AST analysis)"
+        """FeishuAdapter class should exist in a supported Hermes Feishu module."""
+        assert any(
+            _class_exists(hermes_src, module_path, "FeishuAdapter")
+            for module_path in FEISHU_ADAPTER_MODULES
+        ), (
+            "FeishuAdapter class not found in supported Hermes Feishu modules: "
+            f"{', '.join(FEISHU_ADAPTER_MODULES)}"
         )
 
     def test_feishu_adapter_has_send(self, hermes_src: Path) -> None:
         """FeishuAdapter should have a 'send' method."""
-        try:
-            from gateway.platforms.feishu import FeishuAdapter
-
-            assert hasattr(FeishuAdapter, "send"), "FeishuAdapter.send not found"
-            return
-        except (ImportError, AttributeError):
-            pass
-        tree = _parse_ast(hermes_src, "gateway.platforms.feishu")
-        assert tree is not None, "gateway/platforms/feishu not found"
-        assert _ast_class_has_method(tree, "FeishuAdapter", "send"), (
-            "FeishuAdapter.send not found (AST analysis)"
+        assert any(
+            _class_has_method(hermes_src, module_path, "FeishuAdapter", "send")
+            for module_path in FEISHU_ADAPTER_MODULES
+        ), (
+            "FeishuAdapter.send not found in supported Hermes Feishu modules: "
+            f"{', '.join(FEISHU_ADAPTER_MODULES)}"
         )
 
     def test_feishu_adapter_has_edit_message(self, hermes_src: Path) -> None:
         """FeishuAdapter should have an 'edit_message' method."""
-        try:
-            from gateway.platforms.feishu import FeishuAdapter
-
-            assert hasattr(FeishuAdapter, "edit_message"), (
-                "FeishuAdapter.edit_message not found"
-            )
-            return
-        except (ImportError, AttributeError):
-            pass
-        tree = _parse_ast(hermes_src, "gateway.platforms.feishu")
-        assert tree is not None, "gateway/platforms/feishu not found"
-        assert _ast_class_has_method(tree, "FeishuAdapter", "edit_message"), (
-            "FeishuAdapter.edit_message not found (AST analysis)"
+        assert any(
+            _class_has_method(hermes_src, module_path, "FeishuAdapter", "edit_message")
+            for module_path in FEISHU_ADAPTER_MODULES
+        ), (
+            "FeishuAdapter.edit_message not found in supported Hermes Feishu modules: "
+            f"{', '.join(FEISHU_ADAPTER_MODULES)}"
         )
 
 
@@ -386,8 +398,6 @@ class TestMonkeyPatchTargets:
         ("gateway.run", "GatewayRunner", "_handle_message_with_agent"),
         ("gateway.run", "GatewayRunner", "_run_agent"),
         ("run_agent", "AIAgent", "run_conversation"),
-        ("gateway.platforms.feishu", "FeishuAdapter", "send"),
-        ("gateway.platforms.feishu", "FeishuAdapter", "edit_message"),
     ]
 
     # (module_path, function_name) — module-level functions patched
@@ -398,15 +408,17 @@ class TestMonkeyPatchTargets:
     # Optional targets — missing ones are warnings, not failures
     OPTIONAL_CLASS_METHOD_TARGETS = [
         ("gateway.run", "GatewayRunner", "_run_background_task"),
-        # Reaction methods: Hermes renamed public → private in newer versions
-        # At least one of each pair should exist for the feature to work
-        ("gateway.platforms.feishu", "FeishuAdapter", "add_reaction"),       # old public name
-        ("gateway.platforms.feishu", "FeishuAdapter", "_add_reaction"),      # new private name
-        ("gateway.platforms.feishu", "FeishuAdapter", "delete_reaction"),    # old public name
-        ("gateway.platforms.feishu", "FeishuAdapter", "_remove_reaction"),   # new private name
-        ("gateway.platforms.feishu", "FeishuAdapter", "send_clarify"),
-        ("gateway.platforms.feishu", "FeishuAdapter", "_on_card_action_trigger"),
     ]
+
+    FEISHU_REQUIRED_METHODS = ("send", "edit_message")
+    FEISHU_OPTIONAL_METHODS = (
+        "add_reaction",
+        "_add_reaction",
+        "delete_reaction",
+        "_remove_reaction",
+        "send_clarify",
+        "_on_card_action_trigger",
+    )
 
     @pytest.mark.parametrize(
         "module_path, class_name, method_name",
@@ -417,22 +429,25 @@ class TestMonkeyPatchTargets:
         self, hermes_src: Path, module_path: str, class_name: str, method_name: str,
     ) -> None:
         """Required class method must exist (import or AST)."""
-        # Try import
-        try:
-            mod = __import__(module_path, fromlist=[class_name])
-            cls = getattr(mod, class_name, None)
-            assert cls is not None, f"Class {class_name} not found in {module_path}"
-            assert hasattr(cls, method_name), (
-                f"{class_name}.{method_name} not found in {module_path}"
-            )
-            return
-        except (ImportError, AttributeError):
-            pass
-        # Fallback: AST
-        tree = _parse_ast(hermes_src, module_path)
-        assert tree is not None, f"Source for {module_path} not found"
-        assert _ast_class_has_method(tree, class_name, method_name), (
+        assert _class_has_method(hermes_src, module_path, class_name, method_name), (
             f"{class_name}.{method_name} not found in {module_path} (AST analysis)"
+        )
+
+    @pytest.mark.parametrize(
+        "method_name",
+        FEISHU_REQUIRED_METHODS,
+        ids=[f"FeishuAdapter.{m}" for m in FEISHU_REQUIRED_METHODS],
+    )
+    def test_required_feishu_adapter_method_exists(
+        self, hermes_src: Path, method_name: str,
+    ) -> None:
+        """Required FeishuAdapter method must exist in any supported module."""
+        assert any(
+            _class_has_method(hermes_src, module_path, "FeishuAdapter", method_name)
+            for module_path in FEISHU_ADAPTER_MODULES
+        ), (
+            f"FeishuAdapter.{method_name} not found in supported Hermes Feishu modules: "
+            f"{', '.join(FEISHU_ADAPTER_MODULES)}"
         )
 
     @pytest.mark.parametrize(
@@ -469,22 +484,31 @@ class TestMonkeyPatchTargets:
         self, hermes_src: Path, module_path: str, class_name: str, method_name: str,
     ) -> None:
         """Optional class method — warn if missing, but don't fail."""
-        # Try import
-        try:
-            mod = __import__(module_path, fromlist=[class_name])
-            cls = getattr(mod, class_name, None)
-            if cls is not None and hasattr(cls, method_name):
-                return  # Found, all good
-        except (ImportError, AttributeError):
-            pass
-        # Fallback: AST
-        tree = _parse_ast(hermes_src, module_path)
-        if tree is not None and _ast_class_has_method(tree, class_name, method_name):
+        if _class_has_method(hermes_src, module_path, class_name, method_name):
             return  # Found via AST
         # Not found — issue a warning (not a failure)
         pytest.skip(
             f"Optional target {class_name}.{method_name} not found in {module_path} "
             f"— plugin feature will be degraded but not broken"
+        )
+
+    @pytest.mark.parametrize(
+        "method_name",
+        FEISHU_OPTIONAL_METHODS,
+        ids=[f"FeishuAdapter.{m} (optional)" for m in FEISHU_OPTIONAL_METHODS],
+    )
+    def test_optional_feishu_adapter_method_exists(
+        self, hermes_src: Path, method_name: str,
+    ) -> None:
+        """Optional FeishuAdapter method may exist in any supported module."""
+        if any(
+            _class_has_method(hermes_src, module_path, "FeishuAdapter", method_name)
+            for module_path in FEISHU_ADAPTER_MODULES
+        ):
+            return
+        pytest.skip(
+            f"Optional target FeishuAdapter.{method_name} not found in supported modules "
+            f"{', '.join(FEISHU_ADAPTER_MODULES)} — plugin feature will be degraded but not broken"
         )
 
 
