@@ -1208,7 +1208,10 @@ class UnifiedControllerMixin:
                             existing_count = 0
                             _idx = old_hint.find("项")
                             if _idx > 0:
+                                # Walk backwards skipping whitespace, then collect digits
                                 _end = _idx
+                                while _end > 0 and old_hint[_end - 1] == ' ':
+                                    _end -= 1
                                 _start = _end
                                 while _start > 0 and old_hint[_start - 1].isdigit():
                                     _start -= 1

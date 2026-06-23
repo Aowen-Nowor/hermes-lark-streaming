@@ -80,6 +80,9 @@ def _build_header(status: str) -> dict[str, Any]:
 
 
 _IMG_MD_PATTERN = re.compile(r"!\[([^\]]*)\]\((img_[^)\s]+)\)")
+_RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
+_RE_BACKTICK_RUN = re.compile(r"`+")
+_RE_MD_SPECIAL = re.compile(r"([`*_{}\[\]<>])")
 
 
 def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
@@ -107,7 +110,7 @@ def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
 
     cleaned = _IMG_MD_PATTERN.sub(_replace, text)
     # 清理图片移除后可能留下的空行
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    cleaned = _RE_MULTI_NEWLINE.sub("\n\n", cleaned).strip()
     return cleaned, images
 
 if TYPE_CHECKING:
@@ -773,12 +776,12 @@ def _format_code_block(content: str, language: str) -> str:
 
 
 def _longest_backtick_run(value: str) -> int:
-    matches = re.findall(r"`+", value)
+    matches = _RE_BACKTICK_RUN.findall(value)
     return max((len(m) for m in matches), default=0)
 
 
 def _escape_md(value: str) -> str:
-    return re.sub(r"([`*_{}\[\]<>])", r"\\\1", value.replace("\\", "\\\\"))
+    return _RE_MD_SPECIAL.sub(r"\\\1", value.replace("\\", "\\\\"))
 
 
 def _build_error_panel(
