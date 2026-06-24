@@ -82,6 +82,21 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
     and should be converted to a card.
     """
     async def _intercepted_send(self_feishu, chat_id, content, reply_to=None, metadata=None, **kwargs):
+        # ── EphemeralReply passthrough (v1.3.1 fix) ──
+        # Gateway-internal slash commands (e.g. /new, /reset) return
+        # EphemeralReply instances. These are gateway-internal confirmations,
+        # NOT duplicate agent replies. They must NEVER be suppressed by the
+        # card_sent guard — otherwise the user sees a red ❌ with no feedback
+        # when sending /new during an active streaming card.
+        # EphemeralReply inherits from str, so we check isinstance before
+        # the non-string guard below.
+        try:
+            from gateway.platforms.base import EphemeralReply
+            if isinstance(content, EphemeralReply):
+                return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
+        except (ImportError, AttributeError):
+            pass  # EphemeralReply not available in this Hermes version
+
         # ── Agent path: handle non-string sends ──
         # Non-string content (e.g. dicts with image_key) is passed through
         # to the original adapter — we only intercept string text messages.
@@ -262,7 +277,13 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
 
 
 def _register_gateway_card(card_msg_id: str, *, chat_id: str, card_id: str | None, category: str) -> None:
-    """Register a gateway card so edit_message can update it later."""
+    """Register a gateway card so edit_message can update it later.
+
+    v1.3.1 fix: Added capacity limit (500 entries) to prevent unbounded
+    memory growth. When the limit is exceeded, oldest entries are pruned.
+    Previously _unregister_gateway_card was never called in production code,
+    causing _gateway_cards to grow indefinitely.
+    """
     if not card_msg_id:
         return
     with _gateway_cards_lock:
@@ -270,7 +291,17 @@ def _register_gateway_card(card_msg_id: str, *, chat_id: str, card_id: str | Non
             "chat_id": chat_id,
             "card_id": card_id,
             "category": category,
+            "registered_at": time.time(),
         }
+        # v1.3.1: prune oldest entries when over capacity
+        _GATEWAY_CARDS_MAX = 500
+        if len(_gateway_cards) > _GATEWAY_CARDS_MAX:
+            # Sort by registered_at, remove oldest 20% to amortize prune cost
+            excess = len(_gateway_cards) - _GATEWAY_CARDS_MAX + (_GATEWAY_CARDS_MAX // 5)
+            sorted_keys = sorted(_gateway_cards, key=lambda k: _gateway_cards[k].get("registered_at", 0))
+            for k in sorted_keys[:excess]:
+                _gateway_cards.pop(k, None)
+            _logger.debug("HLS: _gateway_cards pruned %d entries (was %d)", excess, len(_gateway_cards) + excess)
     _logger.debug(
         "registered gateway card: msg_id=%s card_id=%s category=%s",
         card_msg_id[:12], (card_id or "?")[:12], category,

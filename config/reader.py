@@ -39,6 +39,42 @@ def _to_bool(val: Any, default: bool = False) -> bool:
     return default
 
 
+def _to_int(val: Any, default: int) -> int:
+    """安全 int 转换，类型错误时返回 default。
+
+    防止用户在 config.yaml 中写非数字字符串（如 ``print_step: abc``）
+    导致插件首次访问该属性时抛出未捕获 ValueError 崩溃。
+    """
+    if isinstance(val, bool):
+        return int(val)
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val)
+    if isinstance(val, str):
+        try:
+            return int(val)
+        except ValueError:
+            _logger.warning("HLS: config value %r is not a valid int, using default %d", val, default)
+            return default
+    return default
+
+
+def _to_float(val: Any, default: float) -> float:
+    """安全 float 转换，类型错误时返回 default。"""
+    if isinstance(val, bool):
+        return float(val)
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val)
+        except ValueError:
+            _logger.warning("HLS: config value %r is not a valid float, using default %f", val, default)
+            return default
+    return default
+
+
 class Config:
     """插件配置，惰性读取 Hermes 主配置.
 
@@ -125,8 +161,8 @@ class Config:
         默认20，确保即使在极端情况下也不会超限。
         """
         sec = self._plugin_sec()
-        val = sec.get("max_tool_steps", 20)
-        return max(1, min(100, int(val)))
+        val = _to_int(sec.get("max_tool_steps", 20), default=20)
+        return max(1, min(100, val))
 
     @property
     def max_reasoning_rounds(self) -> int:
@@ -137,8 +173,8 @@ class Config:
         默认20，确保即使在极端情况下也不会超限。
         """
         sec = self._plugin_sec()
-        val = sec.get("max_reasoning_rounds", 20)
-        return max(1, min(100, int(val)))
+        val = _to_int(sec.get("max_reasoning_rounds", 20), default=20)
+        return max(1, min(100, val))
 
     @property
     def print_strategy(self) -> str:
@@ -163,7 +199,7 @@ class Config:
         需飞书 7.23+ 客户端支持自定义参数。
         """
         sec = self._plugin_sec()
-        val = int(sec.get("print_step", 4))
+        val = _to_int(sec.get("print_step", 4), default=4)
         return max(1, min(10, val))
 
     @property
@@ -175,7 +211,7 @@ class Config:
         但 200ms 可将 API 调用量减半）。
         """
         sec = self._plugin_sec()
-        ms = float(sec.get("flush_interval_ms", 200))
+        ms = _to_float(sec.get("flush_interval_ms", 200), default=200.0)
         return max(70.0, min(2000.0, ms))
 
     @property
@@ -221,7 +257,7 @@ class Config:
     @property
     def card_duration_sec(self) -> int:
         """卡片存活检测超时."""
-        return int(self._plugin_sec().get("card_ttl_sec", 600))
+        return _to_int(self._plugin_sec().get("card_ttl_sec", 600), default=600)
 
     @property
     def footer_fields(self) -> list[list[str]]:
