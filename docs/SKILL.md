@@ -10,7 +10,7 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 1.2.0 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
+| 版本 | 1.3.0 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
 
 ---
 
@@ -23,7 +23,6 @@
                ▼
         _run_agent ── [Hook 2: on_message_completed]
                ▼
-        AIAgent.run_conversation ── [inject_time 前缀注入]
             ├─ stream_delta_callback ── [Hook 4: on_answer_delta]
             ├─ reasoning_callback ──── [Hook 6: on_reasoning_delta]
             ├─ tool_progress_callback [Hook 3: on_tool_updated]
@@ -53,12 +52,12 @@ Background: _run_background_task ── [Hook 1/2]
 | `├ __init__.py` | 重导出门面 | `from .elements/cards/special import *` |
 | `├ elements.py` | 原始元素构建器 | 统一面板 + answer streaming + footer + `build_panel_header/children` |
 | `├ cards.py` | 卡片组装器 | streaming/complete/IM-fallback 卡片 |
-| `├ special.py` | 专用卡片类型 | cron/gateway/clarify 三态卡片 |
+| `├ special.py` | 专用卡片类型 | cron/gateway/clarify 三态卡片 + `normalize_clarify_choices` (v1.3.0) |
 | `├ i18n.py` | 中英双语映射 | `_T` dict + `_i18n()`/`_t()` |
 | `└ md.py` | Markdown 处理 | 标题/表格降级、长文本分块 |
 | **controller/** | **主控制器子包** | |
 | `├ __init__.py` | 重导出门面 | StreamCardController + CardSession + 状态常量 |
-| `├ core.py` | 主控制器(单例) | 管理生命周期 + 并发限流 (v1.1.0) + epoch 校验 |
+| `├ core.py` | 主控制器(单例) | 管理生命周期 + 并发限流 (v1.1.0) + epoch 校验 + _sessions/_interrupt_map 线程安全锁 (v1.3.0) |
 | `├ mixin.py` | cron/gateway 编排 | `_do_cron_deliver`/`_do_gateway_deliver` + 共享工具方法 |
 | `└ linear_mixin.py` | 线性模式编排(主路径) | 统一面板更新、保留式封卡、卡片级安全网、TTL 延长、300313 fallback |
 | **state/** | **状态与数据子包** | |
@@ -231,14 +230,12 @@ CardKit v2 Streaming → CardKit v2 Create+Patch → IM Create+Patch → Hermes 
 
 ```yaml
 hermes_lark_streaming:
-  enabled: true
-  linear: true
   panel_expanded: false
   streaming_panel_expanded: false
   print_strategy: delay            # "fast" 或 "delay"
-  flush_interval_ms: 100           # 70~2000ms（默认 100）
+  print_step: 4                    # 打字机每次渲染字符数（默认4，范围1~10，需飞书7.23+）
+  flush_interval_ms: 100           # 插件发送间隔（默认100ms）
   card_ttl_sec: 600
-  inject_time: false
   max_tool_steps: 20               # 范围 1~100
   max_reasoning_rounds: 20         # 范围 1~100
   header:
@@ -354,4 +351,4 @@ hermes gateway restart
 
 ---
 
-*Last updated: 2026-06-22 | Version: 1.2.0*
+*Last updated: 2026-06-24 | Version: 1.3.0*

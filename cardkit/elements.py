@@ -80,6 +80,9 @@ def _build_header(status: str) -> dict[str, Any]:
 
 
 _IMG_MD_PATTERN = re.compile(r"!\[([^\]]*)\]\((img_[^)\s]+)\)")
+_RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
+_RE_BACKTICK_RUN = re.compile(r"`+")
+_RE_MD_SPECIAL = re.compile(r"([`*_{}\[\]<>])")
 
 
 def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
@@ -107,7 +110,7 @@ def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
 
     cleaned = _IMG_MD_PATTERN.sub(_replace, text)
     # 清理图片移除后可能留下的空行
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    cleaned = _RE_MULTI_NEWLINE.sub("\n\n", cleaned).strip()
     return cleaned, images
 
 if TYPE_CHECKING:
@@ -344,6 +347,21 @@ def build_panel_header(
     }
 
 
+_REASONING_DISPLAY_LIMIT = 2000  # 单条推理文本最大显示字数
+
+
+def _truncate_reasoning(text: str) -> str:
+    """截断过长推理文本，防止飞书渲染卡顿.
+
+    所有推理文本渲染路径都应调用此函数，确保截断逻辑一致。
+    保证返回值总长度不超过 _REASONING_DISPLAY_LIMIT。
+    """
+    if len(text) <= _REASONING_DISPLAY_LIMIT:
+        return text
+    suffix = "\n\n... (已截断，共 {} 字)".format(len(text))
+    return text[:_REASONING_DISPLAY_LIMIT - len(suffix)] + suffix
+
+
 def build_panel_children(
     *,
     reasoning_rounds: list,  # list of ReasoningRound objects
@@ -454,7 +472,7 @@ def build_panel_children(
                         "margin": "0px 0px 0px 22px",
                         "text": {
                             "tag": "lark_md",
-                            "content": round_.text,
+                            "content": _truncate_reasoning(round_.text),
                             "text_size": "notation",
                         },
                     })
@@ -471,16 +489,12 @@ def build_panel_children(
                 in_progress_idx, 0, finalized=False,
             ))
             if current_reasoning_text.strip():
-                # 截断过长推理文本，防止飞书渲染卡顿
-                display_text = current_reasoning_text
-                if len(display_text) > 2000:
-                    display_text = display_text[:2000] + "\n\n... (已截断，共 {} 字)".format(len(current_reasoning_text))
                 children.append({
                     "tag": "div",
                     "margin": "0px 0px 0px 22px",
                     "text": {
                         "tag": "lark_md",
-                        "content": display_text,
+                        "content": _truncate_reasoning(current_reasoning_text),
                         "text_size": "notation",
                     },
                 })
@@ -507,7 +521,7 @@ def build_panel_children(
                         "margin": "0px 0px 0px 22px",
                         "text": {
                             "tag": "lark_md",
-                            "content": round_.text,
+                            "content": _truncate_reasoning(round_.text),
                             "text_size": "notation",
                         },
                     })
@@ -524,7 +538,7 @@ def build_panel_children(
                         "margin": "0px 0px 0px 22px",
                         "text": {
                             "tag": "lark_md",
-                            "content": current_reasoning_text,
+                            "content": _truncate_reasoning(current_reasoning_text),
                             "text_size": "notation",
                         },
                     })
@@ -762,12 +776,12 @@ def _format_code_block(content: str, language: str) -> str:
 
 
 def _longest_backtick_run(value: str) -> int:
-    matches = re.findall(r"`+", value)
+    matches = _RE_BACKTICK_RUN.findall(value)
     return max((len(m) for m in matches), default=0)
 
 
 def _escape_md(value: str) -> str:
-    return re.sub(r"([`*_{}\[\]<>])", r"\\\1", value.replace("\\", "\\\\"))
+    return _RE_MD_SPECIAL.sub(r"\\\1", value.replace("\\", "\\\\"))
 
 
 def _build_error_panel(

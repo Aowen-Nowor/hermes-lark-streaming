@@ -212,8 +212,12 @@ class FeishuClient:
             builder = builder.domain(domain)
         self._client = builder.build()
         # Probe for async stream_element method (lark-oapi >= 1.x)
-        self._use_async_stream_element = hasattr(
-            self._client.cardkit.v1.card_element, 'acontent'
+        # Use callable() instead of hasattr() — hasattr only checks existence,
+        # callable also verifies the attribute can be invoked. If a future SDK
+        # version turns 'acontent' into a read-only property, hasattr would
+        # still return True but calling it would raise TypeError.
+        self._use_async_stream_element = callable(
+            getattr(self._client.cardkit.v1.card_element, 'acontent', None)
         )
 
     async def _retry_transient(
@@ -425,8 +429,9 @@ class FeishuClient:
         for attempt in range(_ELEMENT_NOT_FOUND_MAX_RETRIES + 1):
             try:
                 await self._retry_transient("cardkit_stream_element", _do)
-                # 成功时打 INFO 日志（阶段 0.8：验证 stream_element 是否真的工作）
-                _logger.info(
+                # 成功时打 DEBUG 日志（降级自 INFO — 流式输出期间每 70ms 一次，
+                # 单次会话可产生数十条 INFO 日志，生产环境日志爆炸）
+                _logger.debug(
                     "HLS: stream_element OK card=%s el=%s len=%d seq=%d",
                     card_id[:12], element_id[:16], len(content), sequence,
                 )

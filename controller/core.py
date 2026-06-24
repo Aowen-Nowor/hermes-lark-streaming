@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future as ConcurrentFuture
@@ -46,11 +47,65 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         self._cfg = Config()
         self._client: FeishuClient | None = None
         self._sessions: dict[str, CardSession] = {}
+        # v1.3.0 P1-01: _sessions is shared between the event-loop thread
+        # (on_message_started / on_completed / prune) and worker threads
+        # (callback wrappers in patching/callbacks.py → hooks → controller)
+        # and the Feishu webhook thread (clarify card action → get_controller).
+        # RLock allows re-entrancy (on_message_started calls on_interrupted
+        # which also accesses _sessions).
+        self._sessions_lock = threading.RLock()
         self._interrupt_map: dict[str, str] = {}
+        # v1.3.0: _interrupt_map is accessed from event-loop thread (on_interrupted
+        # writes, on_completed pops) and worker threads (_cleanup iterates+deletes).
+        self._interrupt_map_lock = threading.Lock()
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._session_ttl = self._cfg.card_duration_sec
         self._loop: asyncio.AbstractEventLoop | None = None
+
+    # ── v1.3.0 P1-01: thread-safe _sessions access helpers ──
+    # All external and internal access to self._sessions should go through
+    # these helpers to guarantee the RLock is held.  Direct dict access is
+    # discouraged but kept for backward-compat in a few hot-path reads that
+    # are inherently single-threaded (event-loop only).
+    def _sess_get(self, message_id: str) -> CardSession | None:
+        """Thread-safe session lookup by message_id (or anchor_id)."""
+        with self._sessions_lock:
+            return self._sessions.get(message_id)
+
+    def _sess_put(self, key: str, session: CardSession) -> None:
+        """Thread-safe session store."""
+        with self._sessions_lock:
+            self._sessions[key] = session
+
+    def _sess_pop(self, key: str) -> CardSession | None:
+        """Thread-safe session removal (returns the removed session or None)."""
+        with self._sessions_lock:
+            return self._sessions.pop(key, None)
+
+    def _sess_items_snapshot(self) -> list[tuple[str, CardSession]]:
+        """Thread-safe snapshot of all (key, session) pairs.
+
+        Returns a list copy so callers can iterate without holding the lock
+        (prevents RuntimeError: dictionary changed size during iteration).
+        """
+        with self._sessions_lock:
+            return list(self._sessions.items())
+
+    def _sess_values_snapshot(self) -> list[CardSession]:
+        """Thread-safe snapshot of all sessions (values only)."""
+        with self._sessions_lock:
+            return list(self._sessions.values())
+
+    def _sess_active_count(self) -> int:
+        """Thread-safe count of non-terminal (active) sessions."""
+        with self._sessions_lock:
+            return sum(1 for s in self._sessions.values() if not s.is_terminal_phase)
+
+    def _sess_clear(self) -> None:
+        """Thread-safe clear of all sessions (used by unregister)."""
+        with self._sessions_lock:
+            self._sessions.clear()
 
     @property
     def enabled(self) -> bool:
@@ -108,7 +163,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
     def _get_active_session(self, message_id: str) -> CardSession | None:
         """获取非终态的活跃 session，不存在或已终态返回 None."""
-        session = self._sessions.get(message_id)
+        session = self._sess_get(message_id)
         if session is None or session.is_terminal_phase:
             return None
         return session
@@ -143,7 +198,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if not message_id:
             _logger.warning("HLS: on_message_started missing message_id chat=%s", chat_id[:12])
             return
-        if message_id in self._sessions:
+        if self._sess_get(message_id) is not None:
             return
 
         self._prune_stale_sessions()
@@ -152,7 +207,8 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # Seal any active (non-terminal) session in the same chat_id
         # before creating the new one. This prevents resource contention
         # and ensures the user only sees one active card at a time.
-        for existing_msg_id, existing_session in list(self._sessions.items()):
+        # v1.3.0: use thread-safe snapshot to avoid RuntimeError on concurrent modification.
+        for existing_msg_id, existing_session in self._sess_items_snapshot():
             if existing_session.chat_id != chat_id:
                 continue
             if existing_session.is_terminal_phase:
@@ -183,17 +239,17 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             _logger.warning("HLS: no event loop, skipping msg=%s", (message_id or "?")[:12])
             return
         session = CardSession(message_id, chat_id, loop)
-        self._sessions[message_id] = session
+        self._sess_put(message_id, session)
         if anchor_id and anchor_id != message_id:
             session.anchor_id = anchor_id
-            self._sessions[anchor_id] = session
+            self._sess_put(anchor_id, session)
         _logger.info("HLS: session created msg=%s trace=%s chat=%s anchor=%s", (message_id or "?")[:12], session.card_trace_id, chat_id[:12], (anchor_id or "")[:12])
 
         # v1.1.0: Record metrics
         try:
             from ..aowen import record_card_created, set_active_sessions
             record_card_created()
-            set_active_sessions(sum(1 for s in self._sessions.values() if not s.is_terminal_phase))
+            set_active_sessions(self._sess_active_count())
         except Exception:
             pass
 
@@ -457,15 +513,15 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     )
                     self._complete_session(old_session)
 
-        if new_message_id not in self._sessions:
+        if self._sess_get(new_message_id) is None:
             loop = self._get_loop()
             if loop is not None:
                 reply_anchor_id = anchor_id if anchor_id and anchor_id != new_message_id else None
                 session = CardSession(new_message_id, chat_id, loop)
                 session.anchor_id = reply_anchor_id
-                self._sessions[new_message_id] = session
+                self._sess_put(new_message_id, session)
                 if reply_anchor_id:
-                    self._sessions[reply_anchor_id] = session
+                    self._sess_put(reply_anchor_id, session)
                 _logger.info(
                     "on_interrupted: create new msg=%s chat=%s anchor=%s",
                     new_message_id[:12],
@@ -475,10 +531,20 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 # v1.1.0 (Task 1.1+1.2): linear is the only creation path now.
                 self._fire_and_forget(self._do_create_linear_card(session), loop)
 
-        self._interrupt_map[old_message_id] = new_message_id
-        for key, val in list(self._interrupt_map.items()):
-            if val == old_message_id:
-                self._interrupt_map[key] = new_message_id
+        # v1.3.0: protect _interrupt_map with its own lock (separate from
+        # _sessions_lock to avoid holding both locks simultaneously → deadlock risk)
+        with self._interrupt_map_lock:
+            self._interrupt_map[old_message_id] = new_message_id
+            for key, val in list(self._interrupt_map.items()):
+                if val == old_message_id:
+                    self._interrupt_map[key] = new_message_id
+            # Prevent unbounded growth: keep only the most recent 200 entries
+            _INTERRUPT_MAP_MAX = 200
+            if len(self._interrupt_map) > _INTERRUPT_MAP_MAX:
+                # Remove oldest entries (first inserted)
+                excess = len(self._interrupt_map) - _INTERRUPT_MAP_MAX
+                for old_key in list(self._interrupt_map.keys())[:excess]:
+                    self._interrupt_map.pop(old_key, None)
 
     def on_completed(
         self,
@@ -519,7 +585,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # 先做直接查找（绕过 _TERMINAL 过滤），检查是否已在完成中/已完成。
         # COMPLETING: 完成流程已启动，另一条路径的 on_completed 正在执行
         # COMPLETED: 完成流程已结束
-        direct_session = self._sessions.get(message_id)
+        direct_session = self._sess_get(message_id)
         if direct_session is not None and direct_session.state in (COMPLETING, COMPLETED):
             _logger.info(
                 "on_completed: idempotent, msg=%s state=%s",
@@ -530,10 +596,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         session = self._get_active_session(message_id)
         if session is None:
-            redirected_id = self._interrupt_map.pop(message_id, None)
+            with self._interrupt_map_lock:
+                redirected_id = self._interrupt_map.pop(message_id, None)
             if redirected_id is not None:
                 # 也检查重定向的 session 是否已在完成中
-                redir_session = self._sessions.get(redirected_id)
+                redir_session = self._sess_get(redirected_id)
                 if redir_session is not None and redir_session.state in (COMPLETING, COMPLETED):
                     _logger.info(
                         "on_completed: idempotent (redirected), msg=%s -> %s state=%s",
@@ -558,7 +625,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             self._cleanup(message_id)
             return False
 
-        _logger.info(
+        # v1.3.0 P1-06: normal-path completion log downgraded to DEBUG (fires
+        # once per session on every successful completion — log noise reduction).
+        # The yield-to-gateway log above stays INFO (edge case, useful for debugging).
+        _logger.debug(
             "on_completed: msg=%s has_card=%s state=%s use_cardkit=%s",
             (message_id or "?")[:12],
             bool(session.card_msg_id),
@@ -744,15 +814,21 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 _logger.debug("background review sender failed", exc_info=True)
 
     def _cleanup(self, message_id: str) -> None:
-        session = self._sessions.pop(message_id, None)
+        session = self._sess_pop(message_id)
         if session is None:
             return
         anchor = getattr(session, "anchor_id", None)
-        if anchor and self._sessions.get(anchor) is session:
-            del self._sessions[anchor]
-        stale_keys = [k for k, v in self._interrupt_map.items() if v == message_id]
-        for k in stale_keys:
-            del self._interrupt_map[k]
+        if anchor:
+            # v1.3.0: atomically check-and-delete the anchor key if it still
+            # points to the same session object (prevents deleting a new
+            # session that reused the anchor key).
+            with self._sessions_lock:
+                if self._sessions.get(anchor) is session:
+                    del self._sessions[anchor]
+        with self._interrupt_map_lock:
+            stale_keys = [k for k, v in self._interrupt_map.items() if v == message_id]
+            for k in stale_keys:
+                del self._interrupt_map[k]
         session.flush.mark_completed()
 
     def _release_session_data(self, session: CardSession) -> None:
@@ -850,17 +926,19 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         - 活跃（STREAMING/COMPLETING/CREATING）+ 超 TTL → 只打日志，不清理
         """
         now = time.time()
-        for mid, s in list(self._sessions.items()):
+        # v1.3.0 P1-05: show longer msg_id in prune logs for easier log correlation.
+        # v1.3.0 P1-01: use thread-safe snapshot to avoid RuntimeError.
+        for mid, s in self._sess_items_snapshot():
             if mid is None or now - s.created_at <= self._session_ttl:
                 continue
             if s.is_terminal_phase:
-                _logger.warning("pruning stale terminal session: msg=%s", mid[:12])
+                _logger.warning("pruning stale terminal session: msg=%s", (mid or "?")[:20])
                 self._cleanup(mid)
             else:
                 # 活跃 session 超 TTL 只打日志，不清理（避免 AI 回调丢失）
                 _logger.warning(
                     "HLS: active session over TTL but not terminal, skip cleanup: msg=%s",
-                    mid[:12],
+                    (mid or "?")[:20],
                 )
 
     @staticmethod

@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Project-Vibe%20Coding-ff69b4" alt="Vibe Coding">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-1.2.0-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.3.0-ff9800.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -124,16 +124,14 @@ All settings go under the `hermes_lark_streaming:` section in `~/.hermes/config.
 
 ```yaml
 hermes_lark_streaming:
-  enabled: true                    # Enable streaming cards
-  linear: true                     # Single-card in-place update (unified panel architecture)
   panel_expanded: false            # Keep panels expanded in completed cards
   streaming_panel_expanded: false  # Keep panels expanded during streaming
   print_strategy: delay            # "fast" (instant) or "delay" (smoother typewriter, default)
-  flush_interval_ms: 100           # Card refresh interval in ms (70–2000, default 100)
+  print_step: 4                    # Typewriter chars per render (default 4, range 1-10, Feishu 7.23+)
+  flush_interval_ms: 100           # Plugin send interval in ms (70-2000, default 100)
   card_ttl_sec: 600               # Card alive detection timeout (seconds)
   max_tool_steps: 20               # Max tool steps shown in panel (default 20, range 1–100)
   max_reasoning_rounds: 20         # Max reasoning rounds shown in panel (default 20, range 1–100)
-  inject_time: false               # Time awareness mode (see below)
   header:
     enabled: false                  # Card header (blue Processing → green Completed / red Error-Stopped). Default off. See below
 
@@ -171,11 +169,6 @@ Default is `false` (off) — cards have no header, matching v1.1.x behavior.
 
 > **Scope**: `header.enabled` only affects agent streaming/completed cards. Cron push cards and gateway-internal message cards are unaffected. `/aowen` command cards always have their own banner-style header (part of the v1.1.0 design language) and are not controlled by this option.
 
-### Time Awareness Mode (`inject_time`)
-
-When `inject_time: true`, the plugin prepends `<time>HH:MM:SS</time>` to each user message so the AI can perceive the current time without calling `date`. XML tags are used because LLMs understand them as metadata and won't mimic them in output. Prefix-cache safe (~6 tokens/message). See [SKILL.md](docs/SKILL.md) for full details.
-
-> **Note**: Hermes v0.17.0+ provides a built-in `gateway.message_timestamps.enabled` feature that injects human-readable timestamps (`[Tue 2026-04-28 13:40:53 CEST]`) into user messages. **If you enable Hermes's `message_timestamps`, disable the plugin's `inject_time`** to avoid duplicate timestamp prefixes. The official `message_timestamps` is recommended over `inject_time`.
 
 ### Reasoning Panel Display
 

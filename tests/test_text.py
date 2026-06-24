@@ -117,7 +117,6 @@ class TestTextState:
         ts = TextState()
         assert ts.display_text == ""
         assert ts.completed_text == ""
-        assert not ts.is_dirty()
 
     def test_on_partial_accumulates(self) -> None:
         ts = TextState()
@@ -160,16 +159,6 @@ class TestTextState:
         ts.accumulated = ""
         assert ts.display_text == "delivered"
 
-    def test_is_dirty_tracking(self) -> None:
-        ts = TextState()
-        assert not ts.is_dirty()
-        ts.on_partial("new text")
-        assert ts.is_dirty()
-        ts.mark_flushed("new text")
-        assert not ts.is_dirty()
-
-    def test_is_dirty_with_explicit_text(self) -> None:
-        ts = TextState()
-        ts.mark_flushed("old")
-        assert ts.is_dirty("new")
-        assert not ts.is_dirty("old")
+# v1.3.0 P1-04: removed test_is_dirty_tracking and test_is_dirty_with_explicit_text
+# — the is_dirty() / mark_flushed() / last_flushed mechanism was dead code
+# (replaced by UnifiedLinearState dirty flags in v1.1.0).
