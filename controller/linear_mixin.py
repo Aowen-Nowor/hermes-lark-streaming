@@ -85,13 +85,6 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-# ---------------------------------------------------------------------------
-# TTL proactive extension
-# ---------------------------------------------------------------------------
-
-_TTL_EXTEND_THRESHOLD_SEC = 540.0  # Extend TTL when card has lived > 540s
-_TTL_EXTEND_DELTA_SEC = 600        # Extend by 600s
-
 
 def _build_seal_summary(state: UnifiedLinearState | None) -> str:
     """Build seal summary from state — answer text or fallback to reasoning.
@@ -497,23 +490,6 @@ class UnifiedControllerMixin:
             return
         assert self._client is not None
 
-        # ── TTL proactive extension ──
-        if session.card_created_at and _time.time() - session.card_created_at > _TTL_EXTEND_THRESHOLD_SEC:
-            try:
-                session.sequence += 1
-                await self._client.cardkit_extend_ttl(
-                    session.card_id,
-                    ttl_seconds=_TTL_EXTEND_DELTA_SEC,
-                    sequence=session.sequence,
-                )
-                _logger.info(
-                    "TTL extended: card=%s seq=%d",
-                    session.card_id[:12],
-                    session.sequence,
-                )
-            except Exception:
-                _logger.debug("TTL extend failed, ignoring", exc_info=True)
-
         actions: list[dict[str, Any]] = []
 
         # ── Phase 2: First content — add answer element (and panel if needed), delete loading hint ──
@@ -649,10 +625,6 @@ class UnifiedControllerMixin:
                         session.card_id, ANSWER_ELEMENT_ID, content, sequence=session.sequence,
                     )
                     state.answer_dirty = False
-                    # v1.3.0: mark that the answer was delivered via stream_element.
-                    # The preservative seal will SKIP the answer partial_update_element
-                    # to avoid bypassing Feishu's typewriter queue (instant output).
-                    session._answer_finalized_via_stream = True
                 except FeishuAPIError as e:
                     if e.code == CARDKIT_STREAMING_CLOSED:
                         session._streaming_closed = True
@@ -810,8 +782,6 @@ class UnifiedControllerMixin:
                     (_time.monotonic() - t_se) * 1000,
                 )
                 state.answer_dirty = False
-                # v1.3.0: mark that the answer was delivered via stream_element.
-                session._answer_finalized_via_stream = True
             except FeishuAPIError as e:
                 if e.code == CARDKIT_STREAMING_CLOSED:
                     if session._streaming_closed_logged:
@@ -1060,8 +1030,6 @@ class UnifiedControllerMixin:
                             sequence=session.sequence,
                         )
                         state.answer_dirty = False
-                        # v1.3.0: mark that the answer was delivered via stream_element.
-                        session._answer_finalized_via_stream = True
                     except FeishuAPIError as e:
                         # v1.1.1: 统一 fallback — 300309 和 300313 都改用 batch_update（不带 tag）
                         if e.code == CARDKIT_STREAMING_CLOSED or is_element_not_found_error(e):
@@ -1121,20 +1089,23 @@ class UnifiedControllerMixin:
             # for performance. Now that streaming is about to be closed, update the answer
             # element with the fully optimized markdown content.
             #
-            # v1.3.0 fix: SKIP this step when the answer was already fully delivered
-            # via stream_element (during normal flush or drain). The partial_update_element
-            # is a component-level API that directly replaces content — it bypasses
-            # Feishu's typewriter queue, causing any pending typewriter text to render
-            # instantly. This is the root cause of the "instant output" jarring effect
-            # when close_streaming fires after a large drain.
+            # v1.3.1 fix: Do NOT skip this step even when the answer was already fully
+            # delivered via stream_element. The previous v1.3.0 guard
+            # (``and not session._answer_finalized_via_stream``) caused the last chunk
+            # of answer text to be permanently lost when Feishu's typewriter queue
+            # hadn't finished rendering by the time close_streaming fired.
             #
-            # When we skip, the streaming content (sent via stream_element) remains as-is.
-            # The raw (un-optimized) text stays visible, which is acceptable — the
-            # optimization (heading demotion, table downgrade) is a minor visual refinement
-            # not worth the jarring instant-replace.
-            if (state is not None and state.answer_text
-                    and "answer" in session._creation_stages
-                    and not session._answer_finalized_via_stream):
+            # Feishu's stream_element is asynchronous — the server-side typewriter
+            # renders characters at print_frequency_ms pace (70ms/char by default).
+            # close_streaming terminates the streaming session immediately, discarding
+            # any un-rendered characters in the typewriter queue. Without a final
+            # partial_update_element as the authoritative "last word", the user sees
+            # a truncated answer (e.g. "服务 + 守护进程 +" instead of the full sentence).
+            #
+            # The instant-replace jarring effect (the original reason for the v1.3.0
+            # guard) is a minor visual issue; content truncation is a P0 data-loss bug.
+            # We accept the visual trade-off to guarantee content completeness.
+            if state is not None and state.answer_text and "answer" in session._creation_stages:
                 optimized_content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(state.answer_text))) or " "
                 seal_actions.append({
                     "action": "partial_update_element",
@@ -1403,10 +1374,10 @@ class UnifiedControllerMixin:
                                     },
                                 })
                             # Update answer element with optimized markdown
-                            # v1.3.0: skip if answer was already delivered via stream_element
-                            # (same rationale as the main seal path — avoid bypassing typewriter)
-                            if (state.answer_text and "answer" in session._creation_stages
-                                    and not session._answer_finalized_via_stream):
+                            # v1.3.1: same fix as main seal path — always send final
+                            # partial_update_element to prevent content truncation
+                            # (see v1.3.1 fix comment in main seal path above).
+                            if state.answer_text and "answer" in session._creation_stages:
                                 optimized_content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(state.answer_text))) or " "
                                 retry_actions.append({
                                     "action": "partial_update_element",
@@ -1610,8 +1581,6 @@ class UnifiedControllerMixin:
                         sequence=session.sequence,
                     )
                     state.answer_dirty = False
-                    # v1.3.0: mark that the answer was delivered via stream_element.
-                    session._answer_finalized_via_stream = True
                 except FeishuAPIError as e:
                     # v1.1.1: 统一 fallback — 300309 和 300313 都改用 batch_update（不带 tag）
                     # 之前 300309 直接 skip 答案丢失；300313 的 fallback 带 tag 报 300312

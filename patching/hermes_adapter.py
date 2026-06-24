@@ -80,11 +80,32 @@ class HermesCompat:
             _logger.debug("HLS: AIAgent not available yet")
         
         # FeishuAdapter
-        try:
-            from gateway.platforms.feishu import FeishuAdapter
-            self.feishu_adapter_class = FeishuAdapter
-        except (ImportError, AttributeError):
-            _logger.debug("HLS: FeishuAdapter not available")
+        # CRITICAL: The gateway loads feishu adapter via hermes_plugins namespace
+        # (importlib creates a separate module object). Patching gateway.platforms.feishu
+        # won't affect the gateway's instance. We MUST find the class through the
+        # same namespace the gateway uses.
+        # Verified on Hermes v0.17.0 (2026-06-24):
+        #   - gateway.platforms.feishu → FAILED (No module named)
+        #   - hermes_plugins.feishu_platform.adapter → OK (gateway runtime creates this)
+        #   - plugins.platforms.feishu.adapter → OK (source path, always available)
+        # The gateway's adapter instance is created from hermes_plugins.feishu_platform.adapter,
+        # so we must patch THAT class, not a different import path.
+        _feishu_import_paths = [
+            "hermes_plugins.feishu_platform.adapter",  # Hermes v0.17+ (gateway runtime)
+            "plugins.platforms.feishu.adapter",        # Source path (always available)
+            "gateway.platforms.feishu",                # Legacy path (Hermes < v0.17)
+        ]
+        for _mod_path in _feishu_import_paths:
+            try:
+                mod = importlib.import_module(_mod_path)
+                if hasattr(mod, "FeishuAdapter"):
+                    self.feishu_adapter_class = getattr(mod, "FeishuAdapter")
+                    _logger.debug("HLS: FeishuAdapter resolved via %s", _mod_path)
+                    break
+            except (ImportError, AttributeError):
+                continue
+        if self.feishu_adapter_class is None:
+            _logger.debug("HLS: FeishuAdapter not available via any import path")
         
         # Cron scheduler
         for mod_name in ("cron.scheduler", "gateway.cron.scheduler"):

@@ -123,7 +123,7 @@ feishu:
 | `max_tool_steps` | `20` | 1–100 | 统一面板中工具步骤最大数量（超限折叠） |
 | `max_reasoning_rounds` | `20` | 1–100 | 统一面板中推理轮次最大数量（超限折叠） |
 | `card_ttl_sec` | `600` | >0 | 会话 TTL（秒），超时卡片失效 |
-| `flush_interval_ms` | `100` | 70–2000 | 插件发送间隔（毫秒） |
+| `flush_interval_ms` | `200` | 70–2000 | 插件发送间隔（毫秒） |
 | `print_strategy` | `delay` | `fast`/`delay` | 打字机效果策略 |
 | `print_step` | `4` | 1–10 | 打字机每次渲染字符数（需飞书7.23+） |
 | `panel_expanded` | `false` | bool | 完成态卡片面板是否展开 |
@@ -146,7 +146,7 @@ hermes_lark_streaming:
   max_tool_steps: 20
   max_reasoning_rounds: 20
   card_ttl_sec: 600
-  flush_interval_ms: 100
+  flush_interval_ms: 200
   print_strategy: delay
   print_step: 4
   header:

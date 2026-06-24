@@ -870,30 +870,51 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             self._fire_and_forget(self._do_linear_complete_with_fallback(session), session._loop)
 
     async def _do_linear_complete_with_fallback(self, session: CardSession) -> None:
-        """线性模式完成，卡片不可用时回退为文本回复."""
+        """线性模式完成，卡片不可用时回退为文本回复.
+
+        v1.3.1 fix: Save answer_text and error_message BEFORE calling
+        _do_linear_complete, because _do_linear_complete calls
+        _release_session_data on failure which clears session.text.
+        Without this, _send_text_fallback would see an empty display_text.
+        """
+        # Snapshot fallback text before _do_linear_complete potentially releases it
+        _fallback_text = ""
+        if session.error_message:
+            _fallback_text = session.error_message
+        elif session.unified_state and session.unified_state.answer_text:
+            _fallback_text = session.unified_state.answer_text
+        elif session.text and session.text.display_text:
+            _fallback_text = session.text.display_text
+
         try:
             result = await self._do_linear_complete(session)
             if not result:
-                await self._send_text_fallback(session)
+                await self._send_text_fallback(session, fallback_text=_fallback_text)
         except Exception:
             _logger.warning(
                 "linear complete with fallback failed: msg=%s",
                 (session.message_id or "?")[:12],
                 exc_info=True,
             )
-            await self._send_text_fallback(session)
+            await self._send_text_fallback(session, fallback_text=_fallback_text)
 
-    async def _send_text_fallback(self, session: CardSession) -> None:
+    async def _send_text_fallback(self, session: CardSession, *, fallback_text: str = "") -> None:
         """卡片不可用时，通过飞书 API 发送文本回复作为兜底.
 
         当卡片创建失败或完成流程异常时，网关文本回复已被 card_sent=True 抑制。
         此方法确保用户至少能看到回复内容，避免"什么都看不到"的情况。
+
+        v1.3.1 fix: Added fallback_text parameter. When _do_linear_complete
+        fails and calls _release_session_data, session.text is cleared.
+        The caller (_do_linear_complete_with_fallback) snapshots the text
+        BEFORE the release and passes it here.
         """
         if not self._client:
             return
         try:
-            # 优先显示错误消息，其次显示回答内容
-            text = session.error_message or session.text.display_text or ""
+            # 优先使用调用方传入的 fallback_text（在 _release_session_data 前快照的）
+            # 其次从 session 读取（用于 _do_linear_complete_with_fallback 以外的调用路径）
+            text = fallback_text or session.error_message or (session.text.display_text if session.text else "") or ""
             if not text.strip():
                 return
             # 限制长度避免过长

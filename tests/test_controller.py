@@ -25,7 +25,12 @@ from hermes_lark_streaming.feishu import (
     FeishuAPIError,
     FeishuClient,
 )
-from hermes_lark_streaming.cardkit import _LOADING_HINT_ELEMENT_ID, _LOADING_ELEMENT_ID
+from hermes_lark_streaming.cardkit import (
+    ANSWER_ELEMENT_ID,
+    UNIFIED_PANEL_ELEMENT_ID,
+    _LOADING_HINT_ELEMENT_ID,
+    _LOADING_ELEMENT_ID,
+)
 from hermes_lark_streaming.state.linear import UnifiedLinearState
 
 
@@ -302,7 +307,6 @@ def _mock_client() -> AsyncMock:
     client.cardkit_update = AsyncMock()
     client.update_card = AsyncMock()
     client.reply_text = AsyncMock(return_value="msg_id_reply")
-    client.cardkit_extend_ttl = AsyncMock()
     return client
 
 
@@ -1136,6 +1140,104 @@ class TestDoLinearComplete:
         _loops_to_cleanup.append(loop)
         session = CardSession("msg_test", "chat_test", loop)
         assert session._streaming_closed is False
+
+    @pytest.mark.asyncio
+    async def test_seal_always_writes_final_answer_after_stream_element(self) -> None:
+        """v1.3.1 regression: _preservative_seal must ALWAYS send a final
+        partial_update_element for the answer element, even when the answer
+        was already fully delivered via stream_element during the drain loop.
+
+        Bug: v1.3.0 added ``_answer_finalized_via_stream`` guard that skipped
+        the final partial_update_element when stream_element had delivered
+        the answer. But Feishu's typewriter queue is asynchronous —
+        close_streaming terminates the streaming session immediately,
+        discarding any un-rendered characters. Result: the last chunk of
+        answer text was permanently lost (e.g. "服务 + 守护进程 +" instead
+        of the full sentence).
+
+        Fix (v1.3.1): removed the guard. Now the seal ALWAYS sends a final
+        partial_update_element as the authoritative "last word" before
+        close_streaming. The instant-replace jarring effect is accepted as
+        a minor visual trade-off for content completeness.
+
+        This test uses a CardSession subclass that simulates the v1.3.0 bug
+        scenario: ``_answer_finalized_via_stream=True`` (as if the drain loop
+        had just delivered the answer via stream_element). The seal must
+        STILL send the final partial_update_element regardless of this flag.
+        """
+        ctrl = _setup_ctrl()
+        client = ctrl._client
+
+        # Create a session subclass that allows the _answer_finalized_via_stream
+        # attribute (simulating v1.3.0's __slots__ definition). This lets us
+        # set the flag to True, which is the exact state the drain loop would
+        # leave the session in after stream_element succeeds.
+        class _BugScenarioSession(CardSession):
+            __slots__ = ("_answer_finalized_via_stream",)
+
+        loop = asyncio.new_event_loop()
+        _loops_to_cleanup.append(loop)
+        session = _BugScenarioSession("msg_seal_final_write", "chat_456", loop)
+        session.linear = True
+        session.unified_state = UnifiedLinearState()
+        session.use_cardkit = True
+        session._card_ready.set()
+        session.state = STREAMING
+        session.card_id = "card_final_write"
+        session._creation_stages.add("panel")
+        session._creation_stages.add("answer")
+        session._creation_stages.add("hint_removed")
+        session.unified_state.answer_text = "这是完整的回答内容，不应被裁剪。"
+        session.unified_state.answer_dirty = False
+        session.existing_elements = {ANSWER_ELEMENT_ID, UNIFIED_PANEL_ELEMENT_ID}
+        # Set the flag to True — this is what the v1.3.0 drain loop did
+        # after stream_element succeeded. The v1.3.0 guard would then skip
+        # Step 2. The v1.3.1 fix must NOT check this flag at all.
+        session._answer_finalized_via_stream = True
+        ctrl._sessions["msg_seal_final_write"] = session
+
+        # Call _preservative_seal directly (bypass drain loop)
+        result = await ctrl._preservative_seal(
+            session,
+            footer_data={"duration": 1.0, "model": "test"},
+            is_error=False,
+            is_aborted=False,
+            error_message="",
+            footer_fields=[["status", "elapsed"]],
+            footer_show_label=False,
+        )
+
+        # The seal must have succeeded
+        assert result is True, "seal should succeed"
+
+        # Verify the batch_update call contained a partial_update_element
+        # for ANSWER_ELEMENT_ID with the full answer text
+        batch_calls = client.cardkit_batch_update.call_args_list
+        assert len(batch_calls) > 0, "batch_update should have been called"
+
+        found_answer_update = False
+        for call in batch_calls:
+            actions = call.args[1] if len(call.args) > 1 else call.kwargs.get("actions", [])
+            for action in actions:
+                if (action.get("action") == "partial_update_element"
+                        and action.get("params", {}).get("element_id") == ANSWER_ELEMENT_ID):
+                    found_answer_update = True
+                    content = action["params"]["partial_element"].get("content", "")
+                    assert "这是完整的回答内容" in content, (
+                        f"final partial_update_element must contain full answer text, "
+                        f"got: {content!r}"
+                    )
+                    break
+            if found_answer_update:
+                break
+
+        assert found_answer_update, (
+            "v1.3.1 regression: _preservative_seal must ALWAYS send a final "
+            "partial_update_element for ANSWER_ELEMENT_ID, even when the answer "
+            "was delivered via stream_element (_answer_finalized_via_stream=True). "
+            "Without this, the last chunk of answer text is permanently lost when "
+            "close_streaming fires before Feishu's typewriter queue finishes rendering."
+        )
 
 
 class TestLinearOnThinkingNativeReasoningDedup:

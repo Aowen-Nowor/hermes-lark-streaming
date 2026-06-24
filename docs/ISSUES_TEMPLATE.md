@@ -73,6 +73,7 @@
 |------|-----|
 | 插件版本 | <!-- 如 1.0.7，可通过 `hermes plugins list` 查看 --> |
 | Hermes 版本 | <!-- 如 0.6.x --> |
+| Hermes 安装方式 | <!-- 如 pip install / pip editable / 源码运行 / Docker；可通过 `which hermes` 和 `pip show hermes-agent` 确认 --> |
 | Python 版本 | <!-- 如 3.11.5 --> |
 | 操作系统 | <!-- 如 Ubuntu 22.04 / macOS 14 / Termux --> |
 | 飞书/Lark | <!-- 国内版 / 国际版 --> |

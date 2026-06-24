@@ -10,7 +10,7 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 1.3.0 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
+| 版本 | 1.3.1 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
 
 ---
 
@@ -234,7 +234,7 @@ hermes_lark_streaming:
   streaming_panel_expanded: false
   print_strategy: delay            # "fast" 或 "delay"
   print_step: 4                    # 打字机每次渲染字符数（默认4，范围1~10，需飞书7.23+）
-  flush_interval_ms: 100           # 插件发送间隔（默认100ms）
+  flush_interval_ms: 200           # 插件发送间隔（默认200ms）
   card_ttl_sec: 600
   max_tool_steps: 20               # 范围 1~100
   max_reasoning_rounds: 20         # 范围 1~100
@@ -351,4 +351,4 @@ hermes gateway restart
 
 ---
 
-*Last updated: 2026-06-24 | Version: 1.3.0*
+*Last updated: 2026-06-24 | Version: 1.3.1*
