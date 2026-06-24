@@ -118,6 +118,40 @@ class TestEscapeMarkdownAsterisks:
         assert r"4\*3000" in result
         assert r"10\*5000" in result
 
+    # ── v1.3.0: null-byte defense tests ──
+
+    def test_null_bytes_in_input_stripped(self):
+        """v1.3.0: null bytes in input (from AI or encoding) must be stripped."""
+        text = "修复内容：\n- \x00P0P\x00 解析 Python dict-repr 字符串"
+        result = self.escape(text)
+        assert "\x00" not in result  # No null bytes in output
+
+    def test_null_bytes_with_bold_no_crash(self):
+        """v1.3.0: null bytes + bold markers must not crash or leak placeholders."""
+        text = "\x00P5P\x00 and **real bold** text"
+        result = self.escape(text)
+        assert "\x00" not in result
+        assert "**real bold**" in result  # Bold preserved
+
+    def test_null_bytes_no_asterisks_stripped(self):
+        """v1.3.0: null bytes with no asterisks → stripped on early return."""
+        text = "- \x00P0P\x00 item one\n- \x00P1P\x00 item two"
+        result = self.escape(text)
+        assert "\x00" not in result
+
+    def test_spurious_placeholder_no_index_error(self):
+        """v1.3.0: spurious high-index placeholder must not cause IndexError."""
+        text = "\x00P99P\x00 **bold** text"
+        result = self.escape(text)
+        assert "\x00" not in result
+        assert "**bold**" in result
+
+    def test_normal_text_unchanged_with_null_byte_fix(self):
+        """v1.3.0: normal bold text still works after null-byte fix."""
+        result = self.escape("**bold** normal text")
+        assert "**bold**" in result
+        assert "\x00" not in result
+
 
 # ── P0-02: started_at=None ──
 

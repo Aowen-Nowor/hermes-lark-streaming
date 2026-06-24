@@ -106,7 +106,23 @@ def escape_markdown_asterisks(text: str) -> str:
     3. 提取合法斜体 *...* → 保护（开头*不在ASCII字母/数字/下划线后）
     4. 转义所有剩余 *（这些不可能是合法 Markdown，飞书会误配对）
     5. 还原保护区域
+
+    v1.3.0 fix: defensive cleanup of null bytes. The placeholder pattern
+    ``\\x00P{i}P\\x00`` uses null bytes as delimiters. If the INPUT text
+    already contains null bytes (e.g. the AI reproduced the pattern from
+    source code, or an encoding glitch introduced them), the restoration
+    regex could match AI-generated placeholders and raise IndexError, or
+    the ``if _protected`` guard could skip restoration leaving our own
+    placeholders leaked. Fix: strip null bytes from input AND output.
     """
+    # v1.3.0 fix: strip any pre-existing null bytes from the input.
+    # Null bytes are never legitimate in markdown text — they are either
+    # encoding artifacts or leaked placeholders from a previous call.
+    # Stripping them here prevents the restoration regex from matching
+    # spurious placeholder patterns and raising IndexError.
+    if '\x00' in text:
+        text = text.replace('\x00', '')
+
     if '*' not in text:
         return text
 
@@ -136,10 +152,27 @@ def escape_markdown_asterisks(text: str) -> str:
 
     # Step 5: 还原保护区域
     # v1.3.0 perf: single regex sub instead of per-block str.replace (O(K×N) → O(N))
+    # v1.3.0 fix: wrap in try/except to prevent IndexError from leaking placeholders
+    # if the text contains spurious placeholder patterns we didn't create.
     if _protected:
-        text = _RE_PROTECTED_PLACEHOLDER.sub(
-            lambda m: _protected[int(m.group(1))], text
-        )
+        try:
+            text = _RE_PROTECTED_PLACEHOLDER.sub(
+                lambda m: _protected[int(m.group(1))], text
+            )
+        except (IndexError, ValueError):
+            # Fallback: per-block str.replace (the original v1.2.1 approach).
+            # This only replaces placeholders with valid indices; any spurious
+            # placeholder patterns (from AI text or encoding artifacts) are
+            # left in place and stripped by the final null-byte cleanup below.
+            for i, block in enumerate(_protected):
+                text = text.replace(f'\x00P{i}P\x00', block)
+
+    # v1.3.0 fix: final safety net — strip any remaining null bytes.
+    # This catches: (a) spurious placeholder patterns we didn't create,
+    # (b) any null bytes that survived the restoration, (c) encoding artifacts.
+    # Null bytes render as boxes (□) in Feishu and must never reach the API.
+    if '\x00' in text:
+        text = text.replace('\x00', '')
 
     return text
 
