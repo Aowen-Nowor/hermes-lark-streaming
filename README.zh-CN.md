@@ -129,7 +129,7 @@ hermes_lark_streaming:
   panel_expanded: false            # 完成态卡片中面板是否保持展开
   streaming_panel_expanded: false  # 流式态卡片中面板是否保持展开
   print_strategy: delay            # "fast"（即时）或 "delay"（更丝滑打字机，默认）
-  flush_interval_ms: 100           # 卡片刷新间隔（毫秒，70~2000，默认 100）
+  flush_interval_ms: 200           # 卡片刷新间隔（毫秒，70~2000，默认 200）。插件调 stream_element API 的节流间隔，不是飞书打字机速度
   card_ttl_sec: 600               # 卡片存活检测超时（秒）
   max_tool_steps: 20               # 统一面板最多显示的工具步骤数（默认20，范围1~100）
   max_reasoning_rounds: 20         # 统一面板最多显示的推理轮次数（默认20，范围1~100）

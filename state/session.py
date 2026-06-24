@@ -47,6 +47,8 @@ class CardSession:
         "_streaming_closed_logged",
         "_was_aborted",
         "_answer_finalized_via_stream",
+        "_last_stream_element_time",
+        "_last_stream_element_len",
         "anchor_id",
         "card_created_at",
         "card_id",
@@ -143,6 +145,12 @@ class CardSession:
         # action would replace the streaming content directly (bypassing Feishu's
         # typewriter queue), causing the "instant output" jarring effect.
         self._answer_finalized_via_stream: bool = False
+        # v1.3.0: Track the last stream_element send time and total answer text
+        # length sent. Used to estimate how long Feishu's typewriter queue needs
+        # to finish rendering before close_streaming can safely fire without
+        # truncating the typewriter effect (which causes "instant output").
+        self._last_stream_element_time: float = 0.0
+        self._last_stream_element_len: int = 0
         self._card_ready: asyncio.Event = asyncio.Event()
 
     # ------------------------------------------------------------------

@@ -437,3 +437,85 @@ class TestYAMLErrorHandling:
         # yaml.safe_load on bad yaml raises YAMLError
         with pytest.raises(yaml.YAMLError):
             yaml.safe_load("key: [\n  invalid\n")
+
+
+# ── v1.3.0: typewriter drain delay estimation ──
+
+
+class TestTypewriterDrainDelay:
+    """Test _estimate_typewriter_drain_delay for close_streaming delay."""
+
+    def test_no_stream_element_sent_returns_zero(self):
+        """If stream_element was never sent, no delay needed."""
+        from hermes_lark_streaming.controller.linear_mixin import _estimate_typewriter_drain_delay
+
+        class FakeSession:
+            _last_stream_element_len = 0
+            _last_stream_element_time = 0.0
+
+        assert _estimate_typewriter_drain_delay(FakeSession()) == 0.0
+
+    def test_small_backlog_returns_zero(self):
+        """Small backlog (< 30 chars) doesn't need delay."""
+        from hermes_lark_streaming.controller.linear_mixin import _estimate_typewriter_drain_delay
+        import time as _t
+
+        class FakeSession:
+            _last_stream_element_len = 20  # Small text
+            _last_stream_element_time = _t.monotonic()  # Just now
+
+        # 20 chars < 30 threshold → no delay
+        assert _estimate_typewriter_drain_delay(FakeSession()) == 0.0
+
+    def test_large_backload_recent_send_returns_delay(self):
+        """Large backlog with recent send → delay > 0."""
+        from hermes_lark_streaming.controller.linear_mixin import _estimate_typewriter_drain_delay
+        import time as _t
+
+        class FakeSession:
+            _last_stream_element_len = 200  # Large text
+            _last_stream_element_time = _t.monotonic()  # Just now
+
+        # 200 chars backlog, just sent → ~200 * 70ms = 14s, capped at 3s
+        delay = _estimate_typewriter_drain_delay(FakeSession())
+        assert delay > 0
+        assert delay <= 3.0  # Capped
+
+    def test_elapsed_time_reduces_delay(self):
+        """If enough time passed, backlog shrinks and delay decreases."""
+        from hermes_lark_streaming.controller.linear_mixin import _estimate_typewriter_drain_delay
+        import time as _t
+
+        class FakeSession:
+            _last_stream_element_len = 100
+            _last_stream_element_time = _t.monotonic() - 3.0  # 3 seconds ago
+
+        # 100 chars, 3s elapsed → rendered ~42 chars, backlog ~58, delay ~4s capped at 3s
+        delay = _estimate_typewriter_drain_delay(FakeSession())
+        assert delay > 0
+
+    def test_fully_rendered_returns_zero(self):
+        """If enough time passed for full render, no delay."""
+        from hermes_lark_streaming.controller.linear_mixin import _estimate_typewriter_drain_delay
+        import time as _t
+
+        class FakeSession:
+            _last_stream_element_len = 50
+            _last_stream_element_time = _t.monotonic() - 10.0  # 10s ago
+
+        # 50 chars, 10s elapsed → rendered ~142 chars (all done), backlog < 0
+        # But 50 < 30 threshold? No, 50 > 30.
+        # rendered = 10000/70 = 142, backlog = 50 - 142 = -92 < 30 → 0
+        assert _estimate_typewriter_drain_delay(FakeSession()) == 0.0
+
+    def test_delay_capped_at_max(self):
+        """Delay never exceeds _CLOSE_STREAMING_MAX_DELAY_SEC (3.0s)."""
+        from hermes_lark_streaming.controller.linear_mixin import _estimate_typewriter_drain_delay
+        import time as _t
+
+        class FakeSession:
+            _last_stream_element_len = 10000  # Huge text
+            _last_stream_element_time = _t.monotonic()  # Just now
+
+        delay = _estimate_typewriter_drain_delay(FakeSession())
+        assert delay == 3.0  # Capped
