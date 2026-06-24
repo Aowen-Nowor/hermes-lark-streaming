@@ -59,7 +59,6 @@ __all__ = [
     '_gateway_cards_lock',
     '_gw_runner_patched',
     '_patch_status',
-    '_inject_time_guard',
     # Functions
     '_get_config',
     '_get_event_message_id',
@@ -74,7 +73,6 @@ __all__ = [
     '_wrap_run_agent',
     '_wrap_run_background_task',
     '_wrap_cron_deliver',
-    '_inject_time_prefix',
     '_wrap_run_conversation',
     # From callbacks
     '_maybe_wrap_callbacks',
@@ -118,7 +116,6 @@ _thread_local_ctx.data = None
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-# ── Module-level Config singleton for inject_time ──────────────────
 # Reused across calls so we don't create a new Config() per message.
 # v1.3.0 P1-03: _config global cache removed — Config is a singleton since
 # v1.2.0 (Config() always returns the same instance), so the outer cache was
@@ -161,12 +158,8 @@ _gw_runner_patched: bool = False
 # successfully applied and which failed/skipped.
 _patch_status: dict[str, Any] = {}
 
-# ── Thread-local re-entrancy guard for _inject_time_prefix ───────────
 # When both the module-level patch and the direct AIAgent patch are active,
-# AIAgent.run_conversation → (direct patch) _inject_time_prefix → orig →
-# agent.conversation_loop.run_conversation → (module patch) _inject_time_prefix.
 # The guard prevents the second call from injecting the prefix again.
-_inject_time_guard = threading.local()
 
 
 def _get_event_message_id() -> str | None:
@@ -186,7 +179,6 @@ def _get_thread_local_ctx() -> dict | None:
 # These imports must come AFTER shared state is defined to avoid circular
 # import issues (sub-modules import shared state from this module).
 # The sub-modules are:
-#   gateway   — GatewayRunner wrappers, inject_time, cron
 #   callbacks — _maybe_wrap_callbacks and inner wrappers
 #   adapter   — FeishuAdapter wrappers, clarify cards
 
@@ -196,7 +188,6 @@ from .gateway import (  # noqa: E402
     _wrap_run_agent,
     _wrap_run_background_task,
     _wrap_cron_deliver,
-    _inject_time_prefix,
     _wrap_run_conversation,
 )
 from .callbacks import (  # noqa: E402
@@ -345,7 +336,6 @@ def apply_patches() -> None:
        equivalent to the module-level patch.
 
     Both paths call ``_maybe_wrap_callbacks(self)`` and handle
-    ``inject_time``.  The re-entrancy guard in ``_inject_time_prefix``
     ensures no double-injection when both are active.
     """
     if getattr(apply_patches, "_applied", False):
@@ -410,7 +400,6 @@ def apply_patches() -> None:
 
     # ── Patch run_conversation (strategy depends on Hermes layout) ──
     # Both strategies are functionally equivalent — they both call
-    # _maybe_wrap_callbacks(self) and handle inject_time.
     # The module-level patch is preferred only because it intercepts
     # ALL callers, not just AIAgent.
 
@@ -443,7 +432,6 @@ def apply_patches() -> None:
     # Always apply the direct AIAgent patch as well — it serves as:
     # 1. The PRIMARY patch when conversation_loop doesn't exist (older Hermes)
     # 2. A belt-and-suspenders backup when conversation_loop IS patched
-    # The re-entrancy guard in _inject_time_prefix prevents double-injection.
     _apply_direct_agent_patch()
 
     # ── Cron scheduler ──
@@ -616,10 +604,8 @@ def _apply_direct_agent_patch() -> None:
             persist_user_timestamp=None,
             **kwargs,
         ):
-            # ── inject_time: prepend current time to user_message ──
-            user_message, persist_user_message = _inject_time_prefix(
-                user_message, persist_user_message
-            )
+            # v1.3.0: inject_time removed — Hermes v0.17.0+ has built-in
+            # gateway.message_timestamps.enabled for this purpose.
 
             _maybe_wrap_callbacks(self)
             try:
@@ -639,9 +625,7 @@ def _apply_direct_agent_patch() -> None:
                 call_kwargs.update(kwargs)
                 return _orig_method(self, user_message, **call_kwargs)
             finally:
-                # Always reset the re-entrancy guard so the next message
-                # in the same thread can be injected again.
-                _inject_time_guard.active = False
+                pass  # v1.3.0: inject_time guard removed
 
         _patched_run_conversation._hls_direct_patched = True
         AIAgent.run_conversation = _patched_run_conversation

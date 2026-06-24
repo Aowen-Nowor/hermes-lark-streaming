@@ -28,16 +28,17 @@ class TestEnabled:
         assert cfg.enabled is False
 
     def test_enabled_missing(self) -> None:
+        # v1.3.0: enabled defaults to True (no longer needs explicit config)
         cfg = _make_config({"hermes_lark_streaming": {}})
-        assert cfg.enabled is False
+        assert cfg.enabled is True
 
     def test_no_hermes_lark_streaming_section(self) -> None:
         cfg = _make_config({})
-        assert cfg.enabled is False
+        assert cfg.enabled is True
 
     def test_hermes_lark_streaming_section_not_dict(self) -> None:
         cfg = _make_config({"hermes_lark_streaming": "invalid"})
-        assert cfg.enabled is False
+        assert cfg.enabled is True
 
 
 class TestFooterFields:
@@ -221,36 +222,6 @@ class TestPlatformCfg:
         cfg = _make_config({})
         with patch.dict(os.environ, {}, clear=True):
             assert cfg._platform_cfg() == {}
-
-
-class TestInjectTime:
-    def _make_inject_time_config(self, raw: dict[str, Any]) -> Config:
-        """Create a Config with _reload_cached mocked to return given raw dict."""
-        cfg = Config()
-        cfg._reload_cached = lambda: raw  # type: ignore[assignment]
-        return cfg
-
-    def test_inject_time_true(self) -> None:
-        cfg = self._make_inject_time_config({"hermes_lark_streaming": {"inject_time": True}})
-        assert cfg.inject_time is True
-
-    def test_inject_time_false(self) -> None:
-        cfg = self._make_inject_time_config({"hermes_lark_streaming": {"inject_time": False}})
-        assert cfg.inject_time is False
-
-    def test_inject_time_missing_defaults_false(self) -> None:
-        cfg = self._make_inject_time_config({"hermes_lark_streaming": {}})
-        assert cfg.inject_time is False
-
-    def test_inject_time_no_hermes_lark_streaming_section(self) -> None:
-        cfg = self._make_inject_time_config({})
-        assert cfg.inject_time is False
-
-    def test_inject_time_hermes_lark_streaming_not_dict(self) -> None:
-        cfg = self._make_inject_time_config({"hermes_lark_streaming": "invalid"})
-        assert cfg.inject_time is False
-
-
 class TestLinear:
     def test_linear_true(self) -> None:
         cfg = _make_config({"hermes_lark_streaming": {"linear": True}})
@@ -309,158 +280,6 @@ class TestPrintStrategy:
     def test_print_strategy_invalid_defaults_delay(self) -> None:
         cfg = _make_config({"hermes_lark_streaming": {"print_strategy": "invalid"}})
         assert cfg.print_strategy == "delay"
-
-
-class TestReloadCached:
-    """_reload_cached() TTL 缓存行为测试."""
-
-    def test_returns_cached_result_within_ttl(self) -> None:
-        """在 TTL 窗口内，多次调用返回同一缓存结果，不重复读磁盘."""
-        cfg = Config()
-        raw1 = {"hermes_lark_streaming": {"inject_time": True}}
-        raw2 = {"hermes_lark_streaming": {"inject_time": False}}
-
-        call_count = 0
-        original_reload_cached = cfg._reload_cached
-
-        def counting_reload_cached() -> dict[str, Any]:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return raw1
-            return raw2
-
-        cfg._reload_cached = counting_reload_cached  # type: ignore[assignment]
-
-        # First call populates the cache
-        result1 = cfg._reload_cached()
-        assert result1 == raw1
-        assert call_count == 1
-
-    def test_reloads_after_ttl_expires(self) -> None:
-        """TTL 过期后，_reload_cached 重新读取磁盘（不再返回旧缓存）."""
-        cfg = Config()
-        raw_old = {"hermes_lark_streaming": {"inject_time": False}}
-        raw_new = {"hermes_lark_streaming": {"inject_time": True}}
-
-        # Pre-populate the cache with the old value
-        cfg._reload_cache = raw_old
-        cfg._reload_cache_at = time.monotonic() - 10.0  # TTL 已过期
-
-        # Mock the actual disk read to return new data
-        with patch.object(Config, "_reload_cached", return_value=raw_new):
-            result = cfg._reload_cached()
-            assert result == raw_new
-
-    def test_cache_is_populated_on_first_call(self) -> None:
-        """首次调用后 _reload_cache 和 _reload_cache_at 被设置."""
-        cfg = Config()
-        raw = {"hermes_lark_streaming": {"inject_time": True}}
-
-        assert cfg._reload_cache is None
-        assert cfg._reload_cache_at == 0.0
-
-        cfg._reload_cached = lambda: raw  # type: ignore[assignment]
-        cfg._reload_cached()
-
-        # Since we mocked _reload_cached, the internal state is set by the mock.
-        # Let's test with the real method instead.
-        cfg2 = Config()
-        cfg2._reload_cache = raw
-        cfg2._reload_cache_at = time.monotonic()
-
-        # Within TTL, should return the cached value
-        result = cfg2._reload_cached()
-        assert result is raw
-
-    def test_ttl_boundary_returns_cached(self) -> None:
-        """刚好在 TTL 边界内（小于 TTL），返回缓存."""
-        cfg = Config()
-        raw = {"hermes_lark_streaming": {"inject_time": True}}
-        now = time.monotonic()
-
-        cfg._reload_cache = raw
-        cfg._reload_cache_at = now - 4.99  # TTL is 5.0 seconds
-
-        # Should still return cached (within TTL)
-        result = cfg._reload_cached()
-        assert result is raw
-
-    def test_ttl_boundary_reloads_after_expiry(self) -> None:
-        """刚好超过 TTL 边界，重新读取."""
-        cfg = Config()
-        raw_old = {"hermes_lark_streaming": {"inject_time": False}}
-        raw_new = {"hermes_lark_streaming": {"inject_time": True}}
-
-        cfg._reload_cache = raw_old
-        cfg._reload_cache_at = time.monotonic() - 60.01  # Just over TTL
-
-        # Need to mock the actual file reading part
-        # Now uses _get_hermes_config_path() for multi-Profile support
-        mock_path = MagicMock()
-        mock_path.exists.return_value = True
-        mock_path.read_text.return_value = "hermes_lark_streaming:\n  inject_time: true\n"
-        with patch("hermes_lark_streaming.config.reader._get_hermes_config_path", return_value=mock_path), \
-             patch("hermes_lark_streaming.config.reader.yaml") as mock_yaml:
-            mock_yaml.safe_load.return_value = raw_new
-
-            result = cfg._reload_cached()
-            assert result == raw_new
-            assert cfg._reload_cache_at > 0
-
-    def test_show_reasoning_uses_reload_cached(self) -> None:
-        """show_reasoning 属性使用 _reload_cached 而非 _reload."""
-        cfg = Config()
-        reload_cached_calls = 0
-        reload_calls = 0
-        raw = {"display": {"platforms": {"feishu": {"show_reasoning": True}}}}
-
-        original_reload_cached = cfg._reload_cached
-
-        def counting_reload_cached() -> dict[str, Any]:
-            nonlocal reload_cached_calls
-            reload_cached_calls += 1
-            return raw
-
-        def counting_reload() -> dict[str, Any]:
-            nonlocal reload_calls
-            reload_calls += 1
-            return raw
-
-        cfg._reload_cached = counting_reload_cached  # type: ignore[assignment]
-        cfg._reload = counting_reload  # type: ignore[assignment]
-
-        _ = cfg.show_reasoning
-
-        assert reload_cached_calls == 1
-        assert reload_calls == 0  # _reload should NOT be called
-
-    def test_inject_time_uses_reload_cached(self) -> None:
-        """inject_time 属性使用 _reload_cached 而非 _reload."""
-        cfg = Config()
-        reload_cached_calls = 0
-        reload_calls = 0
-        raw = {"hermes_lark_streaming": {"inject_time": True}}
-
-        def counting_reload_cached() -> dict[str, Any]:
-            nonlocal reload_cached_calls
-            reload_cached_calls += 1
-            return raw
-
-        def counting_reload() -> dict[str, Any]:
-            nonlocal reload_calls
-            reload_calls += 1
-            return raw
-
-        cfg._reload_cached = counting_reload_cached  # type: ignore[assignment]
-        cfg._reload = counting_reload  # type: ignore[assignment]
-
-        _ = cfg.inject_time
-
-        assert reload_cached_calls == 1
-        assert reload_calls == 0  # _reload should NOT be called
-
-
 class TestGetHermesConfigPath:
     """_get_hermes_config_path() 动态路径解析测试 — 多 Profile 场景."""
 
@@ -495,14 +314,14 @@ class TestGetHermesConfigPath:
 
 
     def test_flush_interval_ms_default(self) -> None:
-        """flush_interval_ms 默认 200ms."""
+        """flush_interval_ms 默认 100ms (v1.3.0)."""
         cfg = Config()
-        assert cfg.flush_interval_ms == 200.0
+        assert cfg.flush_interval_ms == 100.0
 
     def test_flush_interval_sec_default(self) -> None:
-        """flush_interval_sec 默认 0.2 秒."""
+        """flush_interval_sec 默认 0.1 秒 (v1.3.0)."""
         cfg = Config()
-        assert cfg.flush_interval_sec == 0.2
+        assert cfg.flush_interval_sec == 0.1
 
     def test_flush_interval_ms_custom(self, tmp_path: object) -> None:
         """flush_interval_ms 可配置."""
@@ -588,3 +407,27 @@ class TestConfigSingleton:
             # controller 持有的实例现在应读到新值
             assert ctrl_cfg.header_enabled is True, \
                 "reload 后 controller 持有实例的缓存应被清除，读到新配置"
+
+
+class TestPrintStep:
+    """v1.3.0: print_step 配置项测试."""
+
+    def test_default(self) -> None:
+        cfg = _make_config({"hermes_lark_streaming": {}})
+        assert cfg.print_step == 4
+
+    def test_custom(self) -> None:
+        cfg = _make_config({"hermes_lark_streaming": {"print_step": 2}})
+        assert cfg.print_step == 2
+
+    def test_min_clamp(self) -> None:
+        cfg = _make_config({"hermes_lark_streaming": {"print_step": 0}})
+        assert cfg.print_step == 1
+
+    def test_max_clamp(self) -> None:
+        cfg = _make_config({"hermes_lark_streaming": {"print_step": 99}})
+        assert cfg.print_step == 10
+
+    def test_no_section(self) -> None:
+        cfg = _make_config({})
+        assert cfg.print_step == 4

@@ -90,13 +90,13 @@ class Config:
 
     @property
     def enabled(self) -> bool:
-        """是否启用流式卡片."""
+        """是否启用流式卡片. 默认 True（无需配置）."""
         sec = self._plugin_sec()
-        return _to_bool(sec.get("enabled", False))
+        return _to_bool(sec.get("enabled", True), default=True)
 
     @property
     def linear(self) -> bool:
-        """是否启用线性单卡模式，按事件顺序动态更新卡片元素."""
+        """线性单卡模式. 默认 True（无需配置，v1.1.0 起唯一模式）."""
         sec = self._plugin_sec()
         return _to_bool(sec.get("linear", True), default=True)
 
@@ -154,16 +154,27 @@ class Config:
         return strategy if strategy in ("fast", "delay") else "delay"
 
     @property
-    def flush_interval_ms(self) -> float:
-        """流式卡片刷新间隔（毫秒），用于诊断日志.
+    def print_step(self) -> int:
+        """飞书打字机每次渲染的字符数（print_step）.
 
-        默认值 200ms（v1.2.1 从 100ms 上调）：生产日志显示单次对话
-        571 次 API 调用（每 ~500ms 实际间隔），用户感知上 200ms 和
-        100ms 的打字机效果无差别，但 API 调用量减半。
-        最小值 70ms：对齐飞书 CardKit 官方默认 print_frequency_ms。
+        飞书 CardKit 流式更新参数：每次 70ms 渲染 N 个字符。
+        默认 4（每次渲染4字符，速度是 step=1 的4倍）。
+        范围 1~10：太小打字机太慢，太大失去打字机效果。
+        需飞书 7.23+ 客户端支持自定义参数。
         """
         sec = self._plugin_sec()
-        ms = float(sec.get("flush_interval_ms", 200))
+        val = int(sec.get("print_step", 4))
+        return max(1, min(10, val))
+
+    @property
+    def flush_interval_ms(self) -> float:
+        """插件调用 stream_element API 的节流间隔（毫秒）.
+
+        这是插件侧的发送频率，不是飞书打字机速度。
+        默认 100ms。
+        """
+        sec = self._plugin_sec()
+        ms = float(sec.get("flush_interval_ms", 100))
         return max(70.0, min(2000.0, ms))
 
     @property
@@ -227,22 +238,6 @@ class Config:
         if fields and isinstance(fields[0], str):
             return [fields]
         return fields
-
-    @property
-    def inject_time(self) -> bool:
-        """是否在用户消息前注入当前时间，让模型无需调用 date 工具即可感知时间.
-
-        默认关闭。开启后，每条用户消息前会添加 ``<time>HH:MM:SS</time>`` 前缀，
-        前缀同时写入 DB（保证 prefix cache 一致性）。
-        使用 XML 标签格式而非方括号格式，避免 LLM 忽略或模仿时间前缀。
-
-        通过 TTL 缓存读取，用户运行时修改配置文件后最多延迟
-        _RELOAD_CACHE_TTL 秒生效，避免高频访问时反复读磁盘。
-        """
-        sec = self._reload_cached().get("hermes_lark_streaming")
-        if not isinstance(sec, dict):
-            return False
-        return _to_bool(sec.get("inject_time", False))
 
     @property
     def footer_show_label(self) -> bool:

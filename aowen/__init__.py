@@ -466,7 +466,6 @@ def build_status_card() -> dict[str, Any]:
         ]
         card_cfg = [
             f"`gateway_cards`: `{cfg.gateway_cards}`",
-            f"`inject_time`: `{cfg.inject_time}`",
             f"`panel_expanded`: `{cfg.panel_expanded}`",
             f"`streaming_panel_expanded`: `{cfg.streaming_panel_expanded}`",
             f"`show_reasoning`: `{cfg.show_reasoning}`",

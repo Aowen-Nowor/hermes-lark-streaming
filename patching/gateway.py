@@ -4,7 +4,6 @@ Split from monkey_patch.py — contains:
   - _wrap_handle_message()
   - _wrap_handle_message_with_agent()
   - _wrap_run_agent()
-  - _inject_time_guard / _inject_time_prefix()
   - _wrap_run_conversation()
   - _wrap_run_background_task()
   - _wrap_cron_deliver()
@@ -24,7 +23,6 @@ from . import (
     _started_msg_ids_lock,
     _thread_local_ctx,
     _logger,
-    _inject_time_guard,
 )
 
 
@@ -621,70 +619,6 @@ def _wrap_run_agent(orig: Callable) -> Callable:
     return wrapper
 
 
-# ── AIAgent.run_conversation wrapper (callback interception) ───────
-
-
-def _inject_time_prefix(user_message: str | None, persist_user_message: str | None) -> tuple[str | None, str | None]:
-    """Prepend current time to user_message when inject_time is enabled.
-
-    Returns (modified_user_message, modified_persist_user_message).
-    Both are prefixed with ``<time>HH:MM:SS</time>`` so the DB-stored
-    content matches what the API received — preserving prefix cache
-    consistency.
-
-    Uses XML-style tags instead of ``[HH:MM:SS CST]`` because:
-    - LLMs universally understand XML tags as structured metadata, not
-      conversational style — they won't mimic the format in responses.
-    - Bracket-prefixed time (``[14:30:05 CST]``) can be ignored as noise
-      by some models, or worse, mimicked in their output.
-    - The date is omitted because Hermes's system prompt already contains
-      the current date, so only the time portion is needed.
-    - The timezone suffix (CST) is omitted for brevity; the system prompt
-      establishes the timezone context.
-
-    Re-entrancy safe: if called again from a nested patch layer (e.g.
-    AIAgent.run_conversation → module-level run_conversation), the second
-    call is a no-op — the prefix was already added by the outer layer.
-    """
-    # Re-entrancy guard: skip if an outer call already injected time
-    if getattr(_inject_time_guard, 'active', False):
-        return user_message, persist_user_message
-
-    # Lazy imports from patching package for test-mock compatibility.
-    # Tests mock hermes_lark_streaming.patching._get_config and
-    # hermes_lark_streaming.patching.datetime; importing at call time
-    # ensures the patched objects are picked up.
-    from . import _get_config, datetime, timezone, timedelta  # noqa: F811
-
-    try:
-        cfg = _get_config()
-        if not cfg.inject_time:
-            return user_message, persist_user_message
-    except Exception:
-        _logger.debug("inject_time: config read failed, skipping", exc_info=True)
-        return user_message, persist_user_message
-
-    _cst = timezone(timedelta(hours=8))
-    now = datetime.now(_cst)
-    time_prefix = f"<time>{now.strftime('%H:%M:%S')}</time> "
-
-    if isinstance(user_message, str):
-        user_message = time_prefix + user_message
-        _logger.info("inject_time: prefixed user_message with %s", time_prefix.strip())
-
-    # Also prefix persist_user_message so DB matches API →
-    # prefix cache consistency is preserved.
-    # This handles the edge case where gateway sets persist_user_message
-    # for group chat observed_group_context.
-    if isinstance(persist_user_message, str):
-        persist_user_message = time_prefix + persist_user_message
-
-    # Mark as injected so nested patch layers skip
-    _inject_time_guard.active = True
-
-    return user_message, persist_user_message
-
-
 def _wrap_run_conversation(orig: Callable) -> Callable:
     """Wrap all 6 streaming callbacks right before run_conversation executes.
 
@@ -716,10 +650,8 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
         persist_user_timestamp=None,
         **kwargs,
     ):
-        # ── inject_time: prepend current time to user_message ──
-        user_message, persist_user_message = _inject_time_prefix(
-            user_message, persist_user_message
-        )
+        # v1.3.0: inject_time removed — Hermes v0.17.0+ has built-in
+        # gateway.message_timestamps.enabled for this purpose.
 
         _maybe_wrap_callbacks(self)
         try:
@@ -736,9 +668,7 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
             call_kwargs.update(kwargs)
             return orig(self, user_message, **call_kwargs)
         finally:
-            # Always reset the re-entrancy guard so the next message
-            # in the same thread can be injected again.
-            _inject_time_guard.active = False
+            pass  # v1.3.0: inject_time guard removed
 
     return wrapper
 

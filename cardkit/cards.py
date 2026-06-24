@@ -194,6 +194,7 @@ def build_streaming_card_v2(
     show_streaming_element: bool = True,
     streaming_panel_expanded: bool = True,
     print_strategy: str = "delay",
+    print_step: int = 4,
     header_enabled: bool = False,
     include_unified_panel: bool = True,
     include_loading_hint: bool = True,
@@ -246,7 +247,7 @@ def build_streaming_card_v2(
             "streaming_mode": True,
             "streaming_config": {
                 "print_frequency_ms": {"default": 70},
-                "print_step": {"default": 1},
+                "print_step": {"default": print_step},
                 "print_strategy": print_strategy,
             },
             "locales": _LOCALES,

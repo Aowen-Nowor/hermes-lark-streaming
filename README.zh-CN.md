@@ -124,16 +124,14 @@ $HERMES_PYTHON ~/.hermes/plugins/hermes-lark-streaming/__main__.py doctor
 
 ```yaml
 hermes_lark_streaming:
-  enabled: true                    # 启用流式卡片
-  linear: true                     # 线性模式：单卡片原地更新（统一面板架构）
   panel_expanded: false            # 完成态卡片中面板是否保持展开
   streaming_panel_expanded: false  # 流式态卡片中面板是否保持展开
   print_strategy: delay            # "fast"（即时）或 "delay"（更丝滑打字机，默认）
-  flush_interval_ms: 200           # 卡片刷新间隔（毫秒，70~2000，默认 200）。插件调 stream_element API 的节流间隔，不是飞书打字机速度
+  print_step: 4                    # 打字机每次渲染字符数（默认4，范围1~10，需飞书7.23+）
+  flush_interval_ms: 100           # 插件发送间隔（毫秒，70~2000，默认100）
   card_ttl_sec: 600               # 卡片存活检测超时（秒）
   max_tool_steps: 20               # 统一面板最多显示的工具步骤数（默认20，范围1~100）
   max_reasoning_rounds: 20         # 统一面板最多显示的推理轮次数（默认20，范围1~100）
-  inject_time: false               # 时间感知模式（详见下方说明）
   header:
     enabled: false                  # 卡片头部（蓝色处理中 → 绿色已完成 / 红色出错-已停止）。默认关闭。详见下方说明
 
@@ -171,11 +169,6 @@ hermes_lark_streaming:
 
 > **作用范围**：`header.enabled` 仅影响 agent 流式卡片和完成态卡片。Cron 推送卡片、网关内部消息卡片不受影响。`/aowen` 命令卡片始终有自己的 banner 风格头部（v1.1.0 设计语言的一部分），不受此配置控制。
 
-### 时间感知模式（`inject_time`）
-
-开启 `inject_time: true` 后，插件在每条用户消息前添加 `<time>HH:MM:SS</time>` 时间前缀，让 AI 无需调用 `date` 工具即可感知当前时间。使用 XML 标签是因为 LLM 普遍将其理解为结构化元数据，不会在回复中模仿。Prefix Cache 安全（每条约 6 tokens）。详见 [SKILL.md](docs/SKILL.md)。
-
-> **注意**：Hermes v0.17.0+ 内置了 `gateway.message_timestamps.enabled` 功能，会在用户消息前注入人类可读的时间戳（`[Tue 2026-04-28 13:40:53 CEST]`）。**如果开启了 Hermes 的 `message_timestamps`，请关闭插件的 `inject_time`**，避免出现重复的时间戳前缀。建议优先使用官方的 `message_timestamps`，而非插件的 `inject_time`。
 
 ### 推理面板显示
 

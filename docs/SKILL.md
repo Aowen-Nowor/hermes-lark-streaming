@@ -23,7 +23,6 @@
                ▼
         _run_agent ── [Hook 2: on_message_completed]
                ▼
-        AIAgent.run_conversation ── [inject_time 前缀注入]
             ├─ stream_delta_callback ── [Hook 4: on_answer_delta]
             ├─ reasoning_callback ──── [Hook 6: on_reasoning_delta]
             ├─ tool_progress_callback [Hook 3: on_tool_updated]
@@ -231,14 +230,12 @@ CardKit v2 Streaming → CardKit v2 Create+Patch → IM Create+Patch → Hermes 
 
 ```yaml
 hermes_lark_streaming:
-  enabled: true
-  linear: true
   panel_expanded: false
   streaming_panel_expanded: false
   print_strategy: delay            # "fast" 或 "delay"
-  flush_interval_ms: 100           # 70~2000ms（默认 100）
+  print_step: 4                    # 打字机每次渲染字符数（默认4，范围1~10，需飞书7.23+）
+  flush_interval_ms: 100           # 插件发送间隔（默认100ms）
   card_ttl_sec: 600
-  inject_time: false
   max_tool_steps: 20               # 范围 1~100
   max_reasoning_rounds: 20         # 范围 1~100
   header:

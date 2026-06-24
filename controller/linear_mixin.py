@@ -160,57 +160,6 @@ async def _fallback_write_answer(
 # official print_frequency_ms default, avoiding over-buffering.
 _ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 70ms 上调）
 
-# v1.3.0: Feishu CardKit typewriter render speed (print_frequency_ms=70ms, print_step=1).
-# Used to estimate how long Feishu needs to finish rendering the typewriter queue
-# after the last stream_element send, before close_streaming can safely fire.
-_FEISHU_PRINT_FREQUENCY_MS = 70
-# Max delay before close_streaming — caps the wait so extremely long answers
-# don't keep the card in streaming mode for too long (which blocks card
-# forwarding and TTL timer). 3 seconds is enough for ~42 chars of backlog.
-_CLOSE_STREAMING_MAX_DELAY_SEC = 3.0
-# Minimum backlog (in chars) that warrants a delay — small backlogs render
-# fast enough that close_streaming won't cause visible truncation.
-_CLOSE_STREAMING_MIN_BACKLOG_CHARS = 30
-
-
-def _estimate_typewriter_drain_delay(session: Any) -> float:
-    """Estimate how long Feishu's typewriter needs to finish rendering.
-
-    Called before close_streaming to decide whether to delay. The delay lets
-    Feishu's typewriter queue drain naturally while streaming_mode is still
-    true (with print_strategy=delay, old text continues rendering).
-
-    Algorithm:
-      1. last_stream_element_len = total chars in the last full-text send
-      2. elapsed = time since that send
-      3. rendered_chars = elapsed / print_frequency_ms (what Feishu has rendered)
-      4. backlog = last_stream_element_len - rendered_chars (what's still queued)
-      5. delay = backlog * print_frequency_ms (time to finish rendering)
-
-    Returns 0 if backlog is small (< _CLOSE_STREAMING_MIN_BACKLOG_CHARS) or
-    if no stream_element was ever sent. Capped at _CLOSE_STREAMING_MAX_DELAY_SEC.
-
-    Performance: O(1) — pure arithmetic, no I/O. Called once per card at seal.
-    """
-    if session._last_stream_element_len == 0 or session._last_stream_element_time == 0.0:
-        return 0.0  # Never sent stream_element (e.g. IM fallback path)
-
-    elapsed_sec = _time.monotonic() - session._last_stream_element_time
-    # How many chars Feishu has rendered since the last stream_element
-    rendered_chars = (elapsed_sec * 1000.0) / _FEISHU_PRINT_FREQUENCY_MS
-    # How many chars are still in the typewriter queue
-    backlog = session._last_stream_element_len - rendered_chars
-    _logger.debug(
-        "HLS: typewriter drain estimate: last_len=%d elapsed=%.2fs rendered=%.0f backlog=%.0f",
-        session._last_stream_element_len, elapsed_sec, rendered_chars, backlog,
-    )
-    if backlog < _CLOSE_STREAMING_MIN_BACKLOG_CHARS:
-        return 0.0  # Small backlog — renders fast enough, no delay needed
-
-    # Time needed to render the backlog
-    delay_sec = (backlog * _FEISHU_PRINT_FREQUENCY_MS) / 1000.0
-    return min(delay_sec, _CLOSE_STREAMING_MAX_DELAY_SEC)
-
 
 class UnifiedControllerMixin:
     """Unified panel linear mode — phased card lifecycle.
@@ -273,6 +222,7 @@ class UnifiedControllerMixin:
                     include_loading_hint=True,      # "正在加载上下文..."
                     streaming_panel_expanded=self._cfg.streaming_panel_expanded,
                     print_strategy=self._cfg.print_strategy,
+                    print_step=self._cfg.print_step,
                     header_enabled=self._cfg.header_enabled,
                 )
                 card_id = await self._client.cardkit_create(card)
@@ -703,9 +653,6 @@ class UnifiedControllerMixin:
                     # The preservative seal will SKIP the answer partial_update_element
                     # to avoid bypassing Feishu's typewriter queue (instant output).
                     session._answer_finalized_via_stream = True
-                    # v1.3.0: record last stream_element send info for close_streaming delay calculation
-                    session._last_stream_element_time = _time.monotonic()
-                    session._last_stream_element_len = len(content)
                 except FeishuAPIError as e:
                     if e.code == CARDKIT_STREAMING_CLOSED:
                         session._streaming_closed = True
@@ -865,9 +812,6 @@ class UnifiedControllerMixin:
                 state.answer_dirty = False
                 # v1.3.0: mark that the answer was delivered via stream_element.
                 session._answer_finalized_via_stream = True
-                # v1.3.0: record last stream_element send info for close_streaming delay calculation
-                session._last_stream_element_time = _time.monotonic()
-                session._last_stream_element_len = len(content)
             except FeishuAPIError as e:
                 if e.code == CARDKIT_STREAMING_CLOSED:
                     if session._streaming_closed_logged:
@@ -1118,9 +1062,6 @@ class UnifiedControllerMixin:
                         state.answer_dirty = False
                         # v1.3.0: mark that the answer was delivered via stream_element.
                         session._answer_finalized_via_stream = True
-                        # v1.3.0: record last stream_element send info for close_streaming delay calculation
-                        session._last_stream_element_time = _time.monotonic()
-                        session._last_stream_element_len = len(content)
                     except FeishuAPIError as e:
                         # v1.1.1: 统一 fallback — 300309 和 300313 都改用 batch_update（不带 tag）
                         if e.code == CARDKIT_STREAMING_CLOSED or is_element_not_found_error(e):
@@ -1359,35 +1300,6 @@ class UnifiedControllerMixin:
             # cardkit_update_summary call after streaming is closed does
             # NOT reliably update the conversation list preview.
             seal_summary = _build_seal_summary(state)
-
-            # v1.3.0: Delay close_streaming to let Feishu's typewriter finish rendering.
-            #
-            # Root cause of "instant output": the plugin sends full text via
-            # stream_element at flush_interval_ms (100ms) pace, but Feishu renders
-            # at print_frequency_ms (70ms/char). When LLM output speed > Feishu
-            # render speed, the typewriter queue backlogs. close_streaming stops
-            # the typewriter mechanism, causing all backlogged text to render
-            # instantly — the jarring "instant output" effect.
-            #
-            # Fix: estimate how many chars Feishu still needs to render, compute
-            # the remaining render time, and delay close_streaming by that amount.
-            # This lets the typewriter finish naturally while streaming_mode is
-            # still true (print_strategy=delay continues rendering old text).
-            #
-            # Performance: this delay only happens at seal time (once per card,
-            # not per-token). It does NOT block the event loop (asyncio.sleep
-            # yields control). The delay is capped at _CLOSE_STREAMING_MAX_DELAY_SEC
-            # to avoid keeping the card in streaming mode for too long.
-            if not session._streaming_closed and session._answer_finalized_via_stream:
-                _delay = _estimate_typewriter_drain_delay(session)
-                if _delay > 0:
-                    _logger.info(
-                        "HLS: preservative seal delaying close_streaming by %.1fs "
-                        "to let typewriter finish (last_len=%d) card=%s trace=%s",
-                        _delay, session._last_stream_element_len,
-                        card_id[:12], session.card_trace_id,
-                    )
-                    await asyncio.sleep(_delay)
 
             if not session._streaming_closed:
                 session.sequence += 1
@@ -1700,9 +1612,6 @@ class UnifiedControllerMixin:
                     state.answer_dirty = False
                     # v1.3.0: mark that the answer was delivered via stream_element.
                     session._answer_finalized_via_stream = True
-                    # v1.3.0: record last stream_element send info for close_streaming delay calculation
-                    session._last_stream_element_time = _time.monotonic()
-                    session._last_stream_element_len = len(content)
                 except FeishuAPIError as e:
                     # v1.1.1: 统一 fallback — 300309 和 300313 都改用 batch_update（不带 tag）
                     # 之前 300309 直接 skip 答案丢失；300313 的 fallback 带 tag 报 300312

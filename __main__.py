@@ -328,7 +328,6 @@ def _cmd_doctor() -> int:
         print(f"      enabled:            {cfg.enabled}")
         print(f"      linear:             {cfg.linear}")
         print(f"      gateway_cards:      {cfg.gateway_cards}")
-        print(f"      inject_time:        {cfg.inject_time}")
         print(f"      flush_interval_ms:  {cfg.flush_interval_ms}")
         print(f"      card_ttl_sec:       {cfg.card_duration_sec}")
         print(f"      print_strategy:     {cfg.print_strategy}")
