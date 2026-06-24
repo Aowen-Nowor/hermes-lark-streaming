@@ -200,6 +200,10 @@ def _estimate_typewriter_drain_delay(session: Any) -> float:
     rendered_chars = (elapsed_sec * 1000.0) / _FEISHU_PRINT_FREQUENCY_MS
     # How many chars are still in the typewriter queue
     backlog = session._last_stream_element_len - rendered_chars
+    _logger.debug(
+        "HLS: typewriter drain estimate: last_len=%d elapsed=%.2fs rendered=%.0f backlog=%.0f",
+        session._last_stream_element_len, elapsed_sec, rendered_chars, backlog,
+    )
     if backlog < _CLOSE_STREAMING_MIN_BACKLOG_CHARS:
         return 0.0  # Small backlog — renders fast enough, no delay needed
 
