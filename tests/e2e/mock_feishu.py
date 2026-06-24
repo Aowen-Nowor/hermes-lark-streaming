@@ -157,9 +157,6 @@ class MockFeishuServer:
             state.summary = summary
         self._call_log.append({"op": "cardkit_update_summary", "card_id": card_id, "summary": summary})
 
-    async def cardkit_extend_ttl(self, card_id: str, *, ttl_seconds: int, sequence: int = 0) -> None:
-        self._call_log.append({"op": "cardkit_extend_ttl", "card_id": card_id, "ttl": ttl_seconds})
-
     async def cardkit_update(self, card_id: str, card: dict[str, Any], *, sequence: int = 0) -> None:
         state = self._cards.get(card_id)
         if state:

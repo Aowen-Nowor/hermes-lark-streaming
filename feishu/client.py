@@ -587,30 +587,6 @@ class FeishuClient:
 
         await self._retry_transient("cardkit_update_summary", _do)
 
-    async def cardkit_extend_ttl(
-        self,
-        card_id: str,
-        *,
-        ttl_seconds: int = 600,
-        sequence: int = 0,
-    ) -> None:
-        """Extend the TTL of a streaming CardKit card.
-
-        Uses the settings endpoint to update the streaming TTL, preventing
-        the Feishu platform from closing the streaming session prematurely
-        for long-running conversations.
-        """
-        async def _do():
-            body_builder = SettingsCardRequestBody.builder().settings(
-                self._dumps({"config": {"streaming_mode": True, "streaming_config": {"ttl_seconds": ttl_seconds}}})
-            )
-            body_builder = body_builder.sequence(sequence)
-            request = SettingsCardRequest.builder().card_id(card_id).request_body(body_builder.build()).build()
-            resp = await self._client.cardkit.v1.card.asettings(request)
-            self._check(resp, "cardkit_extend_ttl")
-
-        await self._retry_transient("cardkit_extend_ttl", _do)
-
     async def upload_image(self, image_url: str) -> str | None:
         """下载远程图片并上传到飞书，返回 img_key."""
         try:

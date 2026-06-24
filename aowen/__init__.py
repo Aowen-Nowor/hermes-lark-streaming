@@ -855,24 +855,45 @@ def _do_reset() -> None:
 
 
 def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
-    """Send a card to chat asynchronously (fire-and-forget)."""
+    """Send a card to chat asynchronously (fire-and-forget).
+
+    v1.3.1 fix: If the FeishuClient hasn't been initialized yet (e.g.
+    no AI message has been sent and pre-warm didn't run), try to
+    initialize it before giving up. /aowen commands use FeishuClient
+    (independent API client), NOT FeishuAdapter — so they should work
+    even when FeishuAdapter patching fails.
+    """
     import asyncio
     from ..controller import get_controller
 
     ctrl = get_controller()
-    if not ctrl.enabled or not ctrl._client_ok():
-        _logger.warning("HLS: /aowen %s but controller not ready", cmd_name)
+    if not ctrl.enabled:
+        _logger.warning("HLS: /aowen %s but controller not enabled", cmd_name)
         return
 
-    async def _send():
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        _logger.warning("HLS: /aowen %s but no event loop", cmd_name)
+        return
+
+    if not loop.is_running():
+        _logger.warning("HLS: /aowen %s but event loop not running", cmd_name)
+        return
+
+    async def _init_and_send():
         try:
+            if not ctrl._client_ok():
+                await ctrl._ensure_init()
+            if not ctrl._client_ok():
+                _logger.warning("HLS: /aowen %s but controller init failed", cmd_name)
+                return
             await ctrl._client.send_card_to_chat(chat_id, card)
             _logger.info("HLS: %s card sent to chat=%s", cmd_name, chat_id[:12])
         except Exception:
             _logger.error("HLS: failed to send %s card", cmd_name, exc_info=True)
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(_send())
+    loop.create_task(_init_and_send())
 
 
 def _skip(reason: str) -> dict:
