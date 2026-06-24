@@ -52,7 +52,7 @@ from ..cardkit import (
     _count_tag_objects,
     _enforce_card_element_limit,
 )
-from ..cardkit.md import _downgrade_tables, optimize_markdown_style
+from ..cardkit.md import _downgrade_tables, escape_markdown_asterisks, optimize_markdown_style
 from ..state.linear import UnifiedLinearState
 from ..state.text import split_reasoning_text
 from ..feishu import (
@@ -158,7 +158,7 @@ async def _fallback_write_answer(
 # Feishu at this interval, and Feishu renders it character-by-character
 # at print_frequency_ms pace.  We keep this at 70ms to align with the
 # official print_frequency_ms default, avoiding over-buffering.
-_ANSWER_FAST_STREAM_MS = 0.070
+_ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 70ms 上调）
 
 
 class UnifiedControllerMixin:
@@ -222,6 +222,7 @@ class UnifiedControllerMixin:
                     include_loading_hint=True,      # "正在加载上下文..."
                     streaming_panel_expanded=self._cfg.streaming_panel_expanded,
                     print_strategy=self._cfg.print_strategy,
+                    print_step=self._cfg.print_step,
                     header_enabled=self._cfg.header_enabled,
                 )
                 card_id = await self._client.cardkit_create(card)
@@ -437,7 +438,7 @@ class UnifiedControllerMixin:
             if error_message:
                 content = error_message
             elif state and state.answer_text:
-                content = _downgrade_tables(optimize_markdown_style(state.answer_text)) or state.answer_text
+                content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(state.answer_text))) or state.answer_text
             else:
                 content = "完成"
 
@@ -572,7 +573,7 @@ class UnifiedControllerMixin:
             if actions:
                 _has_panel = state.panel_visible
                 session.sequence += 1
-                _logger.info(
+                _logger.debug(
                     "unified flush (phase 2 — add %s): msg=%s seq=%d actions=%d",
                     "panel+answer" if _has_panel else "answer only",
                     (session.message_id or "?")[:12],
@@ -635,7 +636,7 @@ class UnifiedControllerMixin:
             # Note: skip markdown optimization during streaming for performance;
             # it will be applied on seal via _preservative_seal.
             if state.answer_dirty:
-                content = state.answer_text or " "
+                content = escape_markdown_asterisks(state.answer_text or " ")
                 session.sequence += 1
                 _logger.debug(
                     "unified stream: msg=%s seq=%d type=answer len=%d",
@@ -648,6 +649,10 @@ class UnifiedControllerMixin:
                         session.card_id, ANSWER_ELEMENT_ID, content, sequence=session.sequence,
                     )
                     state.answer_dirty = False
+                    # v1.3.0: mark that the answer was delivered via stream_element.
+                    # The preservative seal will SKIP the answer partial_update_element
+                    # to avoid bypassing Feishu's typewriter queue (instant output).
+                    session._answer_finalized_via_stream = True
                 except FeishuAPIError as e:
                     if e.code == CARDKIT_STREAMING_CLOSED:
                         session._streaming_closed = True
@@ -731,7 +736,7 @@ class UnifiedControllerMixin:
         # ── Execute Phase 3 batch_update ──
         if actions:
             session.sequence += 1
-            _logger.info(
+            _logger.debug(
                 "unified flush: msg=%s seq=%d actions=%d hint_delete=%s",
                 (session.message_id or "?")[:12],
                 session.sequence,
@@ -786,7 +791,7 @@ class UnifiedControllerMixin:
         # Note: skip markdown optimization during streaming for performance;
         # it will be applied on seal via _preservative_seal.
         if state.answer_dirty and "answer" in session._creation_stages:
-            content = state.answer_text or " "
+            content = escape_markdown_asterisks(state.answer_text or " ")
             session.sequence += 1
             _logger.debug(
                 "unified stream: msg=%s seq=%d type=answer len=%d",
@@ -805,6 +810,8 @@ class UnifiedControllerMixin:
                     (_time.monotonic() - t_se) * 1000,
                 )
                 state.answer_dirty = False
+                # v1.3.0: mark that the answer was delivered via stream_element.
+                session._answer_finalized_via_stream = True
             except FeishuAPIError as e:
                 if e.code == CARDKIT_STREAMING_CLOSED:
                     if session._streaming_closed_logged:
@@ -1041,7 +1048,7 @@ class UnifiedControllerMixin:
 
                 # ── Flush remaining answer text ──
                 if state.answer_dirty and "answer" in session._creation_stages and not session._streaming_closed:
-                    content = state.answer_text or " "
+                    content = escape_markdown_asterisks(state.answer_text or " ")
                     try:
                         session.sequence += 1
                         _logger.info(
@@ -1053,6 +1060,8 @@ class UnifiedControllerMixin:
                             sequence=session.sequence,
                         )
                         state.answer_dirty = False
+                        # v1.3.0: mark that the answer was delivered via stream_element.
+                        session._answer_finalized_via_stream = True
                     except FeishuAPIError as e:
                         # v1.1.1: 统一 fallback — 300309 和 300313 都改用 batch_update（不带 tag）
                         if e.code == CARDKIT_STREAMING_CLOSED or is_element_not_found_error(e):
@@ -1111,8 +1120,22 @@ class UnifiedControllerMixin:
             # During streaming, answer text was sent raw (no markdown optimization)
             # for performance. Now that streaming is about to be closed, update the answer
             # element with the fully optimized markdown content.
-            if state is not None and state.answer_text and "answer" in session._creation_stages:
-                optimized_content = _downgrade_tables(optimize_markdown_style(state.answer_text)) or " "
+            #
+            # v1.3.0 fix: SKIP this step when the answer was already fully delivered
+            # via stream_element (during normal flush or drain). The partial_update_element
+            # is a component-level API that directly replaces content — it bypasses
+            # Feishu's typewriter queue, causing any pending typewriter text to render
+            # instantly. This is the root cause of the "instant output" jarring effect
+            # when close_streaming fires after a large drain.
+            #
+            # When we skip, the streaming content (sent via stream_element) remains as-is.
+            # The raw (un-optimized) text stays visible, which is acceptable — the
+            # optimization (heading demotion, table downgrade) is a minor visual refinement
+            # not worth the jarring instant-replace.
+            if (state is not None and state.answer_text
+                    and "answer" in session._creation_stages
+                    and not session._answer_finalized_via_stream):
+                optimized_content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(state.answer_text))) or " "
                 seal_actions.append({
                     "action": "partial_update_element",
                     "params": {
@@ -1203,7 +1226,22 @@ class UnifiedControllerMixin:
                                 break
                         if hint_idx is not None:
                             old_hint = children[hint_idx]["content"]
-                            children[hint_idx]["content"] = old_hint.rstrip("已折叠") + f"、{trimmed_count} 项已折叠"
+                            # Parse existing trimmed count, then add new count
+                            # (same logic as _enforce_card_element_limit in cards.py)
+                            existing_count = 0
+                            _idx = old_hint.find("项")
+                            if _idx > 0:
+                                # Walk backwards skipping whitespace, then collect digits
+                                _end = _idx
+                                while _end > 0 and old_hint[_end - 1] == ' ':
+                                    _end -= 1
+                                _start = _end
+                                while _start > 0 and old_hint[_start - 1].isdigit():
+                                    _start -= 1
+                                if _start < _end:
+                                    existing_count = int(old_hint[_start:_end])
+                            total_trimmed = existing_count + trimmed_count
+                            children[hint_idx]["content"] = f"⚡ 还有 {total_trimmed} 项已折叠"
                         else:
                             children.insert(0, {
                                 "tag": "markdown",
@@ -1365,8 +1403,11 @@ class UnifiedControllerMixin:
                                     },
                                 })
                             # Update answer element with optimized markdown
-                            if state.answer_text and "answer" in session._creation_stages:
-                                optimized_content = _downgrade_tables(optimize_markdown_style(state.answer_text)) or " "
+                            # v1.3.0: skip if answer was already delivered via stream_element
+                            # (same rationale as the main seal path — avoid bypassing typewriter)
+                            if (state.answer_text and "answer" in session._creation_stages
+                                    and not session._answer_finalized_via_stream):
+                                optimized_content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(state.answer_text))) or " "
                                 retry_actions.append({
                                     "action": "partial_update_element",
                                     "params": {
@@ -1557,7 +1598,7 @@ class UnifiedControllerMixin:
 
             # ── Drain answer text ──
             if state.answer_dirty and "answer" in session._creation_stages:
-                content = state.answer_text or " "
+                content = escape_markdown_asterisks(state.answer_text or " ")
                 try:
                     session.sequence += 1
                     _logger.info(
@@ -1569,6 +1610,8 @@ class UnifiedControllerMixin:
                         sequence=session.sequence,
                     )
                     state.answer_dirty = False
+                    # v1.3.0: mark that the answer was delivered via stream_element.
+                    session._answer_finalized_via_stream = True
                 except FeishuAPIError as e:
                     # v1.1.1: 统一 fallback — 300309 和 300313 都改用 batch_update（不带 tag）
                     # 之前 300309 直接 skip 答案丢失；300313 的 fallback 带 tag 报 300312

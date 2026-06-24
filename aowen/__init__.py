@@ -31,12 +31,21 @@ v1.1.0 card redesign:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-# ── Metrics collector (global singleton) ──
+# ── Metrics collector (global singleton, thread-safe) ──
+#
+# Hermes runs asyncio but Feishu API calls execute in real OS threads
+# (via asyncio.to_thread).  Concurrent increments on the same dict
+# key can lose counts without a lock — e.g. two threads both read
+# 0, each writes 1, result is 1 instead of 2.  A single threading.Lock
+# around every mutation/read is cheap (a few μs) and prevents this.
+
+_metrics_lock = threading.Lock()
 
 _metrics: dict[str, Any] = {
     "cards_created": 0,
@@ -57,45 +66,54 @@ _error_codes: dict[int, int] = {}  # error_code → count
 
 
 def record_card_created() -> None:
-    _metrics["cards_created"] += 1
+    with _metrics_lock:
+        _metrics["cards_created"] += 1
 
 def record_card_completed() -> None:
-    _metrics["cards_completed"] += 1
+    with _metrics_lock:
+        _metrics["cards_completed"] += 1
 
 def record_card_failed() -> None:
-    _metrics["cards_failed"] += 1
+    with _metrics_lock:
+        _metrics["cards_failed"] += 1
 
 def record_card_aborted() -> None:
-    _metrics["cards_aborted"] += 1
+    with _metrics_lock:
+        _metrics["cards_aborted"] += 1
 
 def record_api_call(operation: str) -> None:
-    _metrics["api_calls"] += 1
-    if operation == "cardkit_stream_element":
-        _metrics["stream_element_calls"] += 1
-    elif operation == "cardkit_batch_update":
-        _metrics["batch_update_calls"] += 1
+    with _metrics_lock:
+        _metrics["api_calls"] += 1
+        if operation == "cardkit_stream_element":
+            _metrics["stream_element_calls"] += 1
+        elif operation == "cardkit_batch_update":
+            _metrics["batch_update_calls"] += 1
 
 def record_api_error(code: int, operation: str = "") -> None:
-    _metrics["api_errors"] += 1
-    _error_codes[code] = _error_codes.get(code, 0) + 1
-    if operation == "cardkit_stream_element":
-        _metrics["stream_element_failures"] += 1
+    with _metrics_lock:
+        _metrics["api_errors"] += 1
+        _error_codes[code] = _error_codes.get(code, 0) + 1
+        if operation == "cardkit_stream_element":
+            _metrics["stream_element_failures"] += 1
 
 def record_full_rebuild() -> None:
-    _metrics["full_rebuilds"] += 1
+    with _metrics_lock:
+        _metrics["full_rebuilds"] += 1
 
 def set_active_sessions(count: int) -> None:
-    _metrics["active_sessions"] = count
+    with _metrics_lock:
+        _metrics["active_sessions"] = count
 
 def get_metrics() -> dict[str, Any]:
     """Get current metrics snapshot."""
-    uptime = time.time() - _metrics["started_at"]
-    return {
-        **_metrics,
-        "uptime_seconds": round(uptime, 1),
-        "uptime_human": _format_uptime(uptime),
-        "error_codes": dict(_error_codes),
-    }
+    with _metrics_lock:
+        uptime = time.time() - _metrics["started_at"]
+        return {
+            **_metrics,
+            "uptime_seconds": round(uptime, 1),
+            "uptime_human": _format_uptime(uptime),
+            "error_codes": dict(_error_codes),
+        }
 
 
 def _format_uptime(seconds: float) -> str:
@@ -393,7 +411,7 @@ def build_status_card() -> dict[str, Any]:
 
         ctrl_ready = ctrl.enabled and ctrl._client_ok()
         creds_status = ("已就绪", "success") if ctrl_ready else ("未就绪", "error")
-        active_count = sum(1 for s in ctrl._sessions.values() if not s.is_terminal_phase)
+        active_count = ctrl._sess_active_count()
 
         from .. import __version__ as plugin_version
 
@@ -445,10 +463,10 @@ def build_status_card() -> dict[str, Any]:
             f"`flush_interval_ms`: `{cfg.flush_interval_ms}`",
             f"`card_ttl_sec`: `{cfg.card_duration_sec}`",
             f"`print_strategy`: `{cfg.print_strategy}`",
+            f"`print_step`: `{cfg.print_step}`",
         ]
         card_cfg = [
             f"`gateway_cards`: `{cfg.gateway_cards}`",
-            f"`inject_time`: `{cfg.inject_time}`",
             f"`panel_expanded`: `{cfg.panel_expanded}`",
             f"`streaming_panel_expanded`: `{cfg.streaming_panel_expanded}`",
             f"`show_reasoning`: `{cfg.show_reasoning}`",
@@ -813,24 +831,25 @@ def _do_reset() -> None:
     """Reset metrics counters."""
     global _metrics, _error_codes
 
-    old_created = _metrics["cards_created"]
-    old_errors = _metrics["api_errors"]
+    with _metrics_lock:
+        old_created = _metrics["cards_created"]
+        old_errors = _metrics["api_errors"]
 
-    _metrics = {
-        "cards_created": 0,
-        "cards_completed": 0,
-        "cards_failed": 0,
-        "cards_aborted": 0,
-        "api_calls": 0,
-        "api_errors": 0,
-        "stream_element_calls": 0,
-        "stream_element_failures": 0,
-        "batch_update_calls": 0,
-        "full_rebuilds": 0,
-        "active_sessions": _metrics["active_sessions"],
-        "started_at": time.time(),
-    }
-    _error_codes.clear()
+        _metrics = {
+            "cards_created": 0,
+            "cards_completed": 0,
+            "cards_failed": 0,
+            "cards_aborted": 0,
+            "api_calls": 0,
+            "api_errors": 0,
+            "stream_element_calls": 0,
+            "stream_element_failures": 0,
+            "batch_update_calls": 0,
+            "full_rebuilds": 0,
+            "active_sessions": _metrics["active_sessions"],
+            "started_at": time.time(),
+        }
+        _error_codes.clear()
 
     _logger.info("HLS: metrics reset (was: created=%d, errors=%d)", old_created, old_errors)
 

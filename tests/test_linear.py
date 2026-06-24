@@ -72,6 +72,83 @@ class TestOnReasoningDelta:
         assert bool(state._current_reasoning) is True
 
 
+# ── 推理文本去重（on_reasoning_delta dedup） ──
+
+
+class TestReasoningDeltaDedup:
+    """Post-stream duplicate detection in on_reasoning_delta.
+
+    v1.3.0 bug fix: the old implementation compared only the first 30 chars
+    (``min(30, ...)``), which could drop legitimate incremental chunks that
+    happened to share a 30-char prefix with the accumulated reasoning.
+    """
+
+    def test_full_redelivery_skipped(self) -> None:
+        """If the incoming text IS the full accumulated reasoning, skip it."""
+        state = UnifiedLinearState()
+        state.on_reasoning_delta("hello world")
+        before = state._current_reasoning
+        # Re-deliver the same full text → should be skipped
+        state.on_reasoning_delta("hello world")
+        assert state._current_reasoning == before  # unchanged
+
+    def test_full_redelivery_with_extra_skipped(self) -> None:
+        """Re-delivery of full reasoning + trailing content is also skipped."""
+        state = UnifiedLinearState()
+        state.on_reasoning_delta("hello world")
+        before = state._current_reasoning
+        # Full text + extra → starts with the full accumulated → skipped
+        state.on_reasoning_delta("hello world and more")
+        assert state._current_reasoning == before  # unchanged
+
+    def test_legitimate_increment_not_dropped(self) -> None:
+        """v1.3.0 regression: a new chunk sharing a >30 char prefix but NOT
+        being a full re-delivery must NOT be dropped.
+
+        Old bug: ``min(30, ...)`` compared only 30 chars, so a chunk that
+        shared 30+ chars with accumulated text was wrongly skipped even
+        though it was a genuine new incremental piece.
+        """
+        state = UnifiedLinearState()
+        # Accumulate 40 chars of reasoning
+        state.on_reasoning_delta("The quick brown fox jumps over")  # 31 chars
+        before_len = len(state._current_reasoning)
+        # New chunk that shares the first 30 chars but is NOT a full
+        # re-delivery (it's shorter than the accumulated text)
+        state.on_reasoning_delta("The quick brown fox jumps!")  # 26 chars, < 31
+        # This should be APPENDED (not skipped), because it's shorter than
+        # the accumulated reasoning → can't be a full re-delivery
+        assert len(state._current_reasoning) == before_len + 26
+
+    def test_shorter_text_not_treated_as_redelivery(self) -> None:
+        """Text shorter than accumulated reasoning is never a re-delivery."""
+        state = UnifiedLinearState()
+        state.on_reasoning_delta("abcdefghij")  # 10 chars
+        state.on_reasoning_delta("abc")  # 3 chars, shorter → append
+        assert state._current_reasoning == "abcdefghijabc"
+
+    def test_empty_current_no_dedup(self) -> None:
+        """No dedup when _current_reasoning is empty (first chunk)."""
+        state = UnifiedLinearState()
+        state.on_reasoning_delta("first reasoning")
+        assert state._current_reasoning == "first reasoning"
+
+    def test_prefix_match_but_longer_appended(self) -> None:
+        """If text starts with full accumulated reasoning AND is longer,
+        it's treated as a re-delivery (skipped).
+
+        This is the intentional behavior: Hermes sometimes re-delivers the
+        complete reasoning text with extra content after streaming. We skip
+        to avoid duplicating the reasoning in the panel.
+        """
+        state = UnifiedLinearState()
+        state.on_reasoning_delta("part one")  # 8 chars
+        before = state._current_reasoning
+        # "part one" + " part two" → starts with full "part one" → skipped
+        state.on_reasoning_delta("part one part two")
+        assert state._current_reasoning == before
+
+
 # ── 答案文本追加（on_answer_delta） ──
 
 

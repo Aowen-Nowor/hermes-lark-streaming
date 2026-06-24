@@ -52,7 +52,6 @@ __all__ = [
     # Shared state
     '_thread_local_ctx',
     '_logger',
-    '_config',
     '_msg_ctx',
     '_started_msg_ids',
     '_started_msg_ids_lock',
@@ -60,7 +59,6 @@ __all__ = [
     '_gateway_cards_lock',
     '_gw_runner_patched',
     '_patch_status',
-    '_inject_time_guard',
     # Functions
     '_get_config',
     '_get_event_message_id',
@@ -75,7 +73,6 @@ __all__ = [
     '_wrap_run_agent',
     '_wrap_run_background_task',
     '_wrap_cron_deliver',
-    '_inject_time_prefix',
     '_wrap_run_conversation',
     # From callbacks
     '_maybe_wrap_callbacks',
@@ -119,19 +116,13 @@ _thread_local_ctx.data = None
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-# ── Module-level Config singleton for inject_time ──────────────────
 # Reused across calls so we don't create a new Config() per message.
-# inject_time uses _reload() (disk re-read) anyway, so a singleton gives
-# the same freshness guarantee without redundant object creation.
-_config = None
-
-
+# v1.3.0 P1-03: _config global cache removed — Config is a singleton since
+# v1.2.0 (Config() always returns the same instance), so the outer cache was
+# redundant. _get_config() now just returns Config() directly.
 def _get_config():
-    global _config
-    if _config is None:
-        from ..config import Config
-        _config = Config()
-    return _config
+    from ..config import Config
+    return Config()
 
 
 # ── Context propagation ────────────────────────────────────────────
@@ -167,12 +158,8 @@ _gw_runner_patched: bool = False
 # successfully applied and which failed/skipped.
 _patch_status: dict[str, Any] = {}
 
-# ── Thread-local re-entrancy guard for _inject_time_prefix ───────────
 # When both the module-level patch and the direct AIAgent patch are active,
-# AIAgent.run_conversation → (direct patch) _inject_time_prefix → orig →
-# agent.conversation_loop.run_conversation → (module patch) _inject_time_prefix.
 # The guard prevents the second call from injecting the prefix again.
-_inject_time_guard = threading.local()
 
 
 def _get_event_message_id() -> str | None:
@@ -192,7 +179,6 @@ def _get_thread_local_ctx() -> dict | None:
 # These imports must come AFTER shared state is defined to avoid circular
 # import issues (sub-modules import shared state from this module).
 # The sub-modules are:
-#   gateway   — GatewayRunner wrappers, inject_time, cron
 #   callbacks — _maybe_wrap_callbacks and inner wrappers
 #   adapter   — FeishuAdapter wrappers, clarify cards
 
@@ -202,7 +188,6 @@ from .gateway import (  # noqa: E402
     _wrap_run_agent,
     _wrap_run_background_task,
     _wrap_cron_deliver,
-    _inject_time_prefix,
     _wrap_run_conversation,
 )
 from .callbacks import (  # noqa: E402
@@ -274,11 +259,28 @@ def _apply_gateway_runner_patches() -> bool:
         return False  # Not available yet
 
     try:
-        GatewayRunner._handle_message = _wrap_handle_message(GatewayRunner._handle_message)
-        GatewayRunner._handle_message_with_agent = _wrap_handle_message_with_agent(
-            GatewayRunner._handle_message_with_agent
-        )
-        GatewayRunner._run_agent = _wrap_run_agent(GatewayRunner._run_agent)
+        # Patch each method individually so one missing method
+        # doesn't prevent the others from being patched.
+        _patched_methods = []
+        if hasattr(GatewayRunner, '_handle_message'):
+            GatewayRunner._handle_message = _wrap_handle_message(GatewayRunner._handle_message)
+            _patched_methods.append('_handle_message')
+        else:
+            _logger.warning("hermes-lark-streaming: GatewayRunner._handle_message not found, skipping patch")
+
+        if hasattr(GatewayRunner, '_handle_message_with_agent'):
+            GatewayRunner._handle_message_with_agent = _wrap_handle_message_with_agent(
+                GatewayRunner._handle_message_with_agent
+            )
+            _patched_methods.append('_handle_message_with_agent')
+        else:
+            _logger.warning("hermes-lark-streaming: GatewayRunner._handle_message_with_agent not found, skipping patch")
+
+        if hasattr(GatewayRunner, '_run_agent'):
+            GatewayRunner._run_agent = _wrap_run_agent(GatewayRunner._run_agent)
+            _patched_methods.append('_run_agent')
+        else:
+            _logger.warning("hermes-lark-streaming: GatewayRunner._run_agent not found, skipping patch")
 
         # ── Background task patch ──
         # Wraps _run_background_task to inject START/COMPLETE hooks
@@ -287,11 +289,22 @@ def _apply_gateway_runner_patches() -> bool:
             GatewayRunner._run_background_task = _wrap_run_background_task(
                 GatewayRunner._run_background_task
             )
-            _logger.info("hermes-lark-streaming: GatewayRunner._run_background_task patched ✓")
+            _patched_methods.append('_run_background_task')
         except AttributeError:
             _logger.debug("hermes-lark-streaming: _run_background_task not found, background cards disabled")
 
+        if not _patched_methods:
+            _logger.error(
+                "hermes-lark-streaming: GatewayRunner patch FAILED — "
+                "no methods found. Streaming cards will NOT work."
+            )
+            return False
+
         _gw_runner_patched = True
+        _logger.info(
+            "hermes-lark-streaming: GatewayRunner patched methods: %s",
+            ', '.join(_patched_methods),
+        )
         return True
     except (ImportError, AttributeError) as e:
         _logger.error(
@@ -323,7 +336,6 @@ def apply_patches() -> None:
        equivalent to the module-level patch.
 
     Both paths call ``_maybe_wrap_callbacks(self)`` and handle
-    ``inject_time``.  The re-entrancy guard in ``_inject_time_prefix``
     ensures no double-injection when both are active.
     """
     if getattr(apply_patches, "_applied", False):
@@ -388,7 +400,6 @@ def apply_patches() -> None:
 
     # ── Patch run_conversation (strategy depends on Hermes layout) ──
     # Both strategies are functionally equivalent — they both call
-    # _maybe_wrap_callbacks(self) and handle inject_time.
     # The module-level patch is preferred only because it intercepts
     # ALL callers, not just AIAgent.
 
@@ -421,7 +432,6 @@ def apply_patches() -> None:
     # Always apply the direct AIAgent patch as well — it serves as:
     # 1. The PRIMARY patch when conversation_loop doesn't exist (older Hermes)
     # 2. A belt-and-suspenders backup when conversation_loop IS patched
-    # The re-entrancy guard in _inject_time_prefix prevents double-injection.
     _apply_direct_agent_patch()
 
     # ── Cron scheduler ──
@@ -578,6 +588,11 @@ def _apply_direct_agent_patch() -> None:
             _logger.info("hermes-lark-streaming: AIAgent.run_conversation already directly patched, skip")
             return
 
+        # v1.3.0 perf: compute signature check ONCE at wrap time (the signature
+        # never changes at runtime). Was ~10-50μs wasted per message.
+        import inspect
+        _has_persist_ts = "persist_user_timestamp" in inspect.signature(_orig_method).parameters
+
         def _patched_run_conversation(
             self,
             user_message,
@@ -589,10 +604,8 @@ def _apply_direct_agent_patch() -> None:
             persist_user_timestamp=None,
             **kwargs,
         ):
-            # ── inject_time: prepend current time to user_message ──
-            user_message, persist_user_message = _inject_time_prefix(
-                user_message, persist_user_message
-            )
+            # v1.3.0: inject_time removed — Hermes v0.17.0+ has built-in
+            # gateway.message_timestamps.enabled for this purpose.
 
             _maybe_wrap_callbacks(self)
             try:
@@ -605,17 +618,14 @@ def _apply_direct_agent_patch() -> None:
                     "stream_callback": stream_callback,
                     "persist_user_message": persist_user_message,
                 }
-                # 只在原方法支持时才传 persist_user_timestamp
-                import inspect
-                orig_params = inspect.signature(_orig_method).parameters
-                if "persist_user_timestamp" in orig_params:
+                # v1.3.0 perf: cache inspect.signature result at wrap time
+                # (the signature never changes at runtime — was ~10-50μs/message wasted)
+                if _has_persist_ts:
                     call_kwargs["persist_user_timestamp"] = persist_user_timestamp
                 call_kwargs.update(kwargs)
                 return _orig_method(self, user_message, **call_kwargs)
             finally:
-                # Always reset the re-entrancy guard so the next message
-                # in the same thread can be injected again.
-                _inject_time_guard.active = False
+                pass  # v1.3.0: inject_time guard removed
 
         _patched_run_conversation._hls_direct_patched = True
         AIAgent.run_conversation = _patched_run_conversation

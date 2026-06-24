@@ -160,11 +160,18 @@ class UnifiedLinearState:
         # like the full accumulated text, skip it.  This replaces the old
         # _native_reasoning_active flag with a simple "has any reasoning
         # been tracked yet?" check (len(self._current_reasoning) > 0).
+        #
+        # v1.3.0 bug fix: the previous implementation compared only the first
+        # 30 characters (``min(30, ...)``).  A legitimate incremental chunk
+        # that happened to share its first 30 chars with the accumulated
+        # reasoning was silently dropped, truncating the displayed reasoning.
+        # The correct check is the FULL prefix: if ``text`` starts with the
+        # entire ``_current_reasoning``, it is a re-delivery of the complete
+        # reasoning (possibly with trailing content), so skip it.
         if (
             self._current_reasoning
             and len(text) >= len(self._current_reasoning)
-            and text[:min(30, len(self._current_reasoning))]
-            == self._current_reasoning[:min(30, len(self._current_reasoning))]
+            and text[:len(self._current_reasoning)] == self._current_reasoning
         ):
             _diag_logger.debug(
                 "HLS: on_reasoning_delta skips post-stream duplicate "

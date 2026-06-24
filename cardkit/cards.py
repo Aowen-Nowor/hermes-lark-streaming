@@ -112,15 +112,20 @@ def _enforce_card_element_limit(
         if isinstance(child.get("content"), str) and "已折叠" in child["content"]:
             hint_idx = i
             break
-    # If no hint exists yet, we'll need to add one (1 element), so account for it
+    # If no hint exists yet, we'll need to add one, so reserve its exact tag count.
+    # Pre-calculate the hint template's tag object count instead of hardcoding,
+    # so the reservation stays correct if the hint template changes.
+    _HINT_TEMPLATE = {"tag": "markdown", "content": "⚡ 还有 0 项已折叠", "text_size": "notation"}
+    _HINT_TAG_COUNT = _count_tag_objects(_HINT_TEMPLATE)  # typically 1
     if hint_idx is None:
-        total += 1  # Reserve space for the new collapse hint
+        total += _HINT_TAG_COUNT  # Reserve exact space for the new collapse hint
 
     # ── Trim oldest items from panel children until under threshold ──
     trimmed_count = 0
     while total > threshold and len(children) > 1:
-        # Skip the collapse hint (first child if it contains "已折叠")
-        remove_idx = 1 if children[0].get("content", "").endswith("已折叠") else 0
+        # Skip the collapse hint (first child if it ends with "已折叠")
+        first_content = children[0].get("content", "")
+        remove_idx = 1 if isinstance(first_content, str) and first_content.endswith("已折叠") else 0
         removed = children.pop(remove_idx)
         total -= _count_tag_objects([removed])
         trimmed_count += 1
@@ -134,9 +139,24 @@ def _enforce_card_element_limit(
                 hint_idx = i
                 break
         if hint_idx is not None:
+            # Parse existing trimmed count from hint, then add new trimmed count
+            # e.g. "⚡ 还有 5 项已折叠" → existing_count=5, trimmed_count=3 → "⚡ 还有 8 项已折叠"
             old_hint = children[hint_idx]["content"]
-            # Parse existing count(s) and merge
-            children[hint_idx]["content"] = old_hint.rstrip("已折叠") + f"、{trimmed_count} 项已折叠"
+            # Extract the number before "项" — simple string parsing, no regex needed
+            existing_count = 0
+            _idx = old_hint.find("项")
+            if _idx > 0:
+                # Walk backwards skipping whitespace, then collect digits
+                _end = _idx
+                while _end > 0 and old_hint[_end - 1] == ' ':
+                    _end -= 1
+                _start = _end
+                while _start > 0 and old_hint[_start - 1].isdigit():
+                    _start -= 1
+                if _start < _end:
+                    existing_count = int(old_hint[_start:_end])
+            total_trimmed = existing_count + trimmed_count
+            children[hint_idx]["content"] = f"⚡ 还有 {total_trimmed} 项已折叠"
         else:
             children.insert(0, {
                 "tag": "markdown",
@@ -174,6 +194,7 @@ def build_streaming_card_v2(
     show_streaming_element: bool = True,
     streaming_panel_expanded: bool = True,
     print_strategy: str = "delay",
+    print_step: int = 4,
     header_enabled: bool = False,
     include_unified_panel: bool = True,
     include_loading_hint: bool = True,
@@ -226,7 +247,7 @@ def build_streaming_card_v2(
             "streaming_mode": True,
             "streaming_config": {
                 "print_frequency_ms": {"default": 70},
-                "print_step": {"default": 1},
+                "print_step": {"default": print_step},
                 "print_strategy": print_strategy,
             },
             "locales": _LOCALES,

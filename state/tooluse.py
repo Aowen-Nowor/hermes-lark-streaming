@@ -39,14 +39,14 @@ class ToolStep:
     error: str = ""
     result_block: dict[str, Any] | None = None  # {"language": "json"|"text", "content": str}
     error_block: dict[str, Any] | None = None
-    started_at: float = 0.0
+    started_at: float | None = None
     elapsed_ms: float = 0.0
 
 
 @dataclass
 class ToolSession:
     steps: list[ToolStep] = field(default_factory=list)
-    started_at: float = 0.0
+    started_at: float | None = None
 
 
 _SENSITIVE_NAME_RE = re.compile(
@@ -242,7 +242,7 @@ class ToolUseTracker:
 
     @property
     def elapsed_ms(self) -> float:
-        if self._session is None:
+        if self._session is None or self._session.started_at is None:
             return 0.0
         return (time.time() - self._session.started_at) * 1000
 
@@ -271,7 +271,7 @@ class ToolUseTracker:
                 step.status = "error" if error else "success"
                 step.error = error
                 step.output = output
-                step.elapsed_ms = (time.time() - step.started_at) * 1000
+                step.elapsed_ms = (time.time() - step.started_at) * 1000 if step.started_at is not None else 0.0
                 if error:
                     step.error_block = _build_display_block(error, "text", sanitizer=sanitizer)
                 elif output:

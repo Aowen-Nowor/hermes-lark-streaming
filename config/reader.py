@@ -8,12 +8,16 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
+
+_logger = logging.getLogger("hermes_lark_streaming")
 
 
 def _get_hermes_config_path() -> Path:
@@ -64,7 +68,11 @@ class Config:
         self._raw: dict[str, Any] | None = None
         self._reload_cache: dict[str, Any] | None = None
         self._reload_cache_at: float = 0.0
-        self._on_reload_callbacks: list[Callable[[], None]] = []
+        # v1.3.0 P1-02: removed _on_reload_callbacks / on_reload() — dead code
+        # (never called by any module). v1.3.0 MEDIUM: added _lock for thread-safe
+        # _load() / _reload_cached() / reload() (Config singleton is shared across
+        # event-loop and worker threads).
+        self._lock = threading.Lock()
         self._initialized = True
 
     # ── 配置刷新 ──
@@ -74,30 +82,21 @@ class Config:
 
         Clears all caches. Called by /aowen config reload command.
         """
-        self._raw = None
-        self._reload_cache = None
-        self._reload_cache_at = 0.0
-        _logger = __import__("logging").getLogger("hermes_lark_streaming")
+        with self._lock:
+            self._raw = None
+            self._reload_cache = None
+            self._reload_cache_at = 0.0
         _logger.info("HLS: config reload triggered — caches cleared")
-        for cb in self._on_reload_callbacks:
-            try:
-                cb()
-            except Exception:
-                _logger.debug("HLS: on_reload callback failed", exc_info=True)
-
-    def on_reload(self, callback: Callable[[], None]) -> None:
-        """Register a callback to be called when config is reloaded."""
-        self._on_reload_callbacks.append(callback)
 
     @property
     def enabled(self) -> bool:
-        """是否启用流式卡片."""
+        """是否启用流式卡片. 默认 True（无需配置）."""
         sec = self._plugin_sec()
-        return _to_bool(sec.get("enabled", False))
+        return _to_bool(sec.get("enabled", True), default=True)
 
     @property
     def linear(self) -> bool:
-        """是否启用线性单卡模式，按事件顺序动态更新卡片元素."""
+        """线性单卡模式. 默认 True（无需配置，v1.1.0 起唯一模式）."""
         sec = self._plugin_sec()
         return _to_bool(sec.get("linear", True), default=True)
 
@@ -155,11 +154,24 @@ class Config:
         return strategy if strategy in ("fast", "delay") else "delay"
 
     @property
-    def flush_interval_ms(self) -> float:
-        """流式卡片刷新间隔（毫秒），用于诊断日志.
+    def print_step(self) -> int:
+        """飞书打字机每次渲染的字符数（print_step）.
 
-        最小值 70ms：对齐飞书 CardKit 官方默认 print_frequency_ms（70ms），
-        避免服务端 flush 间隔低于客户端渲染间隔导致过度缓冲或频控问题。
+        飞书 CardKit 流式更新参数：每次 70ms 渲染 N 个字符。
+        默认 4（每次渲染4字符，速度是 step=1 的4倍）。
+        范围 1~10：太小打字机太慢，太大失去打字机效果。
+        需飞书 7.23+ 客户端支持自定义参数。
+        """
+        sec = self._plugin_sec()
+        val = int(sec.get("print_step", 4))
+        return max(1, min(10, val))
+
+    @property
+    def flush_interval_ms(self) -> float:
+        """插件调用 stream_element API 的节流间隔（毫秒）.
+
+        这是插件侧的发送频率，不是飞书打字机速度。
+        默认 100ms。
         """
         sec = self._plugin_sec()
         ms = float(sec.get("flush_interval_ms", 100))
@@ -169,7 +181,7 @@ class Config:
     def flush_interval_sec(self) -> float:
         """流式卡片刷新间隔（秒），可配置.
 
-        默认 0.1 秒（100ms）。降低此值使打字效果更流畅但增加API调用量和客户端负担；
+        默认 0.2 秒（200ms）。降低此值使打字效果更流畅但增加API调用量和客户端负担；
         提高此值减少API调用量但文字出现稍有延迟。
 
         注意：此值仅影响 CardKit 流式通道，IM PATCH 降级通道固定为 1.5 秒。
@@ -226,22 +238,6 @@ class Config:
         if fields and isinstance(fields[0], str):
             return [fields]
         return fields
-
-    @property
-    def inject_time(self) -> bool:
-        """是否在用户消息前注入当前时间，让模型无需调用 date 工具即可感知时间.
-
-        默认关闭。开启后，每条用户消息前会添加 ``<time>HH:MM:SS</time>`` 前缀，
-        前缀同时写入 DB（保证 prefix cache 一致性）。
-        使用 XML 标签格式而非方括号格式，避免 LLM 忽略或模仿时间前缀。
-
-        通过 TTL 缓存读取，用户运行时修改配置文件后最多延迟
-        _RELOAD_CACHE_TTL 秒生效，避免高频访问时反复读磁盘。
-        """
-        sec = self._reload_cached().get("hermes_lark_streaming")
-        if not isinstance(sec, dict):
-            return False
-        return _to_bool(sec.get("inject_time", False))
 
     @property
     def footer_show_label(self) -> bool:
@@ -325,33 +321,43 @@ class Config:
         return {}
 
     def _load(self) -> dict[str, Any]:
-        if self._raw is not None:
+        with self._lock:
+            if self._raw is not None:
+                return self._raw
+            # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
+            config_path = _get_hermes_config_path()
+            if config_path.exists():
+                try:
+                    text = config_path.read_text(encoding="utf-8")
+                    self._raw = yaml.safe_load(text) or {}
+                except yaml.YAMLError:
+                    _logger.warning("HLS: config YAML syntax error in %s, using empty config", config_path)
+                    self._raw = {}
+            else:
+                self._raw = {}
             return self._raw
-        # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
-        config_path = _get_hermes_config_path()
-        if config_path.exists():
-            text = config_path.read_text(encoding="utf-8")
-            self._raw = yaml.safe_load(text) or {}
-        else:
-            self._raw = {}
-        return self._raw
 
     def _reload_cached(self) -> dict[str, Any]:
         """带 TTL 缓存的磁盘重读，供运行时可变的配置项使用.
 
         在 _RELOAD_CACHE_TTL 秒内复用上次读取结果，避免高频属性访问
-        （如流式输出期间反复检查 inject_time / show_reasoning）反复读磁盘。
+        （如流式输出期间反复检查 show_reasoning / gateway_cards）反复读磁盘。
         配置变更最多延迟 _RELOAD_CACHE_TTL 秒生效。
         """
         now = time.monotonic()
-        if self._reload_cache is not None and (now - self._reload_cache_at) < _RELOAD_CACHE_TTL:
+        with self._lock:
+            if self._reload_cache is not None and (now - self._reload_cache_at) < _RELOAD_CACHE_TTL:
+                return self._reload_cache
+            # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
+            config_path = _get_hermes_config_path()
+            if config_path.exists():
+                try:
+                    text = config_path.read_text(encoding="utf-8")
+                    self._reload_cache = yaml.safe_load(text) or {}
+                except yaml.YAMLError:
+                    _logger.warning("HLS: config YAML syntax error in %s (reload), using empty config", config_path)
+                    self._reload_cache = {}
+            else:
+                self._reload_cache = {}
+            self._reload_cache_at = now
             return self._reload_cache
-        # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
-        config_path = _get_hermes_config_path()
-        if config_path.exists():
-            text = config_path.read_text(encoding="utf-8")
-            self._reload_cache = yaml.safe_load(text) or {}
-        else:
-            self._reload_cache = {}
-        self._reload_cache_at = now
-        return self._reload_cache

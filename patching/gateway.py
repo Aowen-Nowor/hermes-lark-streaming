@@ -1,10 +1,9 @@
-"""GatewayRunner method wrappers, inject_time, and cron delivery interception.
+"""GatewayRunner method wrappers and cron delivery interception.
 
 Split from monkey_patch.py — contains:
   - _wrap_handle_message()
   - _wrap_handle_message_with_agent()
   - _wrap_run_agent()
-  - _inject_time_guard / _inject_time_prefix()
   - _wrap_run_conversation()
   - _wrap_run_background_task()
   - _wrap_cron_deliver()
@@ -24,7 +23,6 @@ from . import (
     _started_msg_ids_lock,
     _thread_local_ctx,
     _logger,
-    _inject_time_guard,
 )
 
 
@@ -166,7 +164,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                 if _ctrl and _ctrl.enabled:
                     _eid = ctx.get("event_message_id", "") if ctx else ""
                     if _eid:
-                        _sess = _ctrl._sessions.get(_eid)
+                        _sess = _ctrl._sess_get(_eid)
                         if _sess and _sess.card_msg_id:
                             _logger.info(
                                 "card session exists for msg=%s (state=%s), suppressing gateway reply",
@@ -208,7 +206,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                         _ctrl = get_controller()
                         if _ctrl and _ctrl.enabled:
                             for _other_mid in others:
-                                _other_sess = _ctrl._sessions.get(_other_mid)
+                                _other_sess = _ctrl._sess_get(_other_mid)
                                 if _other_sess and _other_sess.state not in TERMINAL_PHASES and _other_sess.state != "completing":
                                     _real_interrupt = True
                                     _interrupt_new_mid = _other_mid
@@ -255,7 +253,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                 if _ctrl and _ctrl.enabled:
                     _eid = ctx.get("event_message_id", "")
                     if _eid:
-                        _sess = _ctrl._sessions.get(_eid)
+                        _sess = _ctrl._sess_get(_eid)
                         if _sess and _sess.state not in TERMINAL_PHASES and _sess.state != "completing":
                             _logger.info(
                                 "card session stuck in non-terminal state for msg=%s "
@@ -621,83 +619,19 @@ def _wrap_run_agent(orig: Callable) -> Callable:
     return wrapper
 
 
-# ── AIAgent.run_conversation wrapper (callback interception) ───────
-
-
-def _inject_time_prefix(user_message: str | None, persist_user_message: str | None) -> tuple[str | None, str | None]:
-    """Prepend current time to user_message when inject_time is enabled.
-
-    Returns (modified_user_message, modified_persist_user_message).
-    Both are prefixed with ``<time>HH:MM:SS</time>`` so the DB-stored
-    content matches what the API received — preserving prefix cache
-    consistency.
-
-    Uses XML-style tags instead of ``[HH:MM:SS CST]`` because:
-    - LLMs universally understand XML tags as structured metadata, not
-      conversational style — they won't mimic the format in responses.
-    - Bracket-prefixed time (``[14:30:05 CST]``) can be ignored as noise
-      by some models, or worse, mimicked in their output.
-    - The date is omitted because Hermes's system prompt already contains
-      the current date, so only the time portion is needed.
-    - The timezone suffix (CST) is omitted for brevity; the system prompt
-      establishes the timezone context.
-
-    Re-entrancy safe: if called again from a nested patch layer (e.g.
-    AIAgent.run_conversation → module-level run_conversation), the second
-    call is a no-op — the prefix was already added by the outer layer.
-    """
-    # Re-entrancy guard: skip if an outer call already injected time
-    if getattr(_inject_time_guard, 'active', False):
-        return user_message, persist_user_message
-
-    # Lazy imports from patching package for test-mock compatibility.
-    # Tests mock hermes_lark_streaming.patching._get_config and
-    # hermes_lark_streaming.patching.datetime; importing at call time
-    # ensures the patched objects are picked up.
-    from . import _get_config, datetime, timezone, timedelta  # noqa: F811
-
-    try:
-        cfg = _get_config()
-        if not cfg.inject_time:
-            return user_message, persist_user_message
-    except Exception:
-        _logger.debug("inject_time: config read failed, skipping", exc_info=True)
-        return user_message, persist_user_message
-
-    _cst = timezone(timedelta(hours=8))
-    now = datetime.now(_cst)
-    time_prefix = f"<time>{now.strftime('%H:%M:%S')}</time> "
-
-    if isinstance(user_message, str):
-        user_message = time_prefix + user_message
-        _logger.info("inject_time: prefixed user_message with %s", time_prefix.strip())
-
-    # Also prefix persist_user_message so DB matches API →
-    # prefix cache consistency is preserved.
-    # This handles the edge case where gateway sets persist_user_message
-    # for group chat observed_group_context.
-    if isinstance(persist_user_message, str):
-        persist_user_message = time_prefix + persist_user_message
-
-    # Mark as injected so nested patch layers skip
-    _inject_time_guard.active = True
-
-    return user_message, persist_user_message
-
-
 def _wrap_run_conversation(orig: Callable) -> Callable:
     """Wrap all 6 streaming callbacks right before run_conversation executes.
 
-    When ``streaming.inject_time`` is enabled, prepends the current time
-    (``<time>HH:MM:SS</time>``) to ``user_message`` so the model can
-    perceive the current time without calling the ``date`` tool.
-
-    The time prefix is also added to ``persist_user_message`` when set, so
-    the DB-stored content matches what the API received — preserving
-    prefix cache consistency across conversation turns.
+    v1.3.0: inject_time removed — Hermes v0.17.0+ has built-in
+    gateway.message_timestamps.enabled for time injection.
     """
     # Lazy import to avoid circular dependency at module load time
     from .callbacks import _maybe_wrap_callbacks  # noqa: F811
+
+    # v1.3.0 perf: compute signature check ONCE at wrap time (the signature
+    # never changes at runtime). Was ~10-50μs wasted per message.
+    import inspect
+    _has_persist_ts = "persist_user_timestamp" in inspect.signature(orig).parameters
 
     @functools.wraps(orig)
     def wrapper(
@@ -711,15 +645,12 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
         persist_user_timestamp=None,
         **kwargs,
     ):
-        # ── inject_time: prepend current time to user_message ──
-        user_message, persist_user_message = _inject_time_prefix(
-            user_message, persist_user_message
-        )
+        # v1.3.0: inject_time removed — Hermes v0.17.0+ has built-in
+        # gateway.message_timestamps.enabled for this purpose.
 
         _maybe_wrap_callbacks(self)
         try:
             # 用关键字参数传递，兼容有/无 persist_user_timestamp 的 Hermes 版本
-            import inspect
             call_kwargs = {
                 "system_message": system_message,
                 "conversation_history": conversation_history,
@@ -727,15 +658,12 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
                 "stream_callback": stream_callback,
                 "persist_user_message": persist_user_message,
             }
-            orig_params = inspect.signature(orig).parameters
-            if "persist_user_timestamp" in orig_params:
+            if _has_persist_ts:
                 call_kwargs["persist_user_timestamp"] = persist_user_timestamp
             call_kwargs.update(kwargs)
             return orig(self, user_message, **call_kwargs)
         finally:
-            # Always reset the re-entrancy guard so the next message
-            # in the same thread can be injected again.
-            _inject_time_guard.active = False
+            pass  # v1.3.0: inject_time guard removed
 
     return wrapper
 
@@ -816,14 +744,17 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                 return await original_send(chat_id_send, content, **send_kwargs)
 
             adapter.send = _intercepting_send
-            adapter._hls_bg_sending = True
+            # Use counter instead of boolean flag — if two background tasks
+            # run concurrently on the same adapter, the first to finish must
+            # not reset the flag while the second is still running.
+            adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 0) + 1
 
         try:
             result = await orig(self, prompt, source, task_id, **kwargs)
         finally:
             if original_send and adapter:
                 adapter.send = original_send
-                adapter._hls_bg_sending = False
+                adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 1) - 1
 
         # ── Fire COMPLETE hook ──
         ctx = _msg_ctx.get()
@@ -997,14 +928,13 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
             return await original_send(chat_id_send, content_text, **send_kwargs)
 
         feishu_adapter.send = _card_sending_send
-        # Set flag so the class-level send wrapper knows not to
-        # re-intercept cron's fallback plain-text sends.
-        feishu_adapter._hls_cron_sending = True
+        # Use counter instead of boolean flag — same rationale as _hls_bg_sending.
+        feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 0) + 1
         try:
             return orig(job, content, adapters=adapters, loop=loop, **kwargs)
         finally:
             feishu_adapter.send = original_send
-            feishu_adapter._hls_cron_sending = False
+            feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 1) - 1
 
     return wrapper
 

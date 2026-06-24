@@ -16,8 +16,13 @@ from hermes_lark_streaming.cardkit import (
     build_clarify_card,
     build_clarify_confirmed_card,
     build_clarify_submitted_card,
+    normalize_clarify_choices,
 )
 from hermes_lark_streaming.cardkit.i18n import _T
+from hermes_lark_streaming.cardkit.special import (
+    _CLARIFY_MAX_CHOICE_LEN,
+    _normalize_choice,
+)
 
 
 # ── build_clarify_card (Pending state) ──
@@ -652,3 +657,587 @@ class TestLoadingContextI18n:
         en, zh = _T["loading_context"]
         assert isinstance(en, str) and len(en) > 0
         assert isinstance(zh, str) and len(zh) > 0
+
+
+# ── v1.3.0 P0-01: Clarify choice normalization ──────────────────────
+#
+# When the LLM passes dict-shaped choices (e.g. {"id": 1, "path": "/mnt/nas/backup1"})
+# that get str()-serialized to "{'id': 1, 'path': '/mnt/nas/backup1'}", the card
+# now normalizes them into readable text.  These tests cover the normalization
+# logic (normalize_clarify_choices / _normalize_choice) and the lark_md escaping
+# applied by the three card builders.
+
+
+class TestNormalizeClarifyChoicesBasic:
+    """Basic normalization: plain strings, None, empty inputs."""
+
+    def test_plain_strings_returned_as_is(self) -> None:
+        """Plain string choices pass through unchanged (after stripping)."""
+        assert normalize_clarify_choices(["Fast", "Slow"]) == ["Fast", "Slow"]
+
+    def test_whitespace_is_stripped(self) -> None:
+        """Leading/trailing whitespace is stripped from plain strings."""
+        assert normalize_clarify_choices(["  spaced  "]) == ["spaced"]
+
+    def test_none_input_returns_empty_list(self) -> None:
+        assert normalize_clarify_choices(None) == []
+
+    def test_empty_list_returns_empty_list(self) -> None:
+        assert normalize_clarify_choices([]) == []
+
+    def test_empty_string_filtered_out(self) -> None:
+        """A single empty string choice is filtered out (useless to the user)."""
+        assert normalize_clarify_choices([""]) == []
+
+    def test_mixed_valid_and_empty_filtered(self) -> None:
+        """Empty choices in a mixed list are dropped, valid ones preserved in order."""
+        result = normalize_clarify_choices(["real", "", "{'path': '/x'}"])
+        assert result == ["real", "/x"]
+
+
+class TestNormalizeDictReprStrings:
+    """Dict-repr string parsing — the production bug scenario.
+
+    The LLM emits choices like "{'id': 1, 'path': '/mnt/nas/backup1'}" (a dict
+    that has been str()-serialized).  normalize_clarify_choices parses these
+    back to dicts via ast.literal_eval (safe — no code execution) and extracts
+    the most human-readable field by priority.
+    """
+
+    def test_dict_repr_with_path_field_extracted(self) -> None:
+        """Production bug: dict-repr with `path` → extracted to readable path."""
+        result = normalize_clarify_choices(["{'id': 1, 'path': '/mnt/nas/backup1'}"])
+        assert result == ["/mnt/nas/backup1"]
+
+    def test_dict_repr_with_label_field_extracted(self) -> None:
+        """`label` field is the highest-priority human-readable field."""
+        result = normalize_clarify_choices(["{'label': 'Option A', 'id': 5}"])
+        assert result == ["Option A"]
+
+    def test_dict_repr_with_description_field_extracted(self) -> None:
+        """`description` has priority over `name`."""
+        result = normalize_clarify_choices(
+            ["{'description': 'Use backup server', 'name': 'srv1'}"]
+        )
+        assert result == ["Use backup server"]
+
+    def test_dict_repr_with_name_field_extracted(self) -> None:
+        """`name` field is extracted when no higher-priority field exists."""
+        result = normalize_clarify_choices(["{'name': 'srv1'}"])
+        assert result == ["srv1"]
+
+    def test_dict_repr_with_text_field_extracted(self) -> None:
+        result = normalize_clarify_choices(["{'text': 'hello'}"])
+        assert result == ["hello"]
+
+    def test_dict_repr_with_title_field_extracted(self) -> None:
+        result = normalize_clarify_choices(["{'title': 'My Title'}"])
+        assert result == ["My Title"]
+
+    def test_dict_repr_with_string_value_field_extracted(self) -> None:
+        """`value` is used when it's a string (not int)."""
+        result = normalize_clarify_choices(["{'value': 'prod'}"])
+        assert result == ["prod"]
+
+    def test_dict_repr_with_only_int_id_falls_back_to_original(self) -> None:
+        """When the dict has only an int `id` (not a useful string label),
+        normalization falls back to the ORIGINAL dict-repr string unchanged.
+
+        The fallback is important: the user at least sees *something* (which
+        gets escaped later by the card builder), rather than an empty option.
+        """
+        original = "{'id': 1}"
+        result = normalize_clarify_choices([original])
+        assert result == [original]
+
+    def test_dict_repr_field_priority_label_wins(self) -> None:
+        """When multiple candidate fields exist, `label` wins (highest priority)."""
+        result = normalize_clarify_choices(
+            ["{'id': 9, 'label': 'L', 'path': '/p', 'name': 'N'}"]
+        )
+        assert result == ["L"]
+
+    def test_invalid_dict_repr_falls_back_to_original(self) -> None:
+        """A string that looks like a dict but isn't valid Python literal
+        is returned unchanged (not raised, not mangled)."""
+        original = "{not valid python}"
+        result = normalize_clarify_choices([original])
+        assert result == [original]
+
+    def test_dict_repr_with_internal_whitespace_extracted(self) -> None:
+        """ast.literal_eval tolerates whitespace inside the dict-repr."""
+        result = normalize_clarify_choices(["{ 'label' : 'X' }"])
+        assert result == ["X"]
+
+
+class TestNormalizeDefensiveInputs:
+    """Defensive handling of non-string inputs (in case a caller bypasses the
+    adapter and passes real dicts/lists directly)."""
+
+    def test_real_dict_input_extracts_label(self) -> None:
+        """A real dict (not a dict-repr string) is also normalized."""
+        result = normalize_clarify_choices([{"label": "Direct"}])
+        assert result == ["Direct"]
+
+    def test_real_list_input_joined_with_spaces(self) -> None:
+        """A list inside choices is space-joined into a single readable string."""
+        result = normalize_clarify_choices([["a", "b"]])
+        assert result == ["a b"]
+
+    def test_real_tuple_input_joined_with_spaces(self) -> None:
+        """Tuples are treated the same as lists."""
+        result = normalize_clarify_choices([("x", "y")])
+        assert result == ["x y"]
+
+
+class TestNormalizeTruncation:
+    """Long text truncation (keeps the dropdown and option list readable)."""
+
+    def test_max_choice_len_constant_is_80(self) -> None:
+        """The truncation threshold is 80 characters (locked by the spec)."""
+        assert _CLARIFY_MAX_CHOICE_LEN == 80
+
+    def test_long_text_truncated_to_exactly_80_chars(self) -> None:
+        """A string longer than 80 chars is truncated to 79 chars + '…' (total 80)."""
+        long_text = "x" * 100
+        result = normalize_clarify_choices([long_text])
+        assert len(result) == 1
+        assert len(result[0]) == 80
+        assert result[0] == "x" * 79 + "…"
+
+    def test_text_exactly_80_chars_not_truncated(self) -> None:
+        """Boundary: exactly 80 chars is NOT > 80, so no truncation."""
+        text = "y" * 80
+        result = normalize_clarify_choices([text])
+        assert result == [text]
+        assert len(result[0]) == 80
+
+    def test_truncation_applies_after_dict_extraction(self) -> None:
+        """Truncation operates on the FINAL extracted text, not the original dict-repr.
+
+        A dict-repr whose `path` value is longer than 80 chars gets the *path*
+        truncated, not the original dict-repr string.
+        """
+        long_path = "/mnt/" + "a" * 100
+        choice = "{'id': 1, 'path': '" + long_path + "'}"
+        result = normalize_clarify_choices([choice])
+        assert len(result) == 1
+        # The result should be the path, truncated to 80 chars (79 + "…").
+        assert len(result[0]) == 80
+        assert result[0].endswith("…")
+        assert result[0].startswith("/mnt/")
+
+
+class TestNormalizeChoicePrivate:
+    """Direct tests for the private _normalize_choice() helper.
+
+    These cover edge cases that normalize_clarify_choices (which filters empty
+    results) would not expose directly.
+    """
+
+    def test_none_returns_empty_string(self) -> None:
+        assert _normalize_choice(None) == ""
+
+    def test_empty_string_returns_empty_string(self) -> None:
+        assert _normalize_choice("") == ""
+
+    def test_whitespace_only_returns_empty_string(self) -> None:
+        assert _normalize_choice("   ") == ""
+
+    def test_plain_string_is_stripped(self) -> None:
+        assert _normalize_choice("  hello  ") == "hello"
+
+    def test_dict_repr_with_path_returns_path(self) -> None:
+        assert _normalize_choice("{'id': 1, 'path': '/x'}") == "/x"
+
+    def test_dict_repr_only_int_id_returns_original_unchanged(self) -> None:
+        """Fallback case: no usable string field → original text preserved."""
+        assert _normalize_choice("{'id': 1}") == "{'id': 1}"
+
+    def test_real_dict_returns_extracted(self) -> None:
+        assert _normalize_choice({"label": "Direct"}) == "Direct"
+
+    def test_non_string_non_dict_non_list_str_converted(self) -> None:
+        """Bare ints (defensive) get str()-converted."""
+        assert _normalize_choice(42) == "42"
+
+    def test_never_raises_on_garbage_input(self) -> None:
+        """_normalize_choice must never raise — it's called on untrusted input."""
+        # All of these should return a string, not raise.
+        assert isinstance(_normalize_choice("{"), str)
+        assert isinstance(_normalize_choice("}"), str)
+        assert isinstance(_normalize_choice("{[}]"), str)
+        assert isinstance(_normalize_choice("{'unclosed':"), str)
+
+
+# ── v1.3.0 P0-01: lark_md escaping in build_clarify_card ──
+
+
+class TestBuildClarifyCardEscaping:
+    """Test that the markdown element escapes lark_md special characters,
+    while the select_static dropdown (plain_text) shows the unescaped text.
+    """
+
+    @staticmethod
+    def _get_md_and_select(card: dict) -> tuple[str | None, list[dict] | None]:
+        elements = card["body"]["elements"]
+        md_el = next((e for e in elements if e.get("tag") == "markdown"), None)
+        sel_el = next((e for e in elements if e.get("tag") == "select_static"), None)
+        md_content = md_el["content"] if md_el else None
+        options = sel_el["options"] if sel_el else None
+        return md_content, options
+
+    def test_dict_repr_with_path_normalized_no_curly_leakage(self) -> None:
+        """Production bug regression: dict-repr `{'id': 1, 'path': '/x'}` is
+        normalized to `/x` in BOTH the markdown and the select.  Crucially,
+        the markdown MUST NOT contain raw `{'` (which would trigger Feishu's
+        lark_md template-syntax bug and garble the display).
+        """
+        card = build_clarify_card(
+            question="Q",
+            choices=["{'id': 1, 'path': '/x'}"],
+            clarify_id="c1",
+        )
+        md, options = self._get_md_and_select(card)
+        assert md is not None
+        assert options is not None
+        # Normalization worked — both display the readable path.
+        assert "/x" in md
+        assert "/x" in options[0]["text"]["content"]
+        # The bug fix: no raw `{'` template-syntax leakage in the markdown.
+        assert "{'" not in md
+
+    def test_curly_braces_escaped_when_dict_repr_falls_back(self) -> None:
+        r"""When a dict-repr has no usable string field (e.g. only an int id),
+        normalization falls back to the ORIGINAL dict-repr string.  The card
+        builder must then escape `{` and `}` for lark_md so they don't get
+        misinterpreted as template syntax.
+
+        Markdown: escaped (`\{`, `\}`)
+        Select (plain_text): unescaped (raw `{'id': 1}`)
+
+        Note: the escaped form `\{'id': 1\}` technically still contains the
+        2-char substring `{'` (because `\{` is backslash + brace), but the
+        `{` is preceded by a backslash escape, so Feishu's lark_md parser
+        treats it as a literal brace — the bug-trigger pattern (unescaped
+        `{'`) is gone.  We verify this by asserting the raw ORIGINAL string
+        (with no backslashes) is not present.
+        """
+        raw = "{'id': 1}"
+        card = build_clarify_card(
+            question="Q",
+            choices=[raw],
+            clarify_id="c1",
+        )
+        md, options = self._get_md_and_select(card)
+        assert md is not None
+        assert options is not None
+        # Markdown escaped the curly braces (`\{`, `\}`).
+        assert "\\{" in md
+        assert "\\}" in md
+        # The raw, UNescaped original text is NOT in the markdown — it's been
+        # transformed by the escape (every `{` and `}` now has a `\` prefix).
+        assert raw not in md
+        # The select (plain_text) shows the raw text unchanged.
+        assert raw in options[0]["text"]["content"]
+
+    def test_normal_choices_regression(self) -> None:
+        """Regression: plain string choices still work (no escaping needed)."""
+        card = build_clarify_card(
+            question="Q",
+            choices=["Fast", "Slow"],
+            clarify_id="c1",
+        )
+        md, options = self._get_md_and_select(card)
+        assert md is not None
+        assert "A. Fast" in md
+        assert "B. Slow" in md
+        assert len(options) == 2
+
+    def test_square_brackets_escaped_in_markdown(self) -> None:
+        """`[` and `]` are lark_md special chars (link syntax) → escaped."""
+        card = build_clarify_card(
+            question="Q",
+            choices=["array[0]"],
+            clarify_id="c1",
+        )
+        md, _ = self._get_md_and_select(card)
+        assert md is not None
+        assert "array\\[0\\]" in md
+
+    def test_angle_brackets_escaped_in_markdown(self) -> None:
+        """`<` and `>` are lark_md special chars → escaped."""
+        card = build_clarify_card(
+            question="Q",
+            choices=["a < b"],
+            clarify_id="c1",
+        )
+        md, _ = self._get_md_and_select(card)
+        assert md is not None
+        assert "a \\< b" in md
+
+    def test_backticks_escaped_in_markdown(self) -> None:
+        """Backticks are lark_md code-syntax markers → escaped."""
+        card = build_clarify_card(
+            question="Q",
+            choices=["`code`"],
+            clarify_id="c1",
+        )
+        md, _ = self._get_md_and_select(card)
+        assert md is not None
+        assert "\\`code\\`" in md
+
+    def test_normalization_then_escaping_combined(self) -> None:
+        """End-to-end: dict-repr with a path containing `[` is first normalized
+        (path extracted) and then the brackets are escaped in the markdown.
+
+        Markdown: `/x\\[1\\]` (escaped)
+        Select (plain_text): `/x[1]` (unescaped, plain)
+        """
+        card = build_clarify_card(
+            question="Q",
+            choices=["{'path': '/x[1]'}"],
+            clarify_id="c1",
+        )
+        md, options = self._get_md_and_select(card)
+        assert md is not None
+        assert options is not None
+        # Markdown: normalized then escaped.
+        assert "/x\\[1\\]" in md
+        assert "/x[1]" not in md  # raw form is NOT in the markdown
+        # Select (plain_text): normalized, NOT escaped.
+        assert "/x[1]" in options[0]["text"]["content"]
+        assert "\\[" not in options[0]["text"]["content"]
+
+    def test_select_options_use_normalized_text(self) -> None:
+        """The select_static dropdown options use the normalized (but unescaped)
+        text — it's plain_text, so no markdown processing happens.
+        """
+        card = build_clarify_card(
+            question="Q",
+            choices=[
+                "{'label': 'First'}",
+                "{'label': 'Second'}",
+            ],
+            clarify_id="c1",
+        )
+        _, options = self._get_md_and_select(card)
+        assert options is not None
+        assert len(options) == 2
+        assert "First" in options[0]["text"]["content"]
+        assert "Second" in options[1]["text"]["content"]
+        # No dict-repr garbage in the dropdown.
+        assert all("{'" not in o["text"]["content"] for o in options)
+
+
+# ── v1.3.0 P0-01: lark_md escaping in submitted/confirmed cards ──
+
+
+class TestBuildClarifySubmittedCardEscaping:
+    """Test that build_clarify_submitted_card escapes the `selected` text
+    in the lark_md content (and its i18n variants).
+    """
+
+    @staticmethod
+    def _get_selected_div(card: dict) -> dict:
+        """The second div in the submitted card is the 'Selected: {}' line."""
+        elements = card["body"]["elements"]
+        divs = [e for e in elements if e.get("tag") == "div" and "icon" in e]
+        # First div = question title; second div = 'Selected: {}'
+        return divs[1]
+
+    def test_curly_braces_in_selected_are_escaped(self) -> None:
+        r"""When the selected text contains `{` (e.g. from a fallback dict-repr),
+        the markdown element escapes it to `\{` so lark_md doesn't interpret
+        it as template syntax.
+
+        Note: the escaped form `\{'id': 1\}` still contains the substring
+        `{'` (backslash + brace + quote), but the `{` is preceded by a `\`
+        escape, so it's not the bug-trigger pattern.  We verify by asserting
+        the raw ORIGINAL string (no backslashes) is absent from the content.
+        """
+        raw = "{'id': 1}"
+        card = build_clarify_submitted_card(
+            question="Q",
+            selected=raw,
+            clarify_id="c",
+        )
+        selected_div = self._get_selected_div(card)
+        content = selected_div["text"]["content"]
+        assert "\\{" in content
+        assert "\\}" in content
+        # The raw, UNescaped original text is NOT present (it's been escaped).
+        assert raw not in content
+
+    def test_curly_braces_escaped_in_zh_cn_i18n(self) -> None:
+        """The Chinese i18n variant is also escaped (it's rendered in zh_cn locale)."""
+        card = build_clarify_submitted_card(
+            question="Q",
+            selected="{'id': 1}",
+            clarify_id="c",
+        )
+        selected_div = self._get_selected_div(card)
+        zh_content = selected_div["text"]["i18n_content"]["zh_cn"]
+        assert "\\{" in zh_content
+        assert "\\}" in zh_content
+        # The Chinese label is "已选择: {}"
+        assert "已选择" in zh_content
+
+    def test_square_brackets_in_selected_are_escaped(self) -> None:
+        """Square brackets in selected text are escaped."""
+        card = build_clarify_submitted_card(
+            question="Q",
+            selected="a[b]",
+            clarify_id="c",
+        )
+        content = self._get_selected_div(card)["text"]["content"]
+        assert "a\\[b\\]" in content
+
+    def test_normal_selected_text_not_modified(self) -> None:
+        """Regression: normal selected text (no special chars) is unchanged."""
+        card = build_clarify_submitted_card(
+            question="Q",
+            selected="Fast",
+            clarify_id="c",
+        )
+        content = self._get_selected_div(card)["text"]["content"]
+        assert "Fast" in content
+        assert "\\" not in content  # No escape backslashes added.
+
+
+class TestBuildClarifyConfirmedCardEscaping:
+    """Test that build_clarify_confirmed_card escapes the `selected` text."""
+
+    @staticmethod
+    def _get_selected_div(card: dict) -> dict:
+        elements = card["body"]["elements"]
+        divs = [e for e in elements if e.get("tag") == "div" and "icon" in e]
+        return divs[1]
+
+    def test_square_brackets_in_selected_are_escaped(self) -> None:
+        """Square brackets in selected text are escaped in the confirmed card too."""
+        card = build_clarify_confirmed_card(question="Q", selected="a[b]")
+        content = self._get_selected_div(card)["text"]["content"]
+        assert "a\\[b\\]" in content
+
+    def test_curly_braces_in_selected_are_escaped(self) -> None:
+        """Curly braces in selected text are escaped in the confirmed card too."""
+        card = build_clarify_confirmed_card(question="Q", selected="{'id': 1}")
+        content = self._get_selected_div(card)["text"]["content"]
+        assert "\\{" in content
+        assert "\\}" in content
+
+    def test_normal_selected_text_not_modified(self) -> None:
+        """Regression: normal selected text is unchanged in the confirmed card."""
+        card = build_clarify_confirmed_card(question="Q", selected="Fast")
+        content = self._get_selected_div(card)["text"]["content"]
+        assert "Fast" in content
+        assert "\\" not in content
+
+
+# ── v1.3.0 Round 2 audit fixes ──
+
+
+class TestNormalizeChoiceTypeError:
+    """v1.3.0 Round 2: ast.literal_eval can raise TypeError on unhashable keys.
+
+    ``ast.literal_eval("{{}: {}}")`` raises ``TypeError: unhashable type: 'dict'``
+    because it tries to use a dict as a dict key. The except clause must catch
+    TypeError in addition to ValueError/SyntaxError.
+    """
+
+    def test_unhashable_dict_key_no_crash(self) -> None:
+        """A dict-repr with an unhashable key must not crash _normalize_choice."""
+        result = normalize_clarify_choices(["{{}: {}}"])
+        # Should fall back to the original string (not crash)
+        assert len(result) == 1
+        assert isinstance(result[0], str)
+
+    def test_nested_set_no_crash(self) -> None:
+        """``ast.literal_eval("{1, 2}")`` returns a set, not a dict — must not crash."""
+        result = normalize_clarify_choices(["{1, 2, 3}"])
+        assert len(result) == 1
+        # A set is not a dict, so _extract_readable_from_dict is not called;
+        # the original string is returned (truncated if needed).
+        assert isinstance(result[0], str)
+
+    def test_deeply_nested_no_crash(self) -> None:
+        """Deeply nested structures must not crash."""
+        result = normalize_clarify_choices(["{'a': {'b': {'c': 1}}}"])
+        assert len(result) == 1
+        assert isinstance(result[0], str)
+
+
+class TestClarifyQuestionEscaping:
+    """v1.3.0 Round 2: the ``question`` parameter must be escaped for lark_md.
+
+    All 3 card builders render the question as ``f"**{question}**"`` inside a
+    ``lark_md`` element. If the question contains ``{`` or ``}`` (e.g. the LLM
+    includes a config snippet in the question), Feishu's lark_md mangles it the
+    same way it mangled choices. The fix: escape the question via ``_escape_md``.
+    """
+
+    def test_question_curly_braces_escaped_in_clarify_card(self) -> None:
+        """Curly braces in question are escaped in build_clarify_card."""
+        card = build_clarify_card(
+            question="Confirm {'id': 1}?",
+            choices=["Yes", "No"],
+            clarify_id="c1",
+        )
+        # The question is in the first element (div with lark_md)
+        question_el = card["body"]["elements"][0]
+        content = question_el["text"]["content"]
+        # Should contain escaped \{ and \} (not raw {' which triggers the bug)
+        assert "\\{" in content
+        assert "\\}" in content
+        # Should NOT contain UNescaped {' (the bug trigger).
+        # The escaped form \{' is safe (Feishu treats \{ as literal).
+        # Check by removing all \{ occurrences and verifying no { remains.
+        unescaped = content.replace('\\{', '').replace('\\}', '')
+        assert '{' not in unescaped
+
+    def test_question_brackets_escaped_in_clarify_card(self) -> None:
+        """Square brackets in question are escaped."""
+        card = build_clarify_card(
+            question="Choose array[0]?",
+            choices=["A"],
+            clarify_id="c2",
+        )
+        content = card["body"]["elements"][0]["text"]["content"]
+        assert "\\[" in content
+        assert "\\]" in content
+
+    def test_question_normal_text_unchanged(self) -> None:
+        """Normal question text without special chars is unchanged."""
+        card = build_clarify_card(
+            question="Which approach?",
+            choices=["Fast"],
+            clarify_id="c3",
+        )
+        content = card["body"]["elements"][0]["text"]["content"]
+        assert "Which approach?" in content
+        # No backslash escapes for normal text
+        assert "\\" not in content
+
+    def test_question_curly_braces_escaped_in_submitted_card(self) -> None:
+        """Curly braces in question are escaped in build_clarify_submitted_card."""
+        card = build_clarify_submitted_card(
+            question="Confirm {'id': 1}?",
+            selected="Yes",
+            clarify_id="c4",
+        )
+        content = card["body"]["elements"][0]["text"]["content"]
+        assert "\\{" in content
+        unescaped = content.replace('\\{', '').replace('\\}', '')
+        assert '{' not in unescaped
+
+    def test_question_curly_braces_escaped_in_confirmed_card(self) -> None:
+        """Curly braces in question are escaped in build_clarify_confirmed_card."""
+        card = build_clarify_confirmed_card(
+            question="Confirm {'id': 1}?",
+            selected="Yes",
+        )
+        content = card["body"]["elements"][0]["text"]["content"]
+        assert "\\{" in content
+        unescaped = content.replace('\\{', '').replace('\\}', '')
+        assert '{' not in unescaped

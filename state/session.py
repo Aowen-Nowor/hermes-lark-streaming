@@ -46,6 +46,7 @@ class CardSession:
         "_streaming_closed",
         "_streaming_closed_logged",
         "_was_aborted",
+        "_answer_finalized_via_stream",
         "anchor_id",
         "card_created_at",
         "card_id",
@@ -136,6 +137,12 @@ class CardSession:
         self._streaming_closed: bool = False
         # v1.2.0 L1: "streaming closed" 日志去重——同一张卡第一次打 INFO，之后降 DEBUG
         self._streaming_closed_logged: bool = False
+        # v1.3.0: True when the answer text was fully delivered via stream_element
+        # (either during normal flush or drain). When True, the preservative seal
+        # SKIPS the answer partial_update_element — because that batch_update
+        # action would replace the streaming content directly (bypassing Feishu's
+        # typewriter queue), causing the "instant output" jarring effect.
+        self._answer_finalized_via_stream: bool = False
         self._card_ready: asyncio.Event = asyncio.Event()
 
     # ------------------------------------------------------------------
