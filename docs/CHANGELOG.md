@@ -1,3 +1,15 @@
+## v1.3.1 (2026-06-24)
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | 封卡时末尾内容被裁剪（用户反馈 issue-streaming-tail-clip） | v1.3.0 加的 `_answer_finalized_via_stream` 守卫在 answer 已通过 `stream_element` 推送后跳过 `_preservative_seal` Step 2 的最终 `partial_update_element`。但飞书打字机队列是异步的——`close_streaming` 立即终止流式会话，未渲染完的字符被永久丢弃。用户表现为回答在最后一句话中间突然截断（如"服务 + 守护进程 +"丢失后半句）。 | **移除守卫**：`_preservative_seal` 和 retry 路径的 Step 2 现在 ALWAYS 发送最终 `partial_update_element` 作为"权威定稿"。`partial_update_element` 的即时替换效果是值得接受的代价（视觉跳动 P2 < 内容截断 P0）。删除 `_answer_finalized_via_stream` 标志（session.py `__slots__` + linear_mixin.py 4 处 setter + 2 处守卫）。新增 1 个回归测试验证守卫移除后 seal 永远写入最终 answer。 |
+| 🐛 Bug Fix | `cardkit_extend_ttl` 功能完全失效 | `feishu/client.py:cardkit_extend_ttl` 使用 `streaming_config.ttl_seconds` 参数，**真飞书 API 实测返回 300122 "unknown property"**（5 种参数变体 + 对照组 `print_strategy` code=0 全部验证）。飞书 CardKit v2.0 settings API 不支持任何形式的 TTL 延长参数。错误被 `except Exception: _logger.debug(...)` 静默吞掉，功能完全无效且不可见。 | **删除功能**：移除 `cardkit_extend_ttl` 方法 + `controller/linear_mixin.py` 中的 TTL 延长调用点 + `_TTL_EXTEND_THRESHOLD_SEC`/`_TTL_EXTEND_DELTA_SEC` 常量 + 3 个测试文件中的 mock。长对话（>9分钟）遇到飞书自动关闭流式时仍有 300309 fallback 处理（`_fallback_write_answer`），不会崩溃。 |
+| 🔧 Fix | `flush_interval_ms` 默认值恢复为 200ms | v1.2.1 (commit 264f32c) 将默认值从 100→200（生产日志显示 200ms 与 100ms 打字机效果无差别，但 API 调用量减半）。v1.3.0 (commit 8313b76) 回退为 100（commit message 说"确认 100ms"），但 `flush_interval_sec` docstring 残留"200ms"未同步回退，CHANGELOG 也未记录回退。 | **恢复 200ms**：`config/reader.py` 默认值 100→200 + docstring 更新；`plugin/__init__.py` 注入配置 100→200；`tests/test_config.py` 断言 100→200；`README.md`/`README.zh-CN.md`/`SKILL.md`/`AGENT_GUIDE.md` 文档同步。6 处一致。 |
+| 🔧 Fix | CHANGELOG v1.2.1 条目与代码不一致 | CHANGELOG v1.2.1 P1-01 声称"默认值从 100 上调至 200"，但 v1.3.0 代码回退为 100 时 CHANGELOG 未更新。 | v1.3.1 恢复 200ms 后，CHANGELOG v1.2.1 条目与代码一致，无需修改历史条目。v1.3.0 的回退在 v1.3.1 被"再回退"，最终状态与 v1.2.1 原始意图一致。 |
+| ✨ Feature | 回归测试覆盖 | `_preservative_seal` 末尾内容裁剪 bug 无测试覆盖 | 新增 `test_seal_always_writes_final_answer_after_stream_element` — 使用 `CardSession` 子类模拟 v1.3.0 bug 场景（`_answer_finalized_via_stream=True`），验证 seal 仍发送最终 `partial_update_element`。已验证：reintroduce bug 时测试 FAIL，fix 后 PASS。 |
+
+---
+
 ## v1.3.0 (2026-06-24)
 
 | 类型 | 问题/功能 | 原因 | 修复/说明 |

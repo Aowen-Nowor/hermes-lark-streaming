@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Project-Vibe%20Coding-ff69b4" alt="Vibe Coding">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-1.3.0-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.3.1-ff9800.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -128,7 +128,7 @@ hermes_lark_streaming:
   streaming_panel_expanded: false  # Keep panels expanded during streaming
   print_strategy: delay            # "fast" (instant) or "delay" (smoother typewriter, default)
   print_step: 4                    # Typewriter chars per render (default 4, range 1-10, Feishu 7.23+)
-  flush_interval_ms: 100           # Plugin send interval in ms (70-2000, default 100)
+  flush_interval_ms: 200           # Plugin send interval in ms (70-2000, default 200)
   card_ttl_sec: 600               # Card alive detection timeout (seconds)
   max_tool_steps: 20               # Max tool steps shown in panel (default 20, range 1–100)
   max_reasoning_rounds: 20         # Max reasoning rounds shown in panel (default 20, range 1–100)

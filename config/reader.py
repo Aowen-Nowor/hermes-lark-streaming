@@ -171,10 +171,11 @@ class Config:
         """插件调用 stream_element API 的节流间隔（毫秒）.
 
         这是插件侧的发送频率，不是飞书打字机速度。
-        默认 100ms。
+        默认 200ms（v1.2.1 P1-01：生产日志显示 100ms 与 200ms 打字机效果无差别，
+        但 200ms 可将 API 调用量减半）。
         """
         sec = self._plugin_sec()
-        ms = float(sec.get("flush_interval_ms", 100))
+        ms = float(sec.get("flush_interval_ms", 200))
         return max(70.0, min(2000.0, ms))
 
     @property

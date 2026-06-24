@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/项目-Vibe%20Coding-ff69b4" alt="Vibe Coding">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-1.3.0-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.3.1-ff9800.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -128,7 +128,7 @@ hermes_lark_streaming:
   streaming_panel_expanded: false  # 流式态卡片中面板是否保持展开
   print_strategy: delay            # "fast"（即时）或 "delay"（更丝滑打字机，默认）
   print_step: 4                    # 打字机每次渲染字符数（默认4，范围1~10，需飞书7.23+）
-  flush_interval_ms: 100           # 插件发送间隔（毫秒，70~2000，默认100）
+  flush_interval_ms: 200           # 插件发送间隔（毫秒，70~2000，默认200）
   card_ttl_sec: 600               # 卡片存活检测超时（秒）
   max_tool_steps: 20               # 统一面板最多显示的工具步骤数（默认20，范围1~100）
   max_reasoning_rounds: 20         # 统一面板最多显示的推理轮次数（默认20，范围1~100）

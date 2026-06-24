@@ -312,8 +312,6 @@ class E2ETestRunner:
             return await srv.cardkit_close_streaming(cid, sequence=sequence, summary=summary)
         async def _cardkit_update_summary(cid, summary, *, sequence=0):
             return await srv.cardkit_update_summary(cid, summary, sequence=sequence)
-        async def _cardkit_extend_ttl(cid, *, ttl_seconds, sequence=0):
-            return await srv.cardkit_extend_ttl(cid, ttl_seconds=ttl_seconds, sequence=sequence)
         async def _cardkit_update(cid, card, *, sequence=0):
             return await srv.cardkit_update(cid, card, sequence=sequence)
         async def _update_card(mid, card):
@@ -330,7 +328,6 @@ class E2ETestRunner:
         mock_client.cardkit_batch_update = _cardkit_batch_update
         mock_client.cardkit_close_streaming = _cardkit_close_streaming
         mock_client.cardkit_update_summary = _cardkit_update_summary
-        mock_client.cardkit_extend_ttl = _cardkit_extend_ttl
         mock_client.cardkit_update = _cardkit_update
         mock_client.update_card = _update_card
         mock_client.send_card_to_chat = _send_card_to_chat
