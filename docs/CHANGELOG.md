@@ -9,9 +9,12 @@
 | 🐛 Bug Fix | `_sessions.values()` 遍历无快照 | `aowen/__init__.py:414` 和 `controller/core.py:196` 直接遍历 `_sessions.values()`，并发修改时崩溃 | 改用 `_sess_active_count()` / `_sess_items_snapshot()` 线程安全快照 |
 | 🐛 Bug Fix | 推理文本去重 30 字符前缀比较丢内容 | `on_reasoning_delta` 的 post-stream 去重用 `min(30, ...)` 只比较前 30 字符，共享 30+ 字符前缀的合法增量块被误判为重复而丢弃 | 改为完整前缀比较 `text[:len(self._current_reasoning)] == self._current_reasoning`。6 个回归测试验证 |
 | 🐛 Bug Fix | `config/reader.py` `_logger` 未定义 | `_load()` 和 `_reload_cached()` 的 YAML 错误分支引用 `_logger`，但 `_logger` 仅在 `reload()` 内部用 `__import__` 定义，模块级无定义 → YAML 语法错误时 NameError 崩溃 | 模块级 `import logging` + `_logger = logging.getLogger("hermes_lark_streaming")`，删除 `__import__` hack |
+| 🐛 Bug Fix | `escape_markdown_asterisks` 空字节泄漏 | AI 回复中含 `\x00` 空字节时（如 AI 复述源码占位符模式 `\x00P{i}P\x00`），还原步骤可能 IndexError 崩溃或占位符泄漏到飞书渲染为方框 `□P0P□` | 三层防御：① 函数入口剥离所有 `\x00`；② `re.sub` 包 `try/except`，IndexError 回退 per-block replace；③ 返回前再次剥离残余 `\x00`。5 个回归测试 |
+| 🐛 Bug Fix | Clarify 流式中断 + answer 瞬间输出 | ① Clarify 卡片出现时流式仍在更新（flush controller 有 pending timer）；② Clarify 选择后 answer 瞬间输出（seal step 2 `partial_update_element` 绕过打字机队列） | ① `send_clarify` 前 `flush_now` + 取消 pending timer；② 新增 `_answer_finalized_via_stream` 标志，answer 通过 `stream_element` 发送时跳过 seal 的 `partial_update_element` |
+| 🐛 Bug Fix | E2E framework 缺少 `print_step` | `MagicMock(spec=Config)` 未设置 `print_step`，`build_streaming_card_v2` 访问时返回 MagicMock 对象，`json.dumps` 序列化失败 | framework.py 新增 `cfg.print_step = 4` |
 | 🔧 Fix | `strip_reasoning_tags` 热路径 2 个死正则 | 步骤1已移除所有 `<think>` 标签后，步骤2/3 试图匹配 `<think>...</think>` 块——永远不匹配。每个 answer token 都执行，2000 token = 4000 次无效正则扫描 | 删除步骤2/3（`state/text.py`），保留步骤1（移除标签保留内容，符合函数语义） |
 | 🔧 Fix | `inspect.signature` 每条消息调用 | `patching/__init__.py` 和 `patching/gateway.py` 在 per-message wrapper 内调用 `inspect.signature()` 检查 `persist_user_timestamp` 参数——签名运行时不变，每条消息浪费 10-50μs | 在 wrap time 计算一次 `_has_persist_ts`，闭包捕获，per-message 只做布尔判断 |
-| 🔧 Fix | flush-cycle INFO 日志刷屏 | 每个 flush 周期（150-200ms）打 2 条 INFO 日志，长对话 500+ 条 | 2 处 per-flush INFO 降为 DEBUG（`linear_mixin.py:575,734`）。状态转换和错误日志保持 INFO |
+| 🔧 Fix | flush-cycle INFO 日志刷屏 | 每个 flush 周期（150-200ms）打 2 条 INFO 日志，长对话 500+ 条 | 2 处 per-flush INFO 降为 DEBUG。状态转换和错误日志保持 INFO |
 | 🔧 Fix | `on_completed` 正常完成日志降噪 | 每次成功完成打 INFO 日志，生产环境刷屏 | 正常完成日志降为 DEBUG，yield-to-gateway 边缘情况保持 INFO |
 | 🚀 Performance | `escape_markdown_asterisks` 保护区域还原 O(K×N)→O(N) | 每个 protected block 用 `str.replace` 全文扫描，K 个 block × N 文本长度 | 改为单次 `re.sub` + lambda 查表还原（`_RE_PROTECTED_PLACEHOLDER`） |
 | 🚀 Performance | `UnavailableGuard._prune_cache` 每 token 全量扫描 | `is_unavailable()` 每个 token 调用，每次遍历整个缓存。100 条 × 2000 token = 20 万次遍历 | 改为阈值触发：缓存 >50 条才清理。小缓存 `in` 检查天然 O(1) |
@@ -19,7 +22,10 @@
 | 🏗️ Architecture | 删除 Config `on_reload()` 死代码 | `on_reload()` 注册回调和 `_on_reload_callbacks` 列表全项目无调用方，`reload()` 里的 for 循环永远不执行 | 删除 `on_reload()`、`_on_reload_callbacks`、循环。`Callable` import 一并移除 |
 | 🏗️ Architecture | 简化 `patching._get_config()` 缓存 | v1.2.0 Config 改单例后，外层 `_config` 全局缓存冗余 | 删除 `_config` 全局，`_get_config()` 直接 `return Config()`。conftest 同步移除 `_config` 重置 |
 | 🏗️ Architecture | 删除 TextState 死方法 | `is_dirty()`/`mark_flushed()`/`last_flushed` 在 v1.1.0 被 UnifiedLinearState 的 dirty 标志替代后从未被调用 | 删除方法 + 属性 + 2 个相关测试 |
+| 🏗️ Architecture | 移除 `inject_time` 配置项 | Hermes v0.17.0+ 内置 `gateway.message_timestamps.enabled`，功能重叠 | 移除 `_inject_time_prefix` 函数、`_inject_time_guard` 重入守卫、config 属性、诊断日志、测试、文档说明。安装时不再注入此配置项 |
+| 🏗️ Architecture | `enabled`/`linear` 不再写入默认配置 | 从来不会修改这两个字段的值，做成配置项没有必要 | 代码默认值改为 True，安装时不再注入 `enabled: true` 和 `linear: true` |
 | 🔧 Fix | prune 日志 msg_id 截断过短 | `[:12]` 截断后无法与飞书后台完整 ID 关联 | 改为 `[:20]`，排障更高效 |
+| ✨ Feature | `print_step` 配置项 | 飞书打字机每次 70ms 渲染 1 字符太慢，LLM 输出完成后卡片还要渲染很久 | 新增 `print_step` 配置项（默认 4，范围 1~10），每次 70ms 渲染 N 字符，速度 N 倍。真飞书测试验证 `print_step=4` 生效。需飞书 7.23+ 客户端 |
 | ✨ Feature | Clarify 选项长文本截断 | LLM 传超长 choice 文本时下拉框换行难看 | `_normalize_choice` 超过 80 字符自动截断 + `…` 省略号 |
 | ✨ Feature | 并发测试覆盖 | `_sessions`/`_clarify_*`/`_interrupt_map`/Config 锁无并发测试 | 新增 `tests/test_concurrency_v130.py` — 12 个并发测试（线程安全 + RLock 重入 + 无 RuntimeError） |
 | ✨ Feature | Clarify E2E 真飞书测试 | Clarify 卡片无 E2E 测试覆盖 | 新增 `tests/e2e/test_e2e_clarify.py` — 5 个 E2E 测试（dict-repr 选项/特殊字符/question 转义/正常选项），真飞书验证通过 |

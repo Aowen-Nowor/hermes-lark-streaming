@@ -463,6 +463,7 @@ def build_status_card() -> dict[str, Any]:
             f"`flush_interval_ms`: `{cfg.flush_interval_ms}`",
             f"`card_ttl_sec`: `{cfg.card_duration_sec}`",
             f"`print_strategy`: `{cfg.print_strategy}`",
+            f"`print_step`: `{cfg.print_step}`",
         ]
         card_cfg = [
             f"`gateway_cards`: `{cfg.gateway_cards}`",

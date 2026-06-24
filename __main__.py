@@ -331,6 +331,7 @@ def _cmd_doctor() -> int:
         print(f"      flush_interval_ms:  {cfg.flush_interval_ms}")
         print(f"      card_ttl_sec:       {cfg.card_duration_sec}")
         print(f"      print_strategy:     {cfg.print_strategy}")
+        print(f"      print_step:         {cfg.print_step}")
         print(f"      panel_expanded:     {cfg.panel_expanded}")
         print(f"      streaming_panel_expanded: {cfg.streaming_panel_expanded}")
         print(f"      max_tool_steps:     {cfg.max_tool_steps}")
