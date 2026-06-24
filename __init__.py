@@ -59,7 +59,7 @@ Runtime Patching:
   patching/                   Sub-package
     __init__.py               Entry point + shared state (apply_patches) + re-exports
     hermes_adapter.py         HermesCompat (isolates all Hermes internal module access)
-    gateway.py                GatewayRunner wrappers, inject_time, cron
+    gateway.py                GatewayRunner wrappers, cron
     callbacks.py              Callback wrapping (answer, thinking, tool, reasoning)
     adapter.py                FeishuAdapter interception (send, edit, reactions, clarify)
     hooks.py                  Hook functions (on_message_started, on_answer_delta, etc.)

@@ -341,7 +341,7 @@ class Config:
         """带 TTL 缓存的磁盘重读，供运行时可变的配置项使用.
 
         在 _RELOAD_CACHE_TTL 秒内复用上次读取结果，避免高频属性访问
-        （如流式输出期间反复检查 inject_time / show_reasoning）反复读磁盘。
+        （如流式输出期间反复检查 show_reasoning / gateway_cards）反复读磁盘。
         配置变更最多延迟 _RELOAD_CACHE_TTL 秒生效。
         """
         now = time.monotonic()

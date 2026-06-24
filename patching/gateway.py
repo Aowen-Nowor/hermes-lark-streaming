@@ -1,4 +1,4 @@
-"""GatewayRunner method wrappers, inject_time, and cron delivery interception.
+"""GatewayRunner method wrappers and cron delivery interception.
 
 Split from monkey_patch.py — contains:
   - _wrap_handle_message()
@@ -622,13 +622,8 @@ def _wrap_run_agent(orig: Callable) -> Callable:
 def _wrap_run_conversation(orig: Callable) -> Callable:
     """Wrap all 6 streaming callbacks right before run_conversation executes.
 
-    When ``streaming.inject_time`` is enabled, prepends the current time
-    (``<time>HH:MM:SS</time>``) to ``user_message`` so the model can
-    perceive the current time without calling the ``date`` tool.
-
-    The time prefix is also added to ``persist_user_message`` when set, so
-    the DB-stored content matches what the API received — preserving
-    prefix cache consistency across conversation turns.
+    v1.3.0: inject_time removed — Hermes v0.17.0+ has built-in
+    gateway.message_timestamps.enabled for time injection.
     """
     # Lazy import to avoid circular dependency at module load time
     from .callbacks import _maybe_wrap_callbacks  # noqa: F811
