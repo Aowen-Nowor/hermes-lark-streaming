@@ -563,6 +563,41 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
                     metadata=metadata, **kwargs
                 )
 
+            # v1.3.0 fix: Flush + cancel pending timers BEFORE sending clarify card.
+            #
+            # When the AI calls the clarify tool mid-stream, the first LLM streaming
+            # request has ended, but the flush controller may still have a pending
+            # timer (80ms throttle window) that will fire and continue updating the
+            # streaming card AFTER the clarify card appears. This causes the confusing
+            # UX where "clarify card pops up while streaming card is still updating".
+            #
+            # Fix: find the active streaming session for this chat_id, cancel its
+            # pending flush timer, force an immediate flush of any dirty data, and
+            # wait for it to complete. This ensures the streaming card shows ALL
+            # pre-clarify text and STOPS updating before the clarify card appears.
+            try:
+                for _mid, _sess in ctrl._sess_items_snapshot():
+                    if _sess.chat_id == chat_id and not _sess.is_terminal_phase:
+                        if _sess.unified_state and _sess.unified_state.has_dirty:
+                            _logger.info(
+                                "clarify card: flushing pending answer before clarify "
+                                "msg=%s dirty=%s",
+                                (_mid or "?")[:12],
+                                bool(_sess.unified_state.answer_dirty),
+                            )
+                            # Force immediate flush and wait for completion.
+                            # This cancels the pending timer and writes dirty data now.
+                            await _sess.flush.flush_now(
+                                lambda s=_sess: ctrl._do_unified_flush(s)
+                            )
+                        else:
+                            # No dirty data — just cancel the pending timer so the
+                            # streaming card stops updating while the clarify is shown.
+                            _sess.flush._cancel_timer()
+                        break
+            except Exception:
+                _logger.debug("clarify card: pre-flush failed (non-fatal)", exc_info=True)
+
             from ..cardkit import build_clarify_card, normalize_clarify_choices
 
             # v1.3.0 P0-01: normalize choices BEFORE building the card and
