@@ -280,7 +280,7 @@ def unregister(ctx: "PluginContext") -> None:
     try:
         from ..controller import get_controller
         ctrl = get_controller()
-        ctrl._sessions.clear()
+        ctrl._sess_clear()
     except Exception:
         pass
     _logger.info("hermes-lark-streaming: unregistered")

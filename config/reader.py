@@ -8,12 +8,16 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
+
+_logger = logging.getLogger("hermes_lark_streaming")
 
 
 def _get_hermes_config_path() -> Path:
@@ -64,7 +68,11 @@ class Config:
         self._raw: dict[str, Any] | None = None
         self._reload_cache: dict[str, Any] | None = None
         self._reload_cache_at: float = 0.0
-        self._on_reload_callbacks: list[Callable[[], None]] = []
+        # v1.3.0 P1-02: removed _on_reload_callbacks / on_reload() — dead code
+        # (never called by any module). v1.3.0 MEDIUM: added _lock for thread-safe
+        # _load() / _reload_cached() / reload() (Config singleton is shared across
+        # event-loop and worker threads).
+        self._lock = threading.Lock()
         self._initialized = True
 
     # ── 配置刷新 ──
@@ -74,20 +82,11 @@ class Config:
 
         Clears all caches. Called by /aowen config reload command.
         """
-        self._raw = None
-        self._reload_cache = None
-        self._reload_cache_at = 0.0
-        _logger = __import__("logging").getLogger("hermes_lark_streaming")
+        with self._lock:
+            self._raw = None
+            self._reload_cache = None
+            self._reload_cache_at = 0.0
         _logger.info("HLS: config reload triggered — caches cleared")
-        for cb in self._on_reload_callbacks:
-            try:
-                cb()
-            except Exception:
-                _logger.debug("HLS: on_reload callback failed", exc_info=True)
-
-    def on_reload(self, callback: Callable[[], None]) -> None:
-        """Register a callback to be called when config is reloaded."""
-        self._on_reload_callbacks.append(callback)
 
     @property
     def enabled(self) -> bool:
@@ -327,20 +326,21 @@ class Config:
         return {}
 
     def _load(self) -> dict[str, Any]:
-        if self._raw is not None:
-            return self._raw
-        # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
-        config_path = _get_hermes_config_path()
-        if config_path.exists():
-            try:
-                text = config_path.read_text(encoding="utf-8")
-                self._raw = yaml.safe_load(text) or {}
-            except yaml.YAMLError:
-                _logger.warning("HLS: config YAML syntax error in %s, using empty config", config_path)
+        with self._lock:
+            if self._raw is not None:
+                return self._raw
+            # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
+            config_path = _get_hermes_config_path()
+            if config_path.exists():
+                try:
+                    text = config_path.read_text(encoding="utf-8")
+                    self._raw = yaml.safe_load(text) or {}
+                except yaml.YAMLError:
+                    _logger.warning("HLS: config YAML syntax error in %s, using empty config", config_path)
+                    self._raw = {}
+            else:
                 self._raw = {}
-        else:
-            self._raw = {}
-        return self._raw
+            return self._raw
 
     def _reload_cached(self) -> dict[str, Any]:
         """带 TTL 缓存的磁盘重读，供运行时可变的配置项使用.
@@ -350,18 +350,19 @@ class Config:
         配置变更最多延迟 _RELOAD_CACHE_TTL 秒生效。
         """
         now = time.monotonic()
-        if self._reload_cache is not None and (now - self._reload_cache_at) < _RELOAD_CACHE_TTL:
-            return self._reload_cache
-        # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
-        config_path = _get_hermes_config_path()
-        if config_path.exists():
-            try:
-                text = config_path.read_text(encoding="utf-8")
-                self._reload_cache = yaml.safe_load(text) or {}
-            except yaml.YAMLError:
-                _logger.warning("HLS: config YAML syntax error in %s (reload), using empty config", config_path)
+        with self._lock:
+            if self._reload_cache is not None and (now - self._reload_cache_at) < _RELOAD_CACHE_TTL:
+                return self._reload_cache
+            # 每次都动态读取 HERMES_HOME，支持多 Profile 场景
+            config_path = _get_hermes_config_path()
+            if config_path.exists():
+                try:
+                    text = config_path.read_text(encoding="utf-8")
+                    self._reload_cache = yaml.safe_load(text) or {}
+                except yaml.YAMLError:
+                    _logger.warning("HLS: config YAML syntax error in %s (reload), using empty config", config_path)
+                    self._reload_cache = {}
+            else:
                 self._reload_cache = {}
-        else:
-            self._reload_cache = {}
-        self._reload_cache_at = now
-        return self._reload_cache
+            self._reload_cache_at = now
+            return self._reload_cache

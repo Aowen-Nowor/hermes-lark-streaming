@@ -25,6 +25,8 @@ _RE_HEADING_DEMOTE = re.compile(r"^#{2,6} (.+)$", re.MULTILINE)
 _RE_H1_DEMOTE = re.compile(r"^# (.+)$", re.MULTILINE)
 _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 _RE_SHORT_MD_CHECK = re.compile(r'^#{1,6} |\n#{1,6} |```|!\[|\n{3,}')
+# v1.3.0: placeholder pattern for restoring protected code/bold/italic blocks
+_RE_PROTECTED_PLACEHOLDER = re.compile(r'\x00P(\d+)P\x00')
 
 __all__ = [
     "_MAX_CRON_TABLES",
@@ -133,8 +135,11 @@ def escape_markdown_asterisks(text: str) -> str:
     text = _RE_UNPAIRED_ASTERISK.sub(r'\\*', text)
 
     # Step 5: 还原保护区域
-    for i, block in enumerate(_protected):
-        text = text.replace(f'\x00P{i}P\x00', block)
+    # v1.3.0 perf: single regex sub instead of per-block str.replace (O(K×N) → O(N))
+    if _protected:
+        text = _RE_PROTECTED_PLACEHOLDER.sub(
+            lambda m: _protected[int(m.group(1))], text
+        )
 
     return text
 

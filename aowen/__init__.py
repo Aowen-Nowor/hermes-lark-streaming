@@ -411,7 +411,7 @@ def build_status_card() -> dict[str, Any]:
 
         ctrl_ready = ctrl.enabled and ctrl._client_ok()
         creds_status = ("已就绪", "success") if ctrl_ready else ("未就绪", "error")
-        active_count = sum(1 for s in ctrl._sessions.values() if not s.is_terminal_phase)
+        active_count = ctrl._sess_active_count()
 
         from .. import __version__ as plugin_version
 

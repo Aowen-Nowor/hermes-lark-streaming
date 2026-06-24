@@ -46,21 +46,14 @@ def extract_thinking_content(text: str) -> str:
 
 
 def strip_reasoning_tags(text: str) -> str:
+    # v1.3.0 perf: the previous implementation had two extra re.sub() calls
+    # after the open/close tag removal.  Those subs tried to match
+    # ``<think>...</think>`` blocks (tags + content) — but after the open/
+    # close removal above, NO tags remain, so the patterns could never match.
+    # They were dead code running on every answer token (hot path). Removed.
     result = _REASONING_OPEN_RE.sub(
         lambda _: "",
         _REASONING_CLOSE_RE.sub("", text),
-    )
-    result = re.sub(
-        r"<\s*" + _REASONING_TAG + r"\s*>[\s\S]*?<\s*/\s*" + _REASONING_TAG + r"\s*>",
-        "",
-        result,
-        flags=re.IGNORECASE,
-    )
-    result = re.sub(
-        r"<\s*" + _REASONING_TAG + r"\s*>[\s\S]*$",
-        "",
-        result,
-        flags=re.IGNORECASE,
     )
     if result.strip().startswith(REASONING_PREFIX):
         result = ""
@@ -76,12 +69,18 @@ def _clean_reasoning_prefix(text: str) -> str:
 
 
 class TextState:
-    """追踪流式文本的增量累积状态."""
+    """追踪流式文本的增量累积状态.
+
+    v1.3.0 P1-04: removed ``is_dirty()`` / ``mark_flushed()`` / ``last_flushed``
+    — dead code. The dirty-tracking mechanism was replaced by UnifiedLinearState's
+    own dirty flags (``answer_dirty`` / ``panel_dirty`` / ``tool_steps_dirty``)
+    in v1.1.0. ``on_partial`` is retained as the conceptual API for partial
+    text accumulation (used by ``display_text`` via ``accumulated``).
+    """
 
     def __init__(self) -> None:
         self.completed_text = ""
         self.accumulated = ""
-        self.last_flushed = ""
 
     @property
     def display_text(self) -> str:
@@ -102,10 +101,3 @@ class TextState:
             self.completed_text = text
         if not self.accumulated:
             self.accumulated = text
-
-    def is_dirty(self, new_text: str | None = None) -> bool:
-        check = new_text if new_text is not None else self.display_text
-        return check != self.last_flushed
-
-    def mark_flushed(self, text: str) -> None:
-        self.last_flushed = text

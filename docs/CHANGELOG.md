@@ -1,3 +1,32 @@
+## v1.3.0 (2026-06-24)
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0-01) | Clarify 追问卡片选项乱码（用户反馈） | LLM 传 dict 格式 choices（如 `{"id":1,"path":"/mnt/nas/backup1"}`），在 Hermes 工具调度层被 `str()` 序列化为 dict-repr 字符串后穿透到插件。插件直接将其放入 markdown 元素，飞书 `lark_md` 把 `{'` 当模板语法处理，导致单引号消失、`}` 变形为 `)`，显示为 `{id':1)` | **三层防御**：① `cardkit/special.py` 新增 `_normalize_choice()` — 用 `ast.literal_eval` 解析 dict-repr 字符串，按字段优先级（label>description>text>title>name>path>value>id）提取可读文本；② markdown 元素用 `_escape_md` 转义 `{` `}` `[` `]` `<` `>` 等特殊字符；③ 解析失败兜底原样转义显示。`question` 文本同样转义（Round 2 审计补充）。生产日志求证 + E2E 真飞书测试验证 |
+| 🐛 Bug Fix | `_clarify_*` 5个共享字典无并发锁 | 多线程（事件循环/飞书webhook/定时协程）并发访问 `_clarify_choices`/`_clarify_questions`/`_clarify_card_msg_ids`/`_clarify_selections`/`_clarify_timestamps` 可导致用户选择丢失、重试失败 | 新增 `_clarify_lock = threading.Lock()`，30+ 访问点全部加锁。`_schedule_confirm_card` 锁内快照数据后释放锁再做网络调用，避免持锁 await |
+| 🐛 Bug Fix | `_sessions` 会话字典无并发锁 | `_sessions` 被事件循环线程和 worker 线程并发访问，`_sessions.values()` 遍历时另一线程修改可触发 `RuntimeError: dictionary changed size during iteration` | 新增 `_sessions_lock = threading.RLock()` + 7个线程安全 helper 方法（`_sess_get`/`_sess_put`/`_sess_pop`/`_sess_items_snapshot`/`_sess_values_snapshot`/`_sess_active_count`/`_sess_clear`）。全项目 15+ 访问点改用 helper。RLock 允许重入（`on_message_started` 调 `on_interrupted`） |
+| 🐛 Bug Fix | `_interrupt_map` 重定向字典无并发锁 | 与 `_sessions` 同类问题，Round 1 审计遗漏，Round 2 补充 | 新增 `_interrupt_map_lock = threading.Lock()`，3处访问点（写入/弹出/清理）全部加锁 |
+| 🐛 Bug Fix | `_sessions.values()` 遍历无快照 | `aowen/__init__.py:414` 和 `controller/core.py:196` 直接遍历 `_sessions.values()`，并发修改时崩溃 | 改用 `_sess_active_count()` / `_sess_items_snapshot()` 线程安全快照 |
+| 🐛 Bug Fix | 推理文本去重 30 字符前缀比较丢内容 | `on_reasoning_delta` 的 post-stream 去重用 `min(30, ...)` 只比较前 30 字符，共享 30+ 字符前缀的合法增量块被误判为重复而丢弃 | 改为完整前缀比较 `text[:len(self._current_reasoning)] == self._current_reasoning`。6 个回归测试验证 |
+| 🐛 Bug Fix | `config/reader.py` `_logger` 未定义 | `_load()` 和 `_reload_cached()` 的 YAML 错误分支引用 `_logger`，但 `_logger` 仅在 `reload()` 内部用 `__import__` 定义，模块级无定义 → YAML 语法错误时 NameError 崩溃 | 模块级 `import logging` + `_logger = logging.getLogger("hermes_lark_streaming")`，删除 `__import__` hack |
+| 🔧 Fix | `strip_reasoning_tags` 热路径 2 个死正则 | 步骤1已移除所有 `<think>` 标签后，步骤2/3 试图匹配 `<think>...</think>` 块——永远不匹配。每个 answer token 都执行，2000 token = 4000 次无效正则扫描 | 删除步骤2/3（`state/text.py`），保留步骤1（移除标签保留内容，符合函数语义） |
+| 🔧 Fix | `inspect.signature` 每条消息调用 | `patching/__init__.py` 和 `patching/gateway.py` 在 per-message wrapper 内调用 `inspect.signature()` 检查 `persist_user_timestamp` 参数——签名运行时不变，每条消息浪费 10-50μs | 在 wrap time 计算一次 `_has_persist_ts`，闭包捕获，per-message 只做布尔判断 |
+| 🔧 Fix | flush-cycle INFO 日志刷屏 | 每个 flush 周期（150-200ms）打 2 条 INFO 日志，长对话 500+ 条 | 2 处 per-flush INFO 降为 DEBUG（`linear_mixin.py:575,734`）。状态转换和错误日志保持 INFO |
+| 🔧 Fix | `on_completed` 正常完成日志降噪 | 每次成功完成打 INFO 日志，生产环境刷屏 | 正常完成日志降为 DEBUG，yield-to-gateway 边缘情况保持 INFO |
+| 🚀 Performance | `escape_markdown_asterisks` 保护区域还原 O(K×N)→O(N) | 每个 protected block 用 `str.replace` 全文扫描，K 个 block × N 文本长度 | 改为单次 `re.sub` + lambda 查表还原（`_RE_PROTECTED_PLACEHOLDER`） |
+| 🚀 Performance | `UnavailableGuard._prune_cache` 每 token 全量扫描 | `is_unavailable()` 每个 token 调用，每次遍历整个缓存。100 条 × 2000 token = 20 万次遍历 | 改为阈值触发：缓存 >50 条才清理。小缓存 `in` 检查天然 O(1) |
+| 🚀 Performance | `Config._load()`/`_reload_cached()` 无锁 | Config 单例跨线程共享，并发首次访问重复解析 YAML，`reload()` 清缓存时可能读到陈旧配置 | 新增 `threading.Lock`，`_load`/`_reload_cached`/`reload` 全部加锁 |
+| 🏗️ Architecture | 删除 Config `on_reload()` 死代码 | `on_reload()` 注册回调和 `_on_reload_callbacks` 列表全项目无调用方，`reload()` 里的 for 循环永远不执行 | 删除 `on_reload()`、`_on_reload_callbacks`、循环。`Callable` import 一并移除 |
+| 🏗️ Architecture | 简化 `patching._get_config()` 缓存 | v1.2.0 Config 改单例后，外层 `_config` 全局缓存冗余 | 删除 `_config` 全局，`_get_config()` 直接 `return Config()`。conftest 同步移除 `_config` 重置 |
+| 🏗️ Architecture | 删除 TextState 死方法 | `is_dirty()`/`mark_flushed()`/`last_flushed` 在 v1.1.0 被 UnifiedLinearState 的 dirty 标志替代后从未被调用 | 删除方法 + 属性 + 2 个相关测试 |
+| 🔧 Fix | prune 日志 msg_id 截断过短 | `[:12]` 截断后无法与飞书后台完整 ID 关联 | 改为 `[:20]`，排障更高效 |
+| ✨ Feature | Clarify 选项长文本截断 | LLM 传超长 choice 文本时下拉框换行难看 | `_normalize_choice` 超过 80 字符自动截断 + `…` 省略号 |
+| ✨ Feature | 并发测试覆盖 | `_sessions`/`_clarify_*`/`_interrupt_map`/Config 锁无并发测试 | 新增 `tests/test_concurrency_v130.py` — 12 个并发测试（线程安全 + RLock 重入 + 无 RuntimeError） |
+| ✨ Feature | Clarify E2E 真飞书测试 | Clarify 卡片无 E2E 测试覆盖 | 新增 `tests/e2e/test_e2e_clarify.py` — 5 个 E2E 测试（dict-repr 选项/特殊字符/question 转义/正常选项），真飞书验证通过 |
+| ✨ Feature | Clarify 单元测试覆盖 | normalize/escape 逻辑无单元测试 | 新增 48 个单元测试（字段优先级/解析失败兜底/截断/转义/defense-in-depth） |
+
+---
+
 ## v1.2.1 (2026-06-24)
 
 | 类型 | 问题/功能 | 原因 | 修复/说明 |
@@ -37,7 +66,7 @@
 | 🔧 Fix | 错误卡片未显示调试 ID | `_build_error_panel` 调用时未传 `card_trace_id`，错误卡片不显示调试 ID，用户报 issue 时无法提供 trace 关联日志 | `build_unified_complete_card`/`build_preservative_seal_actions` 加 `card_trace_id` 参数，传给 `_build_error_panel`。错误卡片显示"调试 ID: xxx"并提示"如果反复出错，请把调试 ID 反馈给开发者" |
 | 🔧 Fix | 错误卡片技术详情区显示 HTML 标签乱码 | v1.1.0 错误面板用 `<details><summary>` HTML 标签实现折叠，但飞书 markdown 组件不支持 HTML 标签，标签会显示成乱码文本 | 去掉 `<details>` 标签，技术详情用分隔线 + 标题区分。外层 `collapsible_panel` 已提供折叠能力，无需嵌套 HTML 标签 |
 
-> **延后到 v1.3.0**：TextState 死方法精简（C3）、prune 日志显示更长 msg_id（M1）、on_completed 日志降级（M2）、`_sessions` 并发锁（M3，已在 v1.2.1 部分修复）、Config `on_reload()` dead code 清理、`patching._get_config()` 缓存简化。
+> **延后到 v1.3.0（已完成）**：TextState 死方法精简（C3）、prune 日志显示更长 msg_id（M1）、on_completed 日志降级（M2）、`_sessions` 并发锁（M3）、Config `on_reload()` dead code 清理、`patching._get_config()` 缓存简化。均在 v1.3.0 完成。
 
 ---
 

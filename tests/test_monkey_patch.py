@@ -614,10 +614,11 @@ class TestCardSessionExistenceCheck:
         import inspect
 
         source = inspect.getsource(_wrap_handle_message_with_agent)
-        # The fix adds a check for controller._sessions when result is not None
-        # and card_sent is False but a session with card_msg_id exists
-        assert "_sessions" in source, \
-            "Controller _sessions check not found in _wrap_handle_message_with_agent"
+        # The fix adds a check for controller session store when result is not None
+        # and card_sent is False but a session with card_msg_id exists.
+        # v1.3.0: access changed from direct _sessions.get to thread-safe _sess_get.
+        assert "_sess_get" in source or "_sessions" in source, \
+            "Controller session check not found in _wrap_handle_message_with_agent"
 
     def test_card_session_existence_check_in_feishu_adapter_send(self) -> None:
         """_wrap_feishu_adapter_send should check controller._sessions when card_sent=False."""
@@ -626,9 +627,10 @@ class TestCardSessionExistenceCheck:
 
         source = inspect.getsource(_wrap_feishu_adapter_send)
         # The fix adds a check in the Agent path when card_sent is False:
-        # query controller._sessions for a session with card_msg_id
-        assert "_sessions" in source, \
-            "Controller _sessions check not found in _wrap_feishu_adapter_send"
+        # query controller session store for a session with card_msg_id.
+        # v1.3.0: access changed from direct _sessions.get to thread-safe _sess_get.
+        assert "_sess_get" in source or "_sessions" in source, \
+            "Controller session check not found in _wrap_feishu_adapter_send"
 
     def test_feishu_adapter_send_session_check_sets_card_sent(self) -> None:
         """When a card session is found, card_sent should be set to True."""

@@ -52,7 +52,6 @@ __all__ = [
     # Shared state
     '_thread_local_ctx',
     '_logger',
-    '_config',
     '_msg_ctx',
     '_started_msg_ids',
     '_started_msg_ids_lock',
@@ -121,17 +120,12 @@ _logger = logging.getLogger("hermes_lark_streaming")
 
 # ── Module-level Config singleton for inject_time ──────────────────
 # Reused across calls so we don't create a new Config() per message.
-# inject_time uses _reload() (disk re-read) anyway, so a singleton gives
-# the same freshness guarantee without redundant object creation.
-_config = None
-
-
+# v1.3.0 P1-03: _config global cache removed — Config is a singleton since
+# v1.2.0 (Config() always returns the same instance), so the outer cache was
+# redundant. _get_config() now just returns Config() directly.
 def _get_config():
-    global _config
-    if _config is None:
-        from ..config import Config
-        _config = Config()
-    return _config
+    from ..config import Config
+    return Config()
 
 
 # ── Context propagation ────────────────────────────────────────────
@@ -606,6 +600,11 @@ def _apply_direct_agent_patch() -> None:
             _logger.info("hermes-lark-streaming: AIAgent.run_conversation already directly patched, skip")
             return
 
+        # v1.3.0 perf: compute signature check ONCE at wrap time (the signature
+        # never changes at runtime). Was ~10-50μs wasted per message.
+        import inspect
+        _has_persist_ts = "persist_user_timestamp" in inspect.signature(_orig_method).parameters
+
         def _patched_run_conversation(
             self,
             user_message,
@@ -633,10 +632,9 @@ def _apply_direct_agent_patch() -> None:
                     "stream_callback": stream_callback,
                     "persist_user_message": persist_user_message,
                 }
-                # 只在原方法支持时才传 persist_user_timestamp
-                import inspect
-                orig_params = inspect.signature(_orig_method).parameters
-                if "persist_user_timestamp" in orig_params:
+                # v1.3.0 perf: cache inspect.signature result at wrap time
+                # (the signature never changes at runtime — was ~10-50μs/message wasted)
+                if _has_persist_ts:
                     call_kwargs["persist_user_timestamp"] = persist_user_timestamp
                 call_kwargs.update(kwargs)
                 return _orig_method(self, user_message, **call_kwargs)

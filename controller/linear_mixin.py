@@ -572,7 +572,7 @@ class UnifiedControllerMixin:
             if actions:
                 _has_panel = state.panel_visible
                 session.sequence += 1
-                _logger.info(
+                _logger.debug(
                     "unified flush (phase 2 — add %s): msg=%s seq=%d actions=%d",
                     "panel+answer" if _has_panel else "answer only",
                     (session.message_id or "?")[:12],
@@ -731,7 +731,7 @@ class UnifiedControllerMixin:
         # ── Execute Phase 3 batch_update ──
         if actions:
             session.sequence += 1
-            _logger.info(
+            _logger.debug(
                 "unified flush: msg=%s seq=%d actions=%d hint_delete=%s",
                 (session.message_id or "?")[:12],
                 session.sequence,

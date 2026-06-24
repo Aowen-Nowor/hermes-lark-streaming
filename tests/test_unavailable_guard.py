@@ -78,8 +78,10 @@ class TestIsUnavailable:
         # Before pruning, the raw key exists
         assert "msg_old" in _guard_module._unavailable_cache
 
-        # is_unavailable triggers _prune_cache, which removes expired entries
-        assert is_unavailable("msg_old") is False
+        # v1.3.0: pruning is now threshold-gated (only runs when cache > 50).
+        # Call _prune_cache() directly to test the prune logic itself.
+        with _guard_module._unavailable_cache_lock:
+            _guard_module._prune_cache()
         assert "msg_old" not in _guard_module._unavailable_cache
 
     def test_cache_ttl_not_yet_expired(self) -> None:
@@ -101,8 +103,10 @@ class TestIsUnavailable:
         }
         mark_unavailable("msg_fresh", 230011)
 
-        # Trigger prune via is_unavailable
-        is_unavailable("msg_expired")
+        # v1.3.0: pruning is now threshold-gated. Call _prune_cache() directly
+        # to test the prune logic itself.
+        with _guard_module._unavailable_cache_lock:
+            _guard_module._prune_cache()
 
         assert "msg_expired" not in _guard_module._unavailable_cache
         assert "msg_fresh" in _guard_module._unavailable_cache

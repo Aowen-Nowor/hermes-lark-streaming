@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Any, Callable
 
@@ -130,7 +131,7 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
                         from ..controller import get_controller
                         _ctrl = get_controller()
                         if _ctrl and _ctrl.enabled:
-                            _sess = _ctrl._sessions.get(eid)
+                            _sess = _ctrl._sess_get(eid)
                             if _sess and _sess.card_msg_id:
                                 _logger.info(
                                     "feishu_adapter_send: suppressing text reply "
@@ -162,7 +163,7 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
                 _ctrl = get_controller()
                 if _ctrl and _ctrl.enabled:
                     # Find an active streaming session in this chat
-                    for _sess in list(_ctrl._sessions.values()):
+                    for _sess in _ctrl._sess_values_snapshot():
                         if (
                             _sess.chat_id == chat_id
                             and _sess.state in ("streaming", "creating", "idle")
@@ -488,7 +489,15 @@ def _wrap_feishu_adapter_delete_reaction(orig_delete_reaction: Callable) -> Call
 # ── Clarify interactive card registry ──────────────────────────────────
 # Stores the choices list for each clarify_id so the card action callback
 # handler can look up the choice text from the option index.
-_clarify_choices: dict[str, list[str]] = {}  # clarify_id → choices list
+#
+# v1.3.0 P1: these 5 dicts are accessed from multiple threads:
+#   (a) event-loop thread (send_clarify intercept) — writes
+#   (b) Feishu webhook callback thread (_handle_clarify_card_action) — reads/writes
+#   (c) scheduled coroutine (_schedule_confirm_card) — reads + pops
+#   (d) _prune_expired_clarify — iterates + pops
+# A single coarse-grained lock protects all 5 (clarify is rare, contention negligible).
+_clarify_lock = threading.Lock()
+_clarify_choices: dict[str, list[str]] = {}  # clarify_id → choices list (normalized)
 _clarify_questions: dict[str, str] = {}  # clarify_id → question text
 _clarify_card_msg_ids: dict[str, str] = {}  # clarify_id → card_msg_id (for server-side confirm update)
 _clarify_selections: dict[str, str] = {}  # clarify_id → user's selected/input text (for retry)
@@ -502,18 +511,19 @@ _clarify_card_info = _clarify_card_msg_ids  # noqa: F841
 
 def _prune_expired_clarify() -> None:
     """清理过期的追问数据（超过 _CLARIFY_TTL_SEC 未确认的条目）."""
-    if not _clarify_timestamps:
-        return
-    now = time.time()
-    expired = [cid for cid, ts in _clarify_timestamps.items() if now - ts > _CLARIFY_TTL_SEC]
-    for cid in expired:
-        _clarify_choices.pop(cid, None)
-        _clarify_questions.pop(cid, None)
-        _clarify_card_msg_ids.pop(cid, None)
-        _clarify_selections.pop(cid, None)
-        _clarify_timestamps.pop(cid, None)
-    if expired:
-        _logger.debug("HLS: pruned %d expired clarify entries", len(expired))
+    with _clarify_lock:
+        if not _clarify_timestamps:
+            return
+        now = time.time()
+        expired = [cid for cid, ts in _clarify_timestamps.items() if now - ts > _CLARIFY_TTL_SEC]
+        for cid in expired:
+            _clarify_choices.pop(cid, None)
+            _clarify_questions.pop(cid, None)
+            _clarify_card_msg_ids.pop(cid, None)
+            _clarify_selections.pop(cid, None)
+            _clarify_timestamps.pop(cid, None)
+        if expired:
+            _logger.debug("HLS: pruned %d expired clarify entries", len(expired))
 
 
 def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
@@ -553,19 +563,27 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
                     metadata=metadata, **kwargs
                 )
 
-            from ..cardkit import build_clarify_card
+            from ..cardkit import build_clarify_card, normalize_clarify_choices
+
+            # v1.3.0 P0-01: normalize choices BEFORE building the card and
+            # storing in the registry.  This ensures:
+            #   (a) the card displays readable text (dict-repr → extracted field)
+            #   (b) the user's selection (sent to the AI) is the readable text,
+            #       not the raw dict-repr garbage.
+            normalized = normalize_clarify_choices(choices) if choices else None
 
             card = build_clarify_card(
                 question=question,
-                choices=choices if choices else None,
+                choices=normalized,
                 clarify_id=clarify_id,
             )
 
-            # Store choices and question for callback lookup
-            if choices:
-                _clarify_choices[clarify_id] = list(choices)
-            _clarify_questions[clarify_id] = question
-            _clarify_timestamps[clarify_id] = time.time()
+            # Store normalized choices and question for callback lookup
+            with _clarify_lock:
+                if normalized:
+                    _clarify_choices[clarify_id] = list(normalized)
+                _clarify_questions[clarify_id] = question
+                _clarify_timestamps[clarify_id] = time.time()
 
             # Send the card via FeishuClient
             reply_to = None
@@ -584,8 +602,9 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
             )
 
             # Store card_msg_id for server-side confirm update
-            if card_msg_id:
-                _clarify_card_msg_ids[clarify_id] = card_msg_id
+            with _clarify_lock:
+                if card_msg_id:
+                    _clarify_card_msg_ids[clarify_id] = card_msg_id
 
             # Register the card in gateway card registry (for edit tracking)
             _register_gateway_card(card_msg_id, chat_id=chat_id, card_id=None, category="clarify")
@@ -673,21 +692,29 @@ async def _schedule_confirm_card(*, cid: str) -> None:
     # Small delay to ensure the CallBackCard (submitted state) is processed first
     await asyncio.sleep(1.0)
 
-    card_msg_id = _clarify_card_msg_ids.get(cid, "")
-    question = _clarify_questions.get(cid, "")
-    choices = _clarify_choices.get(cid) or None
-    selected = _clarify_selections.get(cid, "")
+    # v1.3.0: snapshot all needed data under the lock, then release it
+    # before the (potentially slow) network call.  Holding the lock across
+    # an await would serialize all clarify confirmations unnecessarily.
+    with _clarify_lock:
+        card_msg_id = _clarify_card_msg_ids.get(cid, "")
+        question = _clarify_questions.get(cid, "")
+        selected = _clarify_selections.get(cid, "")
+
+    def _cleanup():
+        """Pop all stored entries for this clarify_id (idempotent)."""
+        with _clarify_lock:
+            _clarify_choices.pop(cid, None)
+            _clarify_questions.pop(cid, None)
+            _clarify_card_msg_ids.pop(cid, None)
+            _clarify_selections.pop(cid, None)
+            _clarify_timestamps.pop(cid, None)
 
     if not card_msg_id:
         _logger.warning(
             "clarify card: cannot confirm, no card_msg_id for clarify_id=%s",
             (cid or "?")[:12],
         )
-        # Still cleanup
-        _clarify_choices.pop(cid, None)
-        _clarify_questions.pop(cid, None)
-        _clarify_card_msg_ids.pop(cid, None)
-        _clarify_selections.pop(cid, None)
+        _cleanup()
         return
 
     if not selected:
@@ -695,10 +722,7 @@ async def _schedule_confirm_card(*, cid: str) -> None:
             "clarify card: cannot confirm, no stored selection for clarify_id=%s",
             (cid or "?")[:12],
         )
-        _clarify_choices.pop(cid, None)
-        _clarify_questions.pop(cid, None)
-        _clarify_card_msg_ids.pop(cid, None)
-        _clarify_selections.pop(cid, None)
+        _cleanup()
         return
 
     try:
@@ -731,11 +755,7 @@ async def _schedule_confirm_card(*, cid: str) -> None:
         )
     finally:
         # Always cleanup stored data after confirm attempt
-        _clarify_choices.pop(cid, None)
-        _clarify_questions.pop(cid, None)
-        _clarify_card_msg_ids.pop(cid, None)
-        _clarify_selections.pop(cid, None)
-        _clarify_timestamps.pop(cid, None)
+        _cleanup()
 
 
 def _handle_clarify_card_action(
@@ -810,12 +830,15 @@ def _handle_clarify_card_action(
             )
             return _empty_response()
 
-    question = _clarify_questions.get(clarify_id, "")
-    choices = _clarify_choices.get(clarify_id) or None
+    # v1.3.0: snapshot question + choices atomically (used by all action branches)
+    with _clarify_lock:
+        question = _clarify_questions.get(clarify_id, "")
+        choices = _clarify_choices.get(clarify_id) or None
 
     # ── Handle retry_submit action (re-send previous selection) ──
     if clarify_action == "retry_submit":
-        stored_selection = _clarify_selections.get(clarify_id, "")
+        with _clarify_lock:
+            stored_selection = _clarify_selections.get(clarify_id, "")
         if not stored_selection:
             _logger.debug("clarify card: retry but no stored selection for clarify_id=%s", (clarify_id or "?")[:12])
             return _empty_response()
@@ -867,7 +890,8 @@ def _handle_clarify_card_action(
         selected_option = str(getattr(getattr(event, "action", None), "option", "") or "")
 
         # Predefined choice selected → resolve
-        choices_list = _clarify_choices.get(clarify_id, [])
+        with _clarify_lock:
+            choices_list = list(_clarify_choices.get(clarify_id, []))
         try:
             idx = int(selected_option)
             choice_text = choices_list[idx]
@@ -887,7 +911,8 @@ def _handle_clarify_card_action(
         )
 
         # Store selection for retry
-        _clarify_selections[clarify_id] = choice_text
+        with _clarify_lock:
+            _clarify_selections[clarify_id] = choice_text
 
         # Resolve the clarify (schedule on event loop since we're in a sync callback)
         loop = getattr(adapter_instance, "_loop", None)
@@ -942,7 +967,8 @@ def _handle_clarify_card_action(
         )
 
         # Store selection for retry
-        _clarify_selections[clarify_id] = input_text
+        with _clarify_lock:
+            _clarify_selections[clarify_id] = input_text
 
         # Resolve the clarify
         loop = getattr(adapter_instance, "_loop", None)
@@ -998,7 +1024,8 @@ def _handle_clarify_card_action(
         )
 
         # Store selection for retry
-        _clarify_selections[clarify_id] = input_text
+        with _clarify_lock:
+            _clarify_selections[clarify_id] = input_text
 
         # Resolve the clarify
         loop = getattr(adapter_instance, "_loop", None)

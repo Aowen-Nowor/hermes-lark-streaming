@@ -166,7 +166,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                 if _ctrl and _ctrl.enabled:
                     _eid = ctx.get("event_message_id", "") if ctx else ""
                     if _eid:
-                        _sess = _ctrl._sessions.get(_eid)
+                        _sess = _ctrl._sess_get(_eid)
                         if _sess and _sess.card_msg_id:
                             _logger.info(
                                 "card session exists for msg=%s (state=%s), suppressing gateway reply",
@@ -208,7 +208,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                         _ctrl = get_controller()
                         if _ctrl and _ctrl.enabled:
                             for _other_mid in others:
-                                _other_sess = _ctrl._sessions.get(_other_mid)
+                                _other_sess = _ctrl._sess_get(_other_mid)
                                 if _other_sess and _other_sess.state not in TERMINAL_PHASES and _other_sess.state != "completing":
                                     _real_interrupt = True
                                     _interrupt_new_mid = _other_mid
@@ -255,7 +255,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                 if _ctrl and _ctrl.enabled:
                     _eid = ctx.get("event_message_id", "")
                     if _eid:
-                        _sess = _ctrl._sessions.get(_eid)
+                        _sess = _ctrl._sess_get(_eid)
                         if _sess and _sess.state not in TERMINAL_PHASES and _sess.state != "completing":
                             _logger.info(
                                 "card session stuck in non-terminal state for msg=%s "
@@ -699,6 +699,11 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
     # Lazy import to avoid circular dependency at module load time
     from .callbacks import _maybe_wrap_callbacks  # noqa: F811
 
+    # v1.3.0 perf: compute signature check ONCE at wrap time (the signature
+    # never changes at runtime). Was ~10-50μs wasted per message.
+    import inspect
+    _has_persist_ts = "persist_user_timestamp" in inspect.signature(orig).parameters
+
     @functools.wraps(orig)
     def wrapper(
         self,
@@ -719,7 +724,6 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
         _maybe_wrap_callbacks(self)
         try:
             # 用关键字参数传递，兼容有/无 persist_user_timestamp 的 Hermes 版本
-            import inspect
             call_kwargs = {
                 "system_message": system_message,
                 "conversation_history": conversation_history,
@@ -727,8 +731,7 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
                 "stream_callback": stream_callback,
                 "persist_user_message": persist_user_message,
             }
-            orig_params = inspect.signature(orig).parameters
-            if "persist_user_timestamp" in orig_params:
+            if _has_persist_ts:
                 call_kwargs["persist_user_timestamp"] = persist_user_timestamp
             call_kwargs.update(kwargs)
             return orig(self, user_message, **call_kwargs)

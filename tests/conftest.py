@@ -129,11 +129,7 @@ def _reset_config_singleton():
     """
     from hermes_lark_streaming.config.reader import Config
     Config._instance = None
-    # v1.2.0: 同步重置 patching 层的 Config 缓存（防御性）
-    try:
-        import hermes_lark_streaming.patching as _patching
-        _patching._config = None
-    except Exception:
-        pass
+    # v1.3.0 P1-03: patching._config global cache removed — Config singleton
+    # reset above is sufficient for test isolation.
     yield
     Config._instance = None

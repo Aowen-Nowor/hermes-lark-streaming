@@ -27,6 +27,11 @@ _TERMINAL_MESSAGE_CODES = {
 _unavailable_cache: dict[str, dict[str, Any]] = {}
 _unavailable_cache_lock = threading.Lock()
 _UNENHANCED_CACHE_TTL_SEC = 30 * 60  # 30 分钟 TTL
+# v1.3.0 perf: prune only when cache exceeds this threshold, instead of on
+# every is_unavailable() call (which runs per-token in the streaming hot path).
+# At 1 prune per 50+ entries, the amortized cost is negligible vs. scanning
+# the full cache on every token.
+_PRUNE_THRESHOLD = 50
 
 
 def _prune_cache() -> None:
@@ -52,7 +57,11 @@ def is_unavailable(message_id: str | None) -> bool:
     if not message_id:
         return False
     with _unavailable_cache_lock:
-        _prune_cache()
+        # v1.3.0 perf: only prune when cache is large enough to warrant the
+        # scan. Small caches (typical: <10 entries) are scanned trivially by
+        # the `in` check, so pruning is deferred until the threshold is hit.
+        if len(_unavailable_cache) > _PRUNE_THRESHOLD:
+            _prune_cache()
         return message_id in _unavailable_cache
 
 
