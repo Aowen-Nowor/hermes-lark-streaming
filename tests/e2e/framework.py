@@ -127,11 +127,11 @@ class E2ETestRunner:
         cfg.enabled = True
         cfg.linear = True
         cfg.gateway_cards = True
-        cfg.inject_time = False
         cfg.flush_interval_ms = 50  # Fast for tests
         cfg.flush_interval_sec = 0.05
         cfg.card_duration_sec = 600
         cfg.print_strategy = "fast"
+        cfg.print_step = 4
         cfg.show_reasoning = True
         cfg.panel_expanded = False
         cfg.streaming_panel_expanded = False
