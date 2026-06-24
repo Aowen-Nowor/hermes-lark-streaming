@@ -258,4 +258,4 @@ FEISHU_DOMAIN=feishu          # feishu=China, lark=International
 
 ## Acknowledgments
 
-[![joshcheng820222](assets/avatars/joshcheng820222.png)](https://github.com/joshcheng820222) [![xuu1998](assets/avatars/xuu1998.png)](https://github.com/xuu1998) [![joshchengjoshcheng](assets/avatars/joshchengjoshcheng.png)](https://gitee.com/joshchengjoshcheng) [![hmhmdcy](assets/avatars/hmhmdcy.png)](https://github.com/hmhmdcy)
+<a href="https://github.com/joshcheng820222"><img src="https://avatars.githubusercontent.com/u/26886147?v=4&s=66" alt="joshcheng820222" width="66" height="66"></a> <a href="https://github.com/xuu1998"><img src="https://avatars.githubusercontent.com/u/40609659?v=4&s=66" alt="xuu1998" width="66" height="66"></a> <a href="https://gitee.com/joshchengjoshcheng"><img src="assets/avatars/joshchengjoshcheng.png" alt="joshchengjoshcheng" width="66" height="66"></a> <a href="https://github.com/hmhmdcy"><img src="https://avatars.githubusercontent.com/u/163143682?v=4" alt="hmhmdcy" width="66" height="66"></a>
