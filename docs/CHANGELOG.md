@@ -1,3 +1,32 @@
+## v1.3.7 (2026-06-25)
+
+E2E 测试优化 — 真飞书模式群聊消息数减少 ~85%。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🔧 Improvement | E2E 真飞书模式群聊测试消息过多（每次跑完群聊收到 ~21 条 anchor 文本 + ~21 张卡片） | `runner` fixture 是函数级，每个测试方法都重新 setup 发一条 anchor 消息。3 个测试文件共 21 个测试方法 = 21 条 anchor 消息 | `runner` fixture 改为 module 级（`_module_runner`），同一测试文件的所有方法共享 1 个 runner（1 条 anchor）。函数级 `runner` fixture 从 `_module_runner` 拿实例，每个测试方法前清理 controller sessions + 重置配置保证隔离 (`tests/e2e/conftest.py`) |
+| 🐛 Bug Fix | module 级 runner 共享导致 `test_header_disabled_no_header` 失败（前一个测试 `enable_header()` 的配置残留） | `Config` 是单例，module 级 runner 的 `header_enabled=True` 残留到下一个测试 | 函数级 `runner` fixture 每次重置 `header_enabled=False` 到默认值 |
+| 📊 统计 | 群聊 anchor 消息：21 条 → 3 条（减 85%）；群聊总消息（anchor+卡片）：~42 条 → ~24 条 | test_e2e_full.py 12→1, test_e2e_clarify.py 5→1, test_e2e_header.py 4→1 | 私聊测试不受影响（本来就是 3 条） |
+
+**审计方法**: 统计 E2E 测试在真飞书模式下的群聊消息数，定位到 `runner` fixture 函数级 setup 是消息重复的根因。改为 module 级后用 mock 模式（24 passed）+ 真飞书模式（header + session 7 passed）验证无回归。配置残留问题由 mock 模式 `test_header_disabled_no_header` 失败发现并修复。
+
+---
+
+## v1.3.6 (2026-06-25)
+
+紧急修复 v1.3.5 遗留的两个生产问题 — GitHub Actions 真飞书 E2E 测试竞态 + /aowen 命令无法识别。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | `/aowen` 命令无法识别，Hermes 网关返回 `Unknown command /aowen`，插件 `pre_gateway_dispatch` hook 从未注册 | `plugin/__init__.py` 的 `register()` 函数 pre-warm 段 `except RuntimeError: return` 提前退出，导致后续 `/aowen` hook 注册代码（第 269-275 行）从不执行。v1.3.2 引入 pre-warm 功能时加的早期 `return`，意图是"无事件循环就跳过预热"，但误跳过了 hook 注册。用户报告：网关日志只有 `patches applied` + `no running event loop, skipping pre-warm`，缺失 `/aowen commands registered` 日志 | 移除 pre-warm `except` 块里的 `return`，改为 `loop = None` 仅跳过预热，`/aowen` hook 注册代码总能到达 (`plugin/__init__.py`) |
+| 🐛 Bug Fix (P1) | GitHub Actions 真飞书 E2E `test_prune_skips_streaming_session` 持续超时（v1.3.5 修复只在 mock 模式验证，真飞书模式仍失败） | concurrency seal 循环遍历 `_sessions` 时，同一 session 对象会被 `message_id` key 和 `anchor_id` key 两次命中。第一次 `on_interrupted` 创建 session2 时 `_sess_put(anchor_id, session2)` 覆盖了 `_sessions[anchor_id]`，导致循环再次遇到 anchor_id key 时把刚创建的 session2 当作 old_session abort 掉（session2 的 `_card_ready` 从未 set → 10 秒超时）。日志证据：`_complete_session: non-linear session` 的 session id 与第一次 `_do_create_linear_card ENTER` 的 session id 不同 | concurrency seal 循环加 `seen_sessions: set[int]` 跟踪已处理的 session 对象 id，同一对象只处理一次 (`controller/core.py`) |
+| 🧪 Test | 新增 `test_register_always_registers_aowen_hook` 回归测试 | v1.3.6 P0 修复的回归测试——验证无事件循环时 `register()` 仍注册 `pre_gateway_dispatch` hook | 模拟 `asyncio.get_running_loop` 抛 RuntimeError，断言 `mock_ctx.register_hook` 被调用且 hook_name == `pre_gateway_dispatch` (`tests/test_monkey_patch.py`) |
+| 📝 Docs | 补充根因分析：为何单元测试/E2E 未发现 P0 | `register()` 函数只在网关启动时调用，单元测试和 E2E 测试都直接 import controller 调用方法，不经过 `register()`。`test_register_logs_version` 只检查版本号日志，未检查 hook 注册。真飞书 E2E `test_prune_skips_streaming_session` 在 mock 模式下 `anchor_id == message_id`（不会有两个 key），只有真飞书模式 `anchor_id != message_id` 才触发竞态 | 新增的回归测试覆盖 `register()` 的 hook 注册路径；E2E 测试在真飞书模式下验证 concurrency seal 的 anchor_id 去重 |
+
+**审计方法**: 两个问题都由用户在生产环境发现并报告。P0 通过读 `register()` 代码定位到 pre-warm 的 `return` 语句（issue 提供了完整的根因分析和修复方案）。P1 通过真飞书 E2E 复现 + 加调试日志追踪 session 对象 id，发现 concurrency seal 循环中同一 session 被 anchor_id key 和 message_id key 两次命中，第二次把刚创建的 session2 误 abort。两处修复均在本地 + 真飞书 E2E 验证通过。
+
+---
+
 ## v1.3.5 (2026-06-25)
 
 紧急修复 v1.3.4 引入的两个生产问题 — markdown 占位符泄漏导致飞书卡片显示乱码 + E2E 测试竞态超时。

@@ -226,6 +226,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # before creating the new one. This prevents resource contention
         # and ensures the user only sees one active card at a time.
         # v1.3.0: use thread-safe snapshot to avoid RuntimeError on concurrent modification.
+        # v1.3.6 fix: 用 seen set 跟踪已处理的 session 对象，防止同一 session
+        # 被 anchor_id key 和 message_id key 重复处理。原实现 on_interrupted
+        # 创建新 session 时 _sess_put(anchor_id, new_session) 覆盖了
+        # _sessions[anchor_id]，导致循环再次遇到 anchor_id key 时把刚创建的
+        # 新 session 当作 old_session abort 掉（真飞书模式 E2E 复现）。
+        seen_sessions: set[int] = set()
         for existing_msg_id, existing_session in self._sess_items_snapshot():
             if existing_session.chat_id != chat_id:
                 continue
@@ -233,6 +239,9 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 continue
             if existing_msg_id == message_id:
                 continue
+            if id(existing_session) in seen_sessions:
+                continue
+            seen_sessions.add(id(existing_session))
             _logger.info(
                 "HLS: concurrency limit — sealing old active card "
                 "msg=%s trace=%s chat=%s (new msg=%s arriving)",
