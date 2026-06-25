@@ -256,6 +256,27 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if loop is None:
             _logger.warning("HLS: no event loop, skipping msg=%s", (message_id or "?")[:12])
             return
+
+        # v1.3.4 fix (P0): concurrency seal 可能已通过 on_interrupted 创建了
+        # 当前 message_id 的 session（并已触发 _do_create_linear_card）。
+        # 如果直接再创建会覆盖原 session，导致：
+        #   1. 两张卡片被创建（on_interrupted 一张 + 这里一张）
+        #   2. on_interrupted 创建的那张卡片成为孤儿（永远停在"正在加载上下文..."）
+        # 修复：如果 session 已存在（由 on_interrupted 创建），直接复用，仅补记 metrics。
+        existing = self._sess_get(message_id)
+        if existing is not None:
+            _logger.info(
+                "HLS: session already created by concurrency seal, reusing msg=%s trace=%s",
+                (message_id or "?")[:12], existing.card_trace_id,
+            )
+            try:
+                from ..aowen import record_card_created, set_active_sessions
+                record_card_created()
+                set_active_sessions(self._sess_active_count())
+            except Exception:
+                _logger.debug('metrics: record_card_created failed (reuse path)', exc_info=True)
+            return
+
         session = CardSession(message_id, chat_id, loop)
         self._sess_put(message_id, session)
         if anchor_id and anchor_id != message_id:

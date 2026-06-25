@@ -133,7 +133,21 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
         }
         _msg_ctx.set(msg_context)
 
-        result = await orig(self, event, source, *args, **kwargs)
+        # v1.3.4 fix (P1): 确保 orig() 抛异常时 _msg_ctx / _started_msg_ids
+        # 被清理。原实现 cleanup 在函数末尾，orig() 异常会跳过 cleanup，
+        # 导致 _msg_ctx 保留 stale event_message_id，下一条消息的
+        # FeishuAdapter.send() 被静默抑制（"卡片不出现" bug）。
+        def _hls_cleanup_ctx() -> None:
+            with _started_msg_ids_lock:
+                _started_msg_ids.discard(mid)
+            _msg_ctx.set(None)
+            _thread_local_ctx.data = None
+
+        try:
+            result = await orig(self, event, source, *args, **kwargs)
+        except BaseException:
+            _hls_cleanup_ctx()
+            raise
 
         # ── Use the per-message context dict instead of _msg_ctx ──
         # When a new message interrupts the old one, _msg_ctx may already
@@ -152,8 +166,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                     "card already sent for msg=%s, suppressing gateway reply",
                     mid[:12],
                 )
-                with _started_msg_ids_lock:
-                    _started_msg_ids.discard(mid)
+                _hls_cleanup_ctx()
                 return None
             # Also check if a card session exists (even in terminal state).
             # This catches cases where card_sent wasn't propagated correctly
@@ -171,8 +184,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                                 mid[:12], _sess.state,
                             )
                             ctx["card_sent"] = True
-                            with _started_msg_ids_lock:
-                                _started_msg_ids.discard(mid)
+                            _hls_cleanup_ctx()
                             return None
             except Exception:
                 _logger.warning("HLS: suppressed exception", exc_info=True)
@@ -267,22 +279,9 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                                 _logger.warning("HLS: suppressed exception", exc_info=True)
             except Exception:
                 _logger.warning("HLS: suppressed exception", exc_info=True)
-        # Cleanup tracking
-        with _started_msg_ids_lock:
-            _started_msg_ids.discard(mid)
-
-        # ── Clear message context to prevent stale leakage ──
-        # After this message is fully processed, the context must be
-        # cleared so that subsequent non-agent messages (gateway-internal
-        # messages like /status, /help, errors, etc.) sent through
-        # FeishuAdapter.send() are NOT incorrectly routed to the "Agent
-        # path" where they would be silently suppressed.
-        #
-        # Bug: Without this cleanup, _msg_ctx retains the old event_message_id
-        # and card_sent=True, causing the next FeishuAdapter.send() call
-        # to enter the agent suppression path and drop the message.
-        _msg_ctx.set(None)
-        _thread_local_ctx.data = None
+        # v1.3.4 fix (P1): cleanup on normal exit path (early returns and
+        # exceptions handled by _hls_cleanup_ctx above).
+        _hls_cleanup_ctx()
 
         return result
 
@@ -389,20 +388,30 @@ def _wrap_run_agent(orig: Callable) -> Callable:
             # Copy to thread-local for thread-pool workers
             _thread_local_ctx.data = dict(ctx)
 
-        result = await orig(
-            self,
-            message,
-            context_prompt,
-            history,
-            source,
-            session_id,
-            session_key=session_key,
-            run_generation=run_generation,
-            _interrupt_depth=_interrupt_depth,
-            event_message_id=event_message_id,
-            channel_prompt=channel_prompt,
-            **kwargs,
-        )
+        # v1.3.4 fix (P1): 确保 orig() 抛异常时 _saved_parent_ctx 被恢复。
+        # 原实现 restore 在函数末尾，orig() 异常会跳过 restore，导致
+        # _msg_ctx 保留 child 的 context，parent 的 COMPLETE hook 读到
+        # 错误的 message_id（"wrong card gets completion" bug）。
+        try:
+            result = await orig(
+                self,
+                message,
+                context_prompt,
+                history,
+                source,
+                session_id,
+                session_key=session_key,
+                run_generation=run_generation,
+                _interrupt_depth=_interrupt_depth,
+                event_message_id=event_message_id,
+                channel_prompt=channel_prompt,
+                **kwargs,
+            )
+        except BaseException:
+            if _saved_parent_ctx is not None:
+                _msg_ctx.set(_saved_parent_ctx)
+                _thread_local_ctx.data = dict(_saved_parent_ctx)
+            raise
 
         # ── COMPLETE hook ──
         # After orig() returns, we need to fire the COMPLETE hooks for
@@ -630,8 +639,13 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
 
     # v1.3.0 perf: compute signature check ONCE at wrap time (the signature
     # never changes at runtime). Was ~10-50μs wasted per message.
+    # v1.3.4 fix (P1): inspect.signature 可能对 C 扩展函数/wrapped callable
+    # 抛 ValueError/TypeError，导致 apply_patches 崩溃、插件加载失败。
     import inspect
-    _has_persist_ts = "persist_user_timestamp" in inspect.signature(orig).parameters
+    try:
+        _has_persist_ts = "persist_user_timestamp" in inspect.signature(orig).parameters
+    except (ValueError, TypeError):
+        _has_persist_ts = False
 
     @functools.wraps(orig)
     def wrapper(
@@ -749,69 +763,72 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
             # not reset the flag while the second is still running.
             adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 0) + 1
 
+        # v1.3.4 fix (P1): orig() + COMPLETE hook 都在 try 块内，finally
+        # 同时恢复 adapter.send 和清理 _msg_ctx。原实现 _msg_ctx 清理在
+        # try/finally 之外，orig() 抛异常时 _msg_ctx 保留 background task
+        # 的 context，导致后续 FeishuAdapter.send() 被错误路由。
         try:
             result = await orig(self, prompt, source, task_id, **kwargs)
+
+            # ── Fire COMPLETE hook ──
+            ctx = _msg_ctx.get()
+            if ctx is not None:
+                try:
+                    from .hooks import on_message_completed
+
+                    _elapsed = time.monotonic() - ctx.get("_msg_start_time", time.monotonic())
+
+                    # Extract cache tokens from agent reference (set by _maybe_wrap_callbacks)
+                    _agent_ref = ctx.get("_agent_ref")
+                    cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
+                    cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
+                    reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
+                    estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
+                    cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
+
+                    card_sent = on_message_completed(
+                        message_id=task_id,
+                        answer=(result or {}).get("final_response", ""),
+                        duration=_elapsed,
+                        model=(result or {}).get("model", ""),
+                        tokens={
+                            "input_tokens": (result or {}).get("input_tokens", 0),
+                            "output_tokens": (result or {}).get("output_tokens", 0),
+                            "cache_read_tokens": cache_read,
+                            "cache_write_tokens": cache_write,
+                        },
+                        context={
+                            "used_tokens": (result or {}).get("last_prompt_tokens", 0),
+                            "max_tokens": (result or {}).get("context_length", 0),
+                        },
+                        api_calls=(result or {}).get("api_calls", 0),
+                        history_offset=(result or {}).get("history_offset", 0),
+                        compression_exhausted=(result or {}).get("compression_exhausted", False),
+                        aborted=False,
+                        error_message=(result or {}).get("error") or "",
+                        reasoning_tokens=reasoning_tokens,
+                        estimated_cost_usd=estimated_cost_usd,
+                        cost_status=cost_status,
+                    )
+
+                    if card_sent:
+                        ctx["card_sent"] = True
+                        # Mark result so upstream knows card was sent
+                        if result is not None and isinstance(result, dict):
+                            result["_hls_card_sent"] = True
+                except Exception:
+                    _logger.debug("background task COMPLETE hook failed", exc_info=True)
+
+            return result
         finally:
             if original_send and adapter:
                 adapter.send = original_send
                 # v1.3.2 fix (B3-06): default to 0 (not 1) for consistency —
                 # a counter should never default to 1 when decrementing.
                 adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 0) - 1
-
-        # ── Fire COMPLETE hook ──
-        ctx = _msg_ctx.get()
-        if ctx is not None:
-            try:
-                from .hooks import on_message_completed
-
-                _elapsed = time.monotonic() - ctx.get("_msg_start_time", time.monotonic())
-
-                # Extract cache tokens from agent reference (set by _maybe_wrap_callbacks)
-                _agent_ref = ctx.get("_agent_ref")
-                cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
-                cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
-                reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
-                estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
-                cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
-
-                card_sent = on_message_completed(
-                    message_id=task_id,
-                    answer=(result or {}).get("final_response", ""),
-                    duration=_elapsed,
-                    model=(result or {}).get("model", ""),
-                    tokens={
-                        "input_tokens": (result or {}).get("input_tokens", 0),
-                        "output_tokens": (result or {}).get("output_tokens", 0),
-                        "cache_read_tokens": cache_read,
-                        "cache_write_tokens": cache_write,
-                    },
-                    context={
-                        "used_tokens": (result or {}).get("last_prompt_tokens", 0),
-                        "max_tokens": (result or {}).get("context_length", 0),
-                    },
-                    api_calls=(result or {}).get("api_calls", 0),
-                    history_offset=(result or {}).get("history_offset", 0),
-                    compression_exhausted=(result or {}).get("compression_exhausted", False),
-                    aborted=False,
-                    error_message=(result or {}).get("error") or "",
-                    reasoning_tokens=reasoning_tokens,
-                    estimated_cost_usd=estimated_cost_usd,
-                    cost_status=cost_status,
-                )
-
-                if card_sent:
-                    ctx["card_sent"] = True
-                    # Mark result so upstream knows card was sent
-                    if result is not None and isinstance(result, dict):
-                        result["_hls_card_sent"] = True
-            except Exception:
-                _logger.debug("background task COMPLETE hook failed", exc_info=True)
-
-        # Clear context
-        _msg_ctx.set(None)
-        _thread_local_ctx.data = None
-
-        return result
+            # v1.3.4 fix (P1): clear context in finally — runs on ALL paths
+            _msg_ctx.set(None)
+            _thread_local_ctx.data = None
 
     return wrapper
 

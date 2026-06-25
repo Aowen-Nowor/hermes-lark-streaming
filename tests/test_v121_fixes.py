@@ -437,3 +437,40 @@ class TestYAMLErrorHandling:
         # yaml.safe_load on bad yaml raises YAMLError
         with pytest.raises(yaml.YAMLError):
             yaml.safe_load("key: [\n  invalid\n")
+
+
+# ─── v1.3.4 Regression Tests ──────────────────────────────────────────
+
+def test_v134_aowen_handler_exception_returns_skip_not_none():
+    """v1.3.4 P0 fix: /aowen handler 异常时必须返回 skip，不能返回 None。
+
+    返回 None 会让 /aowen 命令落入 agent，LLM 把 "/aowen foo" 当用户 prompt 处理。
+    修复：异常时 return _skip(...) + 升级到 exception 级别日志。
+    """
+    from aowen import handle_pre_gateway_dispatch
+    from types import SimpleNamespace
+
+    # 构造一个 /aowen 命令事件
+    source = SimpleNamespace(
+        chat_id="oc_test",
+        platform=SimpleNamespace(value="feishu"),
+    )
+    event = SimpleNamespace(
+        text="/aowen help",
+        source=source,
+    )
+
+    # 让 _send_card_async 抛异常（模拟 controller 未初始化等场景）
+    import aowen
+    original_send = aowen._send_card_async
+    aowen._send_card_async = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("test crash"))
+
+    try:
+        result = handle_pre_gateway_dispatch(event)
+    finally:
+        aowen._send_card_async = original_send
+
+    # v1.3.4 fix: 异常时应返回 skip dict（action=skip），不是 None
+    assert result is not None, "/aowen handler 异常时不能返回 None（会落入 agent）"
+    assert isinstance(result, dict)
+    assert result.get("action") == "skip", f"Expected action=skip, got {result}"

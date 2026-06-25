@@ -43,6 +43,9 @@ class FlushController:
         self._completed = False
         self._card_message_ready = False
         self._flush_resolvers: list[asyncio.Future[None]] = []
+        # v1.3.4 fix (P2): 持有 flush Task 强引用，防止 GC 在任务完成前回收
+        # （Python 文档："Save a reference to the result of this function"）
+        self._pending_flush_tasks: set[asyncio.Task[None]] = set()
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -165,7 +168,13 @@ class FlushController:
 
     def _do_flush_task(self, do_flush: Callable[[], Awaitable[None]]) -> None:
         self._pending_timer = None
-        self._get_loop().call_soon(asyncio.create_task, self._do_flush(do_flush))
+        # v1.3.4 fix (P2): 持有 Task 强引用防止 GC 回收
+        self._get_loop().call_soon(self._create_flush_task, do_flush)
+
+    def _create_flush_task(self, do_flush: Callable[[], Awaitable[None]]) -> None:
+        task = self._get_loop().create_task(self._do_flush(do_flush))
+        self._pending_flush_tasks.add(task)
+        task.add_done_callback(self._pending_flush_tasks.discard)
 
     async def _do_flush(self, do_flush: Callable[[], Awaitable[None]]) -> None:
         if self._completed or self._flush_in_progress:
@@ -191,7 +200,8 @@ class FlushController:
         # 如果 flush 期间又有新数据 → 立即重刷
         if self._needs_reflush and not self._completed:
             self._needs_reflush = False
-            self._get_loop().call_soon(asyncio.create_task, self._do_flush(do_flush))
+            # v1.3.4 fix (P2): 持有 Task 强引用防止 GC 回收
+            self._get_loop().call_soon(self._create_flush_task, do_flush)
 
     def _cancel_timer(self) -> None:
         if self._pending_timer is not None:

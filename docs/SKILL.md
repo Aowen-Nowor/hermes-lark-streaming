@@ -10,7 +10,7 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 1.3.3 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
+| 版本 | 1.3.4 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
 
 ---
 
@@ -351,4 +351,4 @@ hermes gateway restart
 
 ---
 
-*Last updated: 2026-06-25 | Version: 1.3.3*
+*Last updated: 2026-06-25 | Version: 1.3.4*

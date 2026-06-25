@@ -39,6 +39,23 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequestBody,
 )
 
+# v1.3.4 fix (P1): lark_oapi SDK 的 Transport.aexecute 不捕获网络异常，
+# httpx 的 ConnectError/ReadTimeout 等会裸传播；token 刷新失败抛
+# ObtainAccessTokenException（Exception 子类，非 FeishuAPIError）。
+# _retry_transient 的 except FeishuAPIError 无法捕获这些异常，导致
+# 网络瞬断时 cardkit_create 直接失败走 IM 降级（用户看到纯文本而非卡片）。
+# 导入这些异常类型用于 _retry_transient 的网络错误重试。
+try:
+    import httpx
+    _NETWORK_ERROR_BASES: tuple = (httpx.RequestError, httpx.TimeoutException)
+except ImportError:  # 极端情况下 httpx 不可用（lark_oapi 依赖它，不应发生）
+    _NETWORK_ERROR_BASES = ()
+try:
+    from lark_oapi.core.exception import ObtainAccessTokenException
+    _TOKEN_ERROR_BASES: tuple = (ObtainAccessTokenException,)
+except ImportError:
+    _TOKEN_ERROR_BASES = ()
+
 _logger = logging.getLogger("hermes_lark_streaming")
 
 
@@ -119,10 +136,18 @@ _RE_ELEMENT_NOT_FOUND = re.compile(r"not find elementID", re.IGNORECASE)
 # 注意：300313 (元素不存在) 不在此列 — 它需要"等待传播后重试"的特殊处理，
 # 而非指数退避重试，因此在 is_transient 判断中返回 False，
 # 由调用方（drain/seal 逻辑）决定重试策略。
+#
+# v1.3.4 fix (P1): 新增 99991400 (接口频率限制) — 飞书开放平台对单个 API
+# 设有频率限制（如 cardkit_batch_update 每秒 5 次），超限返回 99991400。
+# 这是典型的瞬态错误，指数退避重试后通常成功。原实现未包含此码，导致
+# 频控时直接失败传播到 controller，controller 仅 reset _first_flush_done
+# 而不重试，增加内容延迟。
+# 官方文档：https://open.feishu.cn/document/server-docs/api-call-guide/frequency-control
 CARDKIT_TRANSIENT_CODES = {
-    2200,   # CardKit 内部超时
-    1663,   # CardKit 服务端瞬态错误
-    300000, # CardKit 通用内部错误
+    2200,     # CardKit 内部超时
+    1663,     # CardKit 服务端瞬态错误
+    300000,   # CardKit 通用内部错误
+    99991400, # 接口频率限制（per-API rate limit，HTTP 400）
 }
 
 # 瞬态错误重试策略 — 指数退避
@@ -281,6 +306,35 @@ class FeishuClient:
                     _logger.info(
                         "transient retry: %s attempt=%d/%d code=%s delay=%.2fs",
                         operation, attempt + 1, max_retries, e.code, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            except asyncio.CancelledError:
+                # v1.3.4: 不要吞 CancelledError，让它正常传播
+                raise
+            except _NETWORK_ERROR_BASES as e:
+                # v1.3.4 fix (P1): 网络错误（httpx ConnectError/ReadTimeout 等）
+                # 是瞬态的，重试后通常成功。原实现只捕获 FeishuAPIError，
+                # 网络错误直接传播导致 cardkit_create 失败走 IM 降级。
+                if attempt < max_retries:
+                    delay = _TRANSIENT_RETRY_DELAYS[attempt]
+                    _logger.info(
+                        "transient retry (network): %s attempt=%d/%d error=%s delay=%.2fs",
+                        operation, attempt + 1, max_retries, type(e).__name__, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            except _TOKEN_ERROR_BASES as e:
+                # v1.3.4 fix (P1): token 刷新失败（ObtainAccessTokenException）
+                # 可能是网络瞬断导致 token 接口失败，重试通常成功。
+                # 如果是凭证错误（永久），所有重试都失败后异常传播。
+                if attempt < max_retries:
+                    delay = _TRANSIENT_RETRY_DELAYS[attempt]
+                    _logger.info(
+                        "transient retry (token): %s attempt=%d/%d error=%s delay=%.2fs",
+                        operation, attempt + 1, max_retries, type(e).__name__, delay,
                     )
                     await asyncio.sleep(delay)
                     continue

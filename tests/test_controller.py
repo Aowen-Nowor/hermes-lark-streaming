@@ -2008,7 +2008,8 @@ class TestIMFallbackHeader:
 
         await ctrl._do_linear_complete(session)
 
-        assert session.state == COMPLETED
+        # v1.3.4 fix: aborted session 保持 ABORTED 终态，不再被覆盖为 COMPLETED
+        assert session.state == ABORTED
         assert "card" in captured
         assert captured["card"]["header"]["template"] == "red"
 
@@ -2049,3 +2050,64 @@ class TestIMFallbackHeader:
         assert captured_seal_args.get("is_error") is True, \
             f"B1 副作用: 默认路径 agent 报错时 is_error 应为 True，实际: {captured_seal_args.get('is_error')}"
         assert captured_seal_args.get("error_message") == "rate limit"
+
+
+# ─── v1.3.4 Regression Tests ──────────────────────────────────────────
+
+def test_v134_concurrency_seal_no_duplicate_session() -> None:
+    """v1.3.4 P0 fix: on_message_started 不应在 on_interrupted 已创建 session 后再创建。
+
+    场景：用户在卡片流式中发送新消息 → concurrency seal 调 on_interrupted
+    → on_interrupted 创建新 session + fire _do_create_linear_card。
+    原 bug：on_message_started 继续创建第二个 session 并覆盖，导致：
+      1. 两张卡片被创建（on_interrupted 一张 + on_message_started 一张）
+      2. on_interrupted 的卡片成为孤儿（永远停在"正在加载上下文..."）
+
+    修复：on_message_started 检测到 session 已存在时复用，不重复创建。
+    """
+    ctrl = StreamCardController()
+    _enable(ctrl, linear=True)
+
+    # 模拟 concurrency seal：先创建一个 active session（旧消息）
+    with patch.object(ctrl, "_fire_and_forget", side_effect=lambda coro, loop: coro.close()):
+        ctrl.on_message_started(message_id="old_msg", chat_id="chat")
+        assert "old_msg" in ctrl._sessions
+
+        # 用户发送新消息 → 触发 concurrency seal
+        # on_interrupted 会被 on_message_started 的 concurrency seal 调用，
+        # 创建 new_msg 的 session
+        ctrl.on_message_started(message_id="new_msg", chat_id="chat")
+
+    # 关键断言：new_msg 只有一个 session（不应有重复创建）
+    assert "new_msg" in ctrl._sessions
+    session = ctrl._sessions["new_msg"]
+    # session 应该是有效的（有 chat_id 和 loop）
+    assert session.chat_id == "chat"
+    # 旧消息应被 abort
+    assert ctrl._sessions["old_msg"].state == ABORTED
+
+
+@pytest.mark.asyncio
+async def test_v134_aborted_session_keeps_aborted_state() -> None:
+    """v1.3.4 P1 fix: 被 abort 的 session 完成后应保持 ABORTED 状态，不被覆盖为 COMPLETED。"""
+    ctrl = _setup_ctrl(linear=True)
+    ctrl._release_session_data = lambda s: None
+    session = _make_session("msg_abort_state", linear=True)
+    ctrl._sessions["msg_abort_state"] = session
+
+    await ctrl._do_create_linear_card(session)
+
+    session.unified_state.answer_text = "partial answer"
+    session.unified_state.answer_dirty = False
+    session._was_aborted = True
+    session._creation_stages.add("answer")  # Phase 2 已成功
+
+    # 模拟 seal 成功
+    async def _ok_seal(*args, **kwargs):
+        return True
+    ctrl._preservative_seal = _ok_seal  # type: ignore[method-assign]
+
+    await ctrl._do_linear_complete(session)
+
+    # v1.3.4 fix: aborted session 应保持 ABORTED
+    assert session.state == ABORTED, f"Expected ABORTED, got {session.state}"

@@ -1,3 +1,49 @@
+## v1.3.4 (2026-06-25)
+
+全面代码审计修复 — 5 轮审计，10 个 P0/P1 问题 + 4 个 P2 问题
+
+### P0 (critical — breaks core functionality)
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | 用户在卡片流式中发送新消息时，concurrency seal 创建重复 session，导致孤儿占位卡片永久卡在"正在加载上下文..." | `on_message_started` 的 concurrency seal 循环调用 `on_interrupted(new_message_id=message_id)`，`on_interrupted` 发现 `new_message_id` 无 session 就创建一个并 fire `_do_create_linear_card`。回到 `on_message_started` 后又创建第二个 session 覆盖第一个，导致：两张卡片被创建，第一张成为孤儿永远停在 placeholder。 | `on_message_started` 在 concurrency seal 循环后检查 `self._sess_get(message_id)`，如果已存在（由 `on_interrupted` 创建）则复用，仅补记 metrics，不重复创建。 (`controller/core.py`) |
+| 🐛 Bug Fix (P0) | `/aowen` 命令 handler 异常时返回 `None`，命令落入 LLM 被当作用户 prompt 处理 | `handle_pre_gateway_dispatch` 的 `except Exception` 返回 `None` 而非 `_skip(...)`，导致 `/aowen foo` 进入 agent。日志级别 DEBUG 在生产不可见。 | 异常时 `return _skip(...)` 阻止 agent dispatch，日志升级到 `exception` 级别。 (`aowen/__init__.py`) |
+
+### P1 (high — degrades UX)
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P1) | Phase 2 `schema_error` / `element_not_found` 路径导致 ~15 次/秒无效 API 调用 + 掩盖 `_phase2_never_succeeded` 守卫 | `add_elements` 失败后 mark "answer" as created → Phase 3 在不存在的元素上 `partial_update` / `stream_element` 返回 300313 无限重试；且 `"answer" in _creation_stages` 使完成时 `_phase2_never_succeeded=False`，走 preservative seal（再失败 2 次）而非全量重建。 | 新增 `session._phase2_failed` 标志。schema_error / element_not_found 时设置标志 + 清空脏数据 + return，不再 mark as created。`_do_unified_flush` 顶部检查标志跳过 Phase 2/3。`_phase2_never_succeeded` 检查 `_phase2_failed`。完成时走全量重建写内容。 (`controller/linear_mixin.py`, `state/session.py`) |
+| 🐛 Bug Fix (P1) | v1.3.3 注释声称捕获 `asyncio.CancelledError` 但 `except Exception` 无法捕获（Python 3.8+ CancelledError 是 BaseException 子类） | flush 任务被取消时 `_first_flush_done` 不被重置，下次内容走节流而非立即 flush，增加"占位卡卡住"风险。 | 新增 `except asyncio.CancelledError` handler，重置 `_first_flush_done` 后 re-raise 传播取消语义。 (`controller/linear_mixin.py`) |
+| 🐛 Bug Fix (P1) | `_retry_transient` 只捕获 `FeishuAPIError`，httpx 网络错误（ConnectError/ReadTimeout）和 `ObtainAccessTokenException` 裸传播，导致 `cardkit_create` 失败走 IM 降级 | lark_oapi SDK 的 `Transport.aexecute` 不捕获网络异常，httpx 错误直接传播出 `_retry_transient` 的 `except FeishuAPIError`。 | 新增 `except httpx.RequestError/TimeoutException` 和 `except ObtainAccessTokenException` handler，瞬态网络错误指数退避重试。 (`feishu/client.py`) |
+| 🐛 Bug Fix (P1) | 飞书频控错误码 99991400 不在 `CARDKIT_TRANSIENT_CODES` 中，频控时直接失败传播 | 原_transient_codes 只含 {2200, 1663, 300000}。飞书对单个 API 设频率限制（如 batch_update 每秒 5 次），超限返回 99991400。controller 仅 reset `_first_flush_done` 而不重试，增加内容延迟。 | 将 99991400 加入 `CARDKIT_TRANSIENT_CODES`，client 层指数退避重试。官方文档：https://open.feishu.cn/document/server-docs/api-call-guide/frequency-control (`feishu/client.py`) |
+| 🐛 Bug Fix (P1) | `_wrap_handle_message_with_agent` / `_wrap_run_agent` / `_wrap_run_background_task` 的 `orig()` 调用无 try/finally，异常时 `_msg_ctx` / `_started_msg_ids` 泄漏 | cleanup 在函数末尾或 try/finally 块外，`orig()` 异常跳过 cleanup。`_msg_ctx` 保留 stale `event_message_id`，下一条消息的 `FeishuAdapter.send()` 被静默抑制（"卡片不出现" bug）。 | 三处 wrapper 均增加 try/except BaseException：异常时执行 cleanup 后 re-raise。`_wrap_handle_message_with_agent` 提取 `_hls_cleanup_ctx()` helper 统一清理。`_wrap_run_background_task` 将 COMPLETE hook + cleanup 移入 try/finally。 (`patching/gateway.py`) |
+| 🐛 Bug Fix (P1) | `inspect.signature()` 未防御，C 扩展/wrapped callable 抛 ValueError/TypeError 导致 `apply_patches` 崩溃、插件加载失败 | `inspect.signature(orig).parameters` 对某些 callable 会抛异常，无 try/except。 | 两处 `inspect.signature` 调用增加 `try/except (ValueError, TypeError)`，失败时 `_has_persist_ts = False`。 (`patching/gateway.py`, `patching/__init__.py`) |
+| 🐛 Bug Fix (P1) | 被 abort 的 session 完成后状态被覆盖为 COMPLETED（ABORTED→COMPLETED 非法转换） | `_do_linear_complete` 在 seal 成功后无条件设 `session.state = COMPLETED`，覆盖 `on_aborted` 设的 ABORTED。 | 检查 `session._was_aborted`：True 设 ABORTED，False 设 COMPLETED。 (`controller/linear_mixin.py`) |
+| 🐛 Bug Fix (P1) | 错误面板 `friendly_en` 是死代码，英文 locale 用户看到中文错误消息 | `body_content` 只用 `friendly_zh`，markdown 元素无 `i18n_content`。 | 构建 `body_content_en` + `body_content_zh`，markdown 元素添加 `i18n_content=_i18n(en, zh)`。 (`cardkit/elements.py`) |
+
+### P2 (medium — edge case / perf / feature)
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P2) | `bg_review_messages` 在 state 中累积但从未传给 `build_unified_complete_card`，后台审查功能静默失效 | `footer_data = session.footer` 不含 `bg_review_messages`（存在 `state.bg_review_messages` 中），`has_dirty()` 包含检查会触发 flush 但 flush 路径不渲染它。 | `_do_linear_complete` 构造 `footer_data` 时从 `state.bg_review_messages` 注入。 (`controller/linear_mixin.py`) |
+| 🐛 Bug Fix (P2) | `FlushController` 的 `call_soon(asyncio.create_task, ...)` 未持有 Task 强引用，可能被 GC 回收 | Python 文档："Save a reference to the result of this function"。`core.py:_fire_and_forget` 已修复此问题，但 `flush/controller.py` 未同步。 | 新增 `_pending_flush_tasks: set[Task]`，通过 `_create_flush_task` helper 创建 Task 并 add 到 set，`add_done_callback(discard)` 清理。 (`flush/controller.py`) |
+
+### 🧪 Test
+- 新增 `test_v134_concurrency_seal_no_duplicate_session` — 验证 concurrency seal 不创建重复 session
+- 新增 `test_v134_aborted_session_keeps_aborted_state` — 验证 aborted session 保持 ABORTED 状态
+- 新增 `test_v134_aowen_handler_exception_returns_skip_not_none` — 验证 /aowen 异常时返回 skip
+- 更新 `test_im_fallback_seal_aborted_with_header` — 适配 ABORTED 状态不再被覆盖为 COMPLETED
+
+### 审计验证
+- 5 轮并行审计覆盖全部模块（controller / cardkit / patching / feishu / state / aowen / config / flush / plugin / __main__）
+- 审计前：891 tests passed；审计后：894 tests passed（+3 回归测试）
+- CardKit v2.0 合规性验证：cardkit/ 模块零 `column_set`/`note`/`text_color(on div)` 使用
+- aowen/ 模块 `column_set` 使用已验证为合规（标准消息卡片 JSON 1.0，非 CardKit v2.0 流式卡片）
+- 飞书官方文档求证：batch_update add_elements type 参数（insert_before/insert_after/append）、99991400 频控码
+
+---
+
 ## v1.3.3 (2026-06-25)
 
 P0 紧急修复 — 占位卡片永久卡在"正在加载上下文..."问题（issue: placeholder_card_stuck）
