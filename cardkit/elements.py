@@ -807,6 +807,7 @@ def _build_error_panel(
         border_color = "orange"
         # Interrupt is already user-friendly (e.g. "⚡ 已停止")
         body_content = error_message
+        body_i18n = None  # 中断消息无需 i18n（error_message 来自上层，已是用户语言）
     else:
         en_label, zh_label = _T["error_panel"]
         border_color = "red"
@@ -827,8 +828,21 @@ def _build_error_panel(
             # 会显示成乱码）。外层 collapsible_panel 已提供折叠能力，
             # 技术详情用分隔线 + 标题区分即可。
             body_content = f"{friendly_zh}\n\n---\n**技术详情**\n```\n{tech_detail}\n```"
+            body_content_en = f"{friendly_en}\n\n---\n**Technical Details**\n```\n{tech_detail}\n```"
+            body_i18n = _i18n(body_content_en, body_content)
         else:
             body_content = friendly_zh
+            body_i18n = _i18n(friendly_en, friendly_zh)
+
+    # v1.3.4 fix (P1): markdown 元素添加 i18n_content，英文 locale 用户
+    # 看到英文错误消息而非中文（原实现 friendly_en 是死代码从未使用）。
+    markdown_el: dict[str, Any] = {
+        "tag": "markdown",
+        "content": body_content,
+        "text_size": "notation",
+    }
+    if body_i18n is not None:
+        markdown_el["i18n_content"] = body_i18n
 
     panel = _collapsible_panel(
         expanded=expanded,
@@ -839,11 +853,7 @@ def _build_error_panel(
             "text_color": "red" if not is_aborted else "orange",
             "text_size": "notation",
         },
-        elements=[{
-            "tag": "markdown",
-            "content": body_content,
-            "text_size": "notation",
-        }],
+        elements=[markdown_el],
         vertical_spacing="8px",
     )
     # Override border color to red/orange for visual emphasis
@@ -980,6 +990,24 @@ def build_preservative_seal_actions(
                 "elements": [_build_error_panel(
                     error_message, is_aborted=is_aborted, expanded=True,
                     card_trace_id=card_trace_id,
+                )],
+            },
+        })
+
+    # ── Background review panel (if any) ──
+    # v1.3.4 fix (P1): bg_review_messages 之前只在 build_unified_complete_card
+    # （全量重建路径）渲染，preservative seal 路径遗漏。默认配置（header_enabled=False）
+    # 走 preservative seal，导致 background review 功能完全失效。
+    bg_review_messages = footer_data.get("bg_review_messages") if footer_data else None
+    if bg_review_messages:
+        actions.append({
+            "action": "add_elements",
+            "params": {
+                "type": "insert_before",
+                "target_element_id": _LOADING_ELEMENT_ID,
+                "elements": [_build_background_review_panel(
+                    bg_review_messages,
+                    expanded=True,
                 )],
             },
         })

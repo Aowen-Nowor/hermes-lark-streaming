@@ -39,6 +39,23 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequestBody,
 )
 
+# v1.3.4 fix (P1): lark_oapi SDK 的 Transport.aexecute 不捕获网络异常，
+# httpx 的 ConnectError/ReadTimeout 等会裸传播；token 刷新失败抛
+# ObtainAccessTokenException（Exception 子类，非 FeishuAPIError）。
+# _retry_transient 的 except FeishuAPIError 无法捕获这些异常，导致
+# 网络瞬断时 cardkit_create 直接失败走 IM 降级（用户看到纯文本而非卡片）。
+# 导入这些异常类型用于 _retry_transient 的网络错误重试。
+try:
+    import httpx
+    _NETWORK_ERROR_BASES: tuple = (httpx.RequestError, httpx.TimeoutException)
+except ImportError:  # 极端情况下 httpx 不可用（lark_oapi 依赖它，不应发生）
+    _NETWORK_ERROR_BASES = ()
+try:
+    from lark_oapi.core.exception import ObtainAccessTokenException
+    _TOKEN_ERROR_BASES: tuple = (ObtainAccessTokenException,)
+except ImportError:
+    _TOKEN_ERROR_BASES = ()
+
 _logger = logging.getLogger("hermes_lark_streaming")
 
 
@@ -51,11 +68,23 @@ def _sanitize_message(msg: str) -> str:
 
 
 class FeishuAPIError(RuntimeError):
-    """飞书 API 错误，携带 API 错误码."""
+    """飞书 API 错误，携带 API 错误码和 log_id.
 
-    def __init__(self, message: str, code: int = 0) -> None:
+    log_id 可用于飞书开放平台后台排查具体请求链路。
+    获取方式：调用方从 SDK 响应的 ``resp.get_log_id()`` 提取。
+    """
+
+    def __init__(self, message: str, code: int = 0, log_id: str = "") -> None:
         super().__init__(message)
         self.code = code
+        # v1.3.4: 飞书 log_id，用于开放平台后台排查请求链路
+        self.log_id = log_id
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        if self.log_id:
+            return f"{base} [log_id={self.log_id}]"
+        return base
 
     def extract_sub_code(self) -> int | None:
         """从 msg 字符串中提取子错误码.
@@ -97,11 +126,21 @@ class FeishuAPIError(RuntimeError):
 CARDKIT_CONTENT_FAILED = 230099  # 卡片内容创建失败（通用码，需检查子错误）
 CARDKIT_ELEMENT_LIMIT = 11310  # 子码: 卡片元素数量超限
 CARDKIT_ELEMENT_LIMIT_DIRECT = 300305  # 直报码: 卡片元素数量超限（cardkit_update 返回此码）
-CARDKIT_SCHEMA_ERROR = 300315  # 卡片 Schema 非法属性 (unknown property)
+CARDKIT_SCHEMA_ERROR = 300315  # 卡片 Schema 非法属性 (unknown property) OR element not found for insert_before
 CARDKIT_STREAMING_CLOSED = 300309  # 卡片流式模式已关闭
 CARDKIT_SEQUENCE_CONFLICT = 300317  # sequence 冲突
 CARDKIT_ELEMENT_NOT_FOUND = 300313  # 元素不存在（add_elements 后服务端尚未持久化时的竞态）
+CARDKIT_ELEMENT_NOT_FOUND_ALT = 300314  # delete_elements 不存在的元素
 MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
+
+# v1.3.1 fix: 300315 错误码有两种含义：
+# 1. 真正的 Schema Error (unknown property) — msg 含 "unknown property" 或 "invalid"
+# 2. Element Not Found for insert_before — msg 含 "not find elementID"
+# 飞书 API 对 insert_before 引用不存在的元素返回 300315 而非 300313，
+# 导致 is_schema_error 误判，把 element not found 当 schema error 处理，
+# 清除脏数据放弃重试，内容丢失。
+# 修复：is_schema_error 增加文本检查，排除 "not find elementID" 的情况。
+_RE_ELEMENT_NOT_FOUND = re.compile(r"not find elementID", re.IGNORECASE)
 
 # ── CardKit 瞬态错误码 — 可自动重试 ──
 # 参考 Cheerwhy / openclaw-lark: 这三个错误码是飞书 CardKit 的瞬态错误，
@@ -109,10 +148,18 @@ MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
 # 注意：300313 (元素不存在) 不在此列 — 它需要"等待传播后重试"的特殊处理，
 # 而非指数退避重试，因此在 is_transient 判断中返回 False，
 # 由调用方（drain/seal 逻辑）决定重试策略。
+#
+# v1.3.4 fix (P1): 新增 99991400 (接口频率限制) — 飞书开放平台对单个 API
+# 设有频率限制（如 cardkit_batch_update 每秒 5 次），超限返回 99991400。
+# 这是典型的瞬态错误，指数退避重试后通常成功。原实现未包含此码，导致
+# 频控时直接失败传播到 controller，controller 仅 reset _first_flush_done
+# 而不重试，增加内容延迟。
+# 官方文档：https://open.feishu.cn/document/server-docs/api-call-guide/frequency-control
 CARDKIT_TRANSIENT_CODES = {
-    2200,   # CardKit 内部超时
-    1663,   # CardKit 服务端瞬态错误
-    300000, # CardKit 通用内部错误
+    2200,     # CardKit 内部超时
+    1663,     # CardKit 服务端瞬态错误
+    300000,   # CardKit 通用内部错误
+    99991400, # 接口频率限制（per-API rate limit，HTTP 400）
 }
 
 # 瞬态错误重试策略 — 指数退避
@@ -145,23 +192,42 @@ def is_schema_error(e: "FeishuAPIError") -> bool:
     飞书 API 返回 code=300315 表示卡片 JSON 包含不支持属性，
     例如在 ``plain_text`` 标签上放置 ``icon`` 属性。
     这类错误是永久性的——重试不会成功，需要修正卡片结构。
+
+    v1.3.1 fix: 300315 也用于 insert_before 引用不存在的元素
+    ("not find elementID")。这不是真正的 schema error——元素可能
+    在之前的操作中已被删除。用文本检查区分两种情况，避免把
+    element not found 误当 schema error 处理导致内容丢失。
     """
-    return e.code == CARDKIT_SCHEMA_ERROR
+    if e.code != CARDKIT_SCHEMA_ERROR:
+        return False
+    # 排除 "not find elementID" 的情况——这是 element not found，不是 schema error
+    if _RE_ELEMENT_NOT_FOUND.search(str(e)):
+        return False
+    return True
 
 
 def is_element_not_found_error(e: "FeishuAPIError") -> bool:
-    """判断 FeishuAPIError 是否为"元素不存在"错误（300313）。
+    """判断 FeishuAPIError 是否为"元素不存在"错误。
+
+    涵盖三种错误码：
+    - 300313: stream_element 引用不存在的元素（服务端传播延迟）
+    - 300314: delete_elements 删除不存在的元素
+    - 300315 + "not find elementID": insert_before 引用不存在的元素
+      （飞书用 300315 而非 300313 表示这种情况，v1.3.1 修复）
 
     生产日志（2026-06-17）发现：Phase 2 的 add_elements 成功后，
     如果 on_completed 在 ~1s 内触发 drain，cardkit_stream_element
     可能返回 300313 "not find elementID : answer_content"。
     这是飞书服务端元素持久化的传播延迟，等待 200ms 后重试通常成功。
-
-    此错误不应在 drain 阶段直接放弃并触发 full rebuild（会导致卡片闪烁），
-    而应短暂等待后重试；若重试仍失败，调用方应改用 batch_update
-    的 partial_update_element 写入 answer 文本（绕过 stream_element）。
     """
-    return e.code == CARDKIT_ELEMENT_NOT_FOUND
+    if e.code == CARDKIT_ELEMENT_NOT_FOUND:
+        return True
+    if e.code == CARDKIT_ELEMENT_NOT_FOUND_ALT:
+        return True
+    # 300315 + "not find elementID" = insert_before 引用不存在的元素
+    if e.code == CARDKIT_SCHEMA_ERROR and _RE_ELEMENT_NOT_FOUND.search(str(e)):
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -241,7 +307,7 @@ class FeishuClient:
                     from ..aowen import record_api_call
                     record_api_call(operation)
                 except Exception:
-                    pass
+                    _logger.debug("metrics: record_api_call failed", exc_info=True)
                 return result
             except FeishuAPIError as e:
                 last_error = e
@@ -256,23 +322,72 @@ class FeishuClient:
                     await asyncio.sleep(delay)
                     continue
                 raise
+            except asyncio.CancelledError:
+                # v1.3.4: 不要吞 CancelledError，让它正常传播
+                raise
+            except _NETWORK_ERROR_BASES as e:
+                # v1.3.4 fix (P1): 网络错误（httpx ConnectError/ReadTimeout 等）
+                # 是瞬态的，重试后通常成功。原实现只捕获 FeishuAPIError，
+                # 网络错误直接传播导致 cardkit_create 失败走 IM 降级。
+                if attempt < max_retries:
+                    delay = _TRANSIENT_RETRY_DELAYS[attempt]
+                    _logger.info(
+                        "transient retry (network): %s attempt=%d/%d error=%s delay=%.2fs",
+                        operation, attempt + 1, max_retries, type(e).__name__, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            except _TOKEN_ERROR_BASES as e:
+                # v1.3.4 fix (P1): token 刷新失败（ObtainAccessTokenException）
+                # 可能是网络瞬断导致 token 接口失败，重试通常成功。
+                # 如果是凭证错误（永久），所有重试都失败后异常传播。
+                if attempt < max_retries:
+                    delay = _TRANSIENT_RETRY_DELAYS[attempt]
+                    _logger.info(
+                        "transient retry (token): %s attempt=%d/%d error=%s delay=%.2fs",
+                        operation, attempt + 1, max_retries, type(e).__name__, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
         raise last_error  # unreachable, but type-safe
 
     @staticmethod
     def _check(response: Any, operation: str) -> None:
-        """检查 SDK 响应，失败时抛出 FeishuAPIError."""
+        """检查 SDK 响应，失败时抛出 FeishuAPIError（携带 log_id）."""
         if not response.success():
             code = response.code or 0
             msg = response.msg or ""
+            # v1.3.4: 提取飞书 log_id，用于开放平台后台排查请求链路。
+            # 注意：lark_oapi SDK async 路径（acreate 等）的 get_log_id()
+            # 返回 None（SDK bug），需从 response.error dict 兜底提取。
+            log_id = ""
+            try:
+                log_id = response.get_log_id() or ""
+            except Exception:
+                pass
+            if not log_id:
+                # SDK async 路径 bug 兜底：error 是 dict，含 log_id 字段
+                err = getattr(response, 'error', None)
+                if isinstance(err, dict):
+                    log_id = err.get("log_id", "") or ""
+                elif isinstance(err, str):
+                    # error 可能是 JSON 字符串或含 log_id 的文本
+                    import re as _re
+                    m = _re.search(r'log_id["\']?\s*[:=]\s*["\']?([A-Za-z0-9]{20,})', err)
+                    if m:
+                        log_id = m.group(1)
             # v1.1.0: Record API error metrics
             try:
                 from ..aowen import record_api_error
                 record_api_error(code, operation)
             except Exception:
-                pass
+                _logger.debug("metrics: record_api_error failed", exc_info=True)
             raise FeishuAPIError(
                 _sanitize_message(f"{operation}: code={code}, msg={msg}"),
                 code,
+                log_id=log_id,
             )
 
     @staticmethod
@@ -603,16 +718,23 @@ class FeishuClient:
         if data is None:
             return None
 
-        file = io.BytesIO(data)
-        request = (
-            CreateImageRequest.builder()
-            .request_body(CreateImageRequestBody.builder().image_type("message").image(file).build())
-            .build()
-        )
-        resp = await self._client.im.v1.image.acreate(request)
-        if resp.success() and resp.data and resp.data.image_key:
-            return str(resp.data.image_key)
-        return None
+        # v1.3.2 fix (P1-03): wrap the upload call in try/except to match
+        # upload_local_image's error handling. Without this, a network error
+        # or auth failure during upload would propagate uncaught.
+        try:
+            file = io.BytesIO(data)
+            request = (
+                CreateImageRequest.builder()
+                .request_body(CreateImageRequestBody.builder().image_type("message").image(file).build())
+                .build()
+            )
+            resp = await self._client.im.v1.image.acreate(request)
+            if resp.success() and resp.data and resp.data.image_key:
+                return str(resp.data.image_key)
+            return None
+        except Exception:
+            _logger.debug("image upload (API call) failed for %s", image_url, exc_info=True)
+            return None
 
     async def upload_local_image(self, image_path: str) -> str | None:
         """Upload a local image file to Feishu and return the img_key.

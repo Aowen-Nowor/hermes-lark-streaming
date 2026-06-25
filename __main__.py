@@ -318,6 +318,19 @@ def _cmd_doctor() -> int:
     print(f"      HERMES_HOME:        {hermes_home}")
     hermes_python = _find_hermes_python()
     print(f"      Hermes Python:      {hermes_python or '(not found)'}")
+    # v1.3.1 fix: warn when doctor's Python differs from Hermes Python
+    if hermes_python and hermes_python != sys.executable:
+        try:
+            # Resolve symlinks for accurate comparison
+            doctor_py = Path(sys.executable).resolve()
+            hermes_py = Path(hermes_python).resolve()
+            if doctor_py != hermes_py:
+                print(f"      ⚠ WARNING: Doctor is running with {sys.executable}")
+                print(f"        but Hermes Gateway uses {hermes_python}.")
+                print(f"        Dependency checks (lark_oapi etc.) may fail here.")
+                print(f"        Run doctor with: {hermes_python} __main__.py doctor")
+        except Exception:
+            pass  # Path resolution failed, non-critical
 
     # ── 3. Config ──
     print()
@@ -348,17 +361,38 @@ def _cmd_doctor() -> int:
     has_cfg_creds = bool(getattr(cfg, "feishu_app_id", None) and getattr(cfg, "feishu_app_secret", None))
     env_file = Path(hermes_home) / ".env"
     has_env_file = env_file.exists()
+    # v1.3.1 fix: also check .env file contents — Hermes loads .env into env vars
+    # at gateway startup via load_hermes_dotenv(), but doctor runs outside the
+    # gateway process so env vars aren't loaded. Reading the .env file directly
+    # gives an accurate credential status.
+    has_dotenv_creds = False
+    if has_env_file:
+        try:
+            dotenv_content = env_file.read_text(encoding="utf-8", errors="replace")
+            has_dotenv_creds = bool(
+                "FEISHU_APP_ID=" in dotenv_content and "FEISHU_APP_SECRET=" in dotenv_content
+            )
+        except Exception:
+            pass
     print(f"[4/6] Feishu credentials:")
-    print(f"      env vars:           {'configured' if has_env_creds else 'MISSING'}")
+    print(f"      env vars:           {'configured' if has_env_creds else 'not set'}")
     print(f"      config.yaml:        {'configured' if has_cfg_creds else 'not set'}")
-    print(f"      ~/.hermes/.env:     {'exists' if has_env_file else 'not found'}")
-    if not (has_env_creds or has_cfg_creds):
-        print("      ⚠ WARNING: No Feishu credentials found. Cards will NOT work.")
-        print("        Set FEISHU_APP_ID and FEISHU_APP_SECRET environment variables,")
-        print("        or add them to ~/.hermes/.env, or configure in config.yaml.")
+    print(f"      ~/.hermes/.env:     {'exists' if has_env_file else 'not found'}"
+          + (f" (FEISHU_APP_ID found)" if has_dotenv_creds else ""))
+    # Credentials are OK if ANY source has them
+    if has_env_creds or has_cfg_creds or has_dotenv_creds:
+        print(f"      → Status:           ✓ configured")
+    else:
+        print(f"      → Status:           ⚠ MISSING — cards will NOT work.")
+        print("        Set FEISHU_APP_ID and FEISHU_APP_SECRET in ~/.hermes/.env,")
+        print("        or as environment variables, or in config.yaml.")
 
     # ── 5. Patch status ──
     print()
+    # v1.3.1 fix: _patch_status is set in the gateway process memory.
+    # When doctor runs outside the gateway (with a different Python),
+    # importing patching triggers lark_oapi import which may fail.
+    # Use a lazy import that gracefully handles ModuleNotFoundError.
     try:
         from hermes_lark_streaming.patching import _patch_status
         if _patch_status:
@@ -374,6 +408,18 @@ def _cmd_doctor() -> int:
             print(f"[5/6] Patch status:      (not available — gateway not started or patches not applied)")
             print("      Run this command from within the Hermes gateway process,")
             print("      or check agent.log for 'HLS: patch summary' line.")
+    except ModuleNotFoundError as e:
+        if "lark_oapi" in str(e):
+            print(f"[5/6] Patch status:      (skipped — lark_oapi not installed in this Python)")
+            print(f"      Doctor is running with: {sys.executable}")
+            if hermes_python:
+                print(f"      Hermes Gateway uses:   {hermes_python}")
+                print(f"      Run doctor with Hermes Python for full diagnostics:")
+                print(f"        {hermes_python} ~/.hermes/plugins/hermes-lark-streaming/__main__.py doctor")
+            print(f"      Or check patch status from gateway logs:")
+            print(f"        grep 'HLS: patch summary' ~/.hermes/logs/agent.log")
+        else:
+            print(f"[5/6] Patch status:      FAILED — {e}")
     except Exception as e:
         print(f"[5/6] Patch status:      FAILED — {e}")
 

@@ -47,6 +47,9 @@ _logger = logging.getLogger("hermes_lark_streaming")
 
 _metrics_lock = threading.Lock()
 
+# v1.3.2 fix (B3-03): hold strong references to fire-and-forget tasks
+_aowen_pending_tasks: set = set()
+
 _metrics: dict[str, Any] = {
     "cards_created": 0,
     "cards_completed": 0,
@@ -823,8 +826,12 @@ def handle_pre_gateway_dispatch(event: Any, gateway: Any = None, **kwargs) -> di
             return _skip(f"/aowen {subcommand} unknown")
 
     except Exception:
-        _logger.debug("HLS: /aowen handler error", exc_info=True)
-        return None
+        # v1.3.4 fix (P0): /aowen 已识别但 handler 抛异常时，必须返回 skip
+        # 阻止消息进入 agent。否则 /aowen foo 会被 LLM 当作用户 prompt 处理，
+        # 用户体验混乱（命令没响应却收到 AI 回复）。
+        # 同时升级到 exception 级别日志（原来 DEBUG 在生产不可见）。
+        _logger.exception("HLS: /aowen handler error — suppressing agent dispatch")
+        return _skip("/aowen handler error suppressed")
 
 
 def _do_reset() -> None:
@@ -871,10 +878,14 @@ def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
         _logger.warning("HLS: /aowen %s but controller not enabled", cmd_name)
         return
 
+    # v1.3.2 fix (B3-02): use get_running_loop() instead of the deprecated
+    # get_event_loop(). In Python 3.14, get_event_loop() will raise
+    # RuntimeError when no loop is running, making the old code rely on
+    # the except clause — get_running_loop() is the correct, explicit API.
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        _logger.warning("HLS: /aowen %s but no event loop", cmd_name)
+        _logger.warning("HLS: /aowen %s but no running event loop", cmd_name)
         return
 
     if not loop.is_running():
@@ -893,7 +904,11 @@ def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
         except Exception:
             _logger.error("HLS: failed to send %s card", cmd_name, exc_info=True)
 
-    loop.create_task(_init_and_send())
+    # v1.3.2 fix (B3-03): hold strong reference to the task to prevent GC
+    # from collecting it mid-execution.
+    task = loop.create_task(_init_and_send())
+    _aowen_pending_tasks.add(task)
+    task.add_done_callback(_aowen_pending_tasks.discard)
 
 
 def _skip(reason: str) -> dict:

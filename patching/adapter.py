@@ -171,7 +171,19 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
         # to be sealed as "stopped". This prevents the card from being stuck
         # in loading/marquee state and also prevents the duplicate "⚡ 已停止"
         # gateway card from appearing alongside the streaming card.
-        _is_stop_response = any(kw in content for kw in ("已停止", "stopped", "Stopped"))
+        #
+        # v1.3.2 fix (B3-04): the previous detection used a bare substring
+        # match ("已停止" in content), which would false-trigger on any AI
+        # response containing those words (e.g. "服务已停止运行" in a normal
+        # answer). The /stop response is always a SHORT message starting
+        # with the ⚡ emoji — we now require both conditions to avoid
+        # false positives that abort active streaming cards.
+        _stripped = content.strip()
+        _is_stop_response = (
+            len(_stripped) < 50  # /stop response is always short
+            and _stripped.startswith("⚡")
+            and any(kw in _stripped for kw in ("已停止", "stopped", "Stopped"))
+        )
         if _is_stop_response:
             try:
                 from ..controller import get_controller
@@ -753,7 +765,8 @@ async def _schedule_confirm_card(*, cid: str) -> None:
     Args:
         cid: clarify_id to confirm
     """
-    import asyncio
+    # v1.3.2 fix (B3-05): removed redundant local `import asyncio` —
+    # asyncio is already imported at module level.
 
     # Small delay to ensure the CallBackCard (submitted state) is processed first
     await asyncio.sleep(1.0)

@@ -42,6 +42,7 @@ class CardSession:
         "_first_answer_time",
         "_first_flush_done",
         "_loop",
+        "_phase2_failed",
         "_pending_flush",
         "_streaming_closed",
         "_streaming_closed_logged",
@@ -131,6 +132,9 @@ class CardSession:
         self._was_aborted: bool = False
         self.error_message: str = ""
         self._first_flush_done: bool = False
+        # v1.3.4: Phase 2 永久失败标志（schema_error / element_not_found）
+        # 设置后跳过所有 Phase 2/3 flush，完成时走全量重建
+        self._phase2_failed: bool = False
         self._first_answer_time: float = 0.0
         self._pending_flush: bool = False
         self._streaming_closed: bool = False

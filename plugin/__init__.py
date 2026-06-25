@@ -250,7 +250,14 @@ def register(ctx: "PluginContext") -> None:
 
         ctrl = get_controller()
         if ctrl.enabled:
-            loop = asyncio.get_event_loop()
+            # v1.3.2 fix (P2-05): use get_running_loop() instead of the
+            # deprecated get_event_loop(). register() is called from the
+            # Hermes gateway which has a running event loop.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                _logger.debug("hermes-lark-streaming v%s: no running event loop, skipping pre-warm", __version__)
+                return
             if loop.is_running():
                 loop.create_task(ctrl._ensure_init())
                 _logger.info("hermes-lark-streaming v%s: FeishuClient pre-warm scheduled", __version__)

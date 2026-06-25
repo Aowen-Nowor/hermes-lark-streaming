@@ -1,3 +1,115 @@
+## v1.3.4 (2026-06-25)
+
+全面代码审计修复版 — 两轮深度审计（第一轮 5 模块并行 + 第二轮 3 路径深挖生产主流程），共修复 2 P0 + 10 P1 + 4 P2 问题，新增飞书 log_id 排查能力。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | 用户在卡片流式中发送新消息时，concurrency seal 创建重复 session，导致孤儿占位卡片永久卡在"正在加载上下文..." | `on_message_started` 的 concurrency seal 循环调用 `on_interrupted(new_message_id=message_id)`，`on_interrupted` 发现 `new_message_id` 无 session 就创建一个并 fire `_do_create_linear_card`。回到 `on_message_started` 后又创建第二个 session 覆盖第一个，导致：两张卡片被创建，第一张成为孤儿永远停在 placeholder | `on_message_started` 在 concurrency seal 循环后检查 `self._sess_get(message_id)`，如果已存在（由 `on_interrupted` 创建）则复用，仅补记 metrics，不重复创建 (`controller/core.py`) |
+| 🐛 Bug Fix (P0) | `/aowen` 命令 handler 异常时返回 `None`，命令落入 LLM 被当作用户 prompt 处理 | `handle_pre_gateway_dispatch` 的 `except Exception` 返回 `None` 而非 `_skip(...)`，导致 `/aowen foo` 进入 agent。日志级别 DEBUG 在生产不可见 | 异常时 `return _skip(...)` 阻止 agent dispatch，日志升级到 `exception` 级别 (`aowen/__init__.py`) |
+| 🐛 Bug Fix (P1) | Phase 2 `schema_error` / `element_not_found` 路径导致 ~15 次/秒无效 API 调用 + 掩盖 `_phase2_never_succeeded` 守卫 | `add_elements` 失败后 mark "answer" as created → Phase 3 在不存在的元素上 `partial_update` / `stream_element` 返回 300313 无限重试；且 `"answer" in _creation_stages` 使完成时 `_phase2_never_succeeded=False`，走 preservative seal（再失败 2 次）而非全量重建 | 新增 `session._phase2_failed` 标志。schema_error / element_not_found 时设置标志 + 清空脏数据 + return，不再 mark as created。`_do_unified_flush` 顶部检查标志跳过 Phase 2/3。`_phase2_never_succeeded` 检查 `_phase2_failed`。完成时走全量重建写内容 (`controller/linear_mixin.py`, `state/session.py`) |
+| 🐛 Bug Fix (P1) | v1.3.3 注释声称捕获 `asyncio.CancelledError` 但 `except Exception` 无法捕获（Python 3.8+ CancelledError 是 BaseException 子类） | flush 任务被取消时 `_first_flush_done` 不被重置，下次内容走节流而非立即 flush，增加"占位卡卡住"风险 | 新增 `except asyncio.CancelledError` handler，重置 `_first_flush_done` 后 re-raise 传播取消语义 (`controller/linear_mixin.py`) |
+| 🐛 Bug Fix (P1) | `_retry_transient` 只捕获 `FeishuAPIError`，httpx 网络错误（ConnectError/ReadTimeout）和 `ObtainAccessTokenException` 裸传播，导致 `cardkit_create` 失败走 IM 降级 | lark_oapi SDK 的 `Transport.aexecute` 不捕获网络异常，httpx 错误直接传播出 `_retry_transient` 的 `except FeishuAPIError` | 新增 `except httpx.RequestError/TimeoutException` 和 `except ObtainAccessTokenException` handler，瞬态网络错误指数退避重试 (`feishu/client.py`) |
+| 🐛 Bug Fix (P1) | 飞书频控错误码 99991400 不在 `CARDKIT_TRANSIENT_CODES` 中，频控时直接失败传播 | 原 transient_codes 只含 {2200, 1663, 300000}。飞书对单个 API 设频率限制（如 batch_update 每秒 5 次），超限返回 99991400。controller 仅 reset `_first_flush_done` 而不重试，增加内容延迟 | 将 99991400 加入 `CARDKIT_TRANSIENT_CODES`，client 层指数退避重试。官方文档：https://open.feishu.cn/document/server-docs/api-call-guide/frequency-control (`feishu/client.py`) |
+| 🐛 Bug Fix (P1) | `_wrap_handle_message_with_agent` / `_wrap_run_agent` / `_wrap_run_background_task` 的 `orig()` 调用无 try/finally，异常时 `_msg_ctx` / `_started_msg_ids` 泄漏 | cleanup 在函数末尾或 try/finally 块外，`orig()` 异常跳过 cleanup。`_msg_ctx` 保留 stale `event_message_id`，下一条消息的 `FeishuAdapter.send()` 被静默抑制（"卡片不出现" bug） | 三处 wrapper 均增加 try/except BaseException：异常时执行 cleanup 后 re-raise。`_wrap_handle_message_with_agent` 提取 `_hls_cleanup_ctx()` helper 统一清理。`_wrap_run_background_task` 将 COMPLETE hook + cleanup 移入 try/finally (`patching/gateway.py`) |
+| 🐛 Bug Fix (P1) | `inspect.signature()` 未防御，C 扩展/wrapped callable 抛 ValueError/TypeError 导致 `apply_patches` 崩溃、插件加载失败 | `inspect.signature(orig).parameters` 对某些 callable 会抛异常，无 try/except | 两处 `inspect.signature` 调用增加 `try/except (ValueError, TypeError)`，失败时 `_has_persist_ts = False` (`patching/gateway.py`, `patching/__init__.py`) |
+| 🐛 Bug Fix (P1) | 被 abort 的 session 完成后状态被覆盖为 COMPLETED（ABORTED→COMPLETED 非法转换） | `_do_linear_complete` 在 seal 成功后无条件设 `session.state = COMPLETED`，覆盖 `on_aborted` 设的 ABORTED | 检查 `session._was_aborted`：True 设 ABORTED，False 设 COMPLETED (`controller/linear_mixin.py`) |
+| 🐛 Bug Fix (P1) | 错误面板 `friendly_en` 是死代码，英文 locale 用户看到中文错误消息 | `body_content` 只用 `friendly_zh`，markdown 元素无 `i18n_content` | 构建 `body_content_en` + `body_content_zh`，markdown 元素添加 `i18n_content=_i18n(en, zh)` (`cardkit/elements.py`) |
+| 🐛 Bug Fix (P1) | `bg_review_messages` 在 preservative seal 路径不渲染，默认配置下后台审查功能完全失效 | v1.3.4 第一轮只修了 `build_unified_complete_card`（全量重建路径），遗漏 `build_preservative_seal_actions`（默认 seal 路径）。`_build_background_review_panel` 只在全量重建调用 | `build_preservative_seal_actions` 在 error panel 之后、footer 之前插入 bg_review panel（与全量重建路径一致）(`cardkit/elements.py`) |
+| 🐛 Bug Fix (P1) | `_preservative_seal` retry 路径 300309 `raise` 与主路径 `return False` 语义不一致 | retry 循环内 `except FeishuAPIError` 对 300309 执行 `raise`（依赖外层 `except Exception` 兜底），主路径对 300309 直接 `return False` 走全量重建 | retry 路径 300309 改为 `return False`，与主路径一致，显式走全量重建 (`controller/linear_mixin.py`) |
+| 🐛 Bug Fix (P1) | `UnavailableGuard` 在生产环境是死代码——消息被删/撤回时 guard 从未被触发，插件继续对已删除卡片发 API 调用浪费配额 | `mark_unavailable` 只在 `guard.terminate()` 内部调用，而 `terminate` 只在 `should_skip` 发现 `is_unavailable` 为 True 时才调用，形成循环依赖：要 terminate 必须 is_unavailable，要 is_unavailable 必须 mark_unavailable。没有任何 API 错误处理路径调用 `terminate` | `_do_create_linear_card` 的 `except Exception` 兜底中，如果异常是 `FeishuAPIError` 且 `is_terminal_api_code(e.code)` 为 True（消息被删 231003/1000023、撤回 230011），调用 `session.guard.terminate(source, err=e)` 激活 guard，后续 `should_skip` 返回 True 跳过无用 API 调用 (`controller/linear_mixin.py`) |
+| 🐛 Bug Fix (P2) | `bg_review_messages` 在 state 中累积但从未传给 `build_unified_complete_card`，后台审查功能静默失效 | `footer_data = session.footer` 不含 `bg_review_messages`（存在 `state.bg_review_messages` 中），`has_dirty()` 包含检查会触发 flush 但 flush 路径不渲染它 | `_do_linear_complete` 构造 `footer_data` 时从 `state.bg_review_messages` 注入 (`controller/linear_mixin.py`) |
+| 🐛 Bug Fix (P2) | `FlushController` 的 `call_soon(asyncio.create_task, ...)` 未持有 Task 强引用，可能被 GC 回收 | Python 文档："Save a reference to the result of this function"。`core.py:_fire_and_forget` 已修复此问题，但 `flush/controller.py` 未同步 | 新增 `_pending_flush_tasks: set[Task]`，通过 `_create_flush_task` helper 创建 Task 并 add 到 set，`add_done_callback(discard)` 清理 (`flush/controller.py`) |
+| 🐛 Bug Fix (P2) | `linear_mixin.py` 两处首字即显 `create_task` 未持有 Task 强引用，可能被 GC 回收 | `controller/linear_mixin.py:274` 和 `:352` 直接 `loop.create_task(...)` 未保存引用，与 `core.py:_fire_and_forget` 模式不一致 | 改用 `self._fire_and_forget(coro, loop)` 持有强引用 (`controller/linear_mixin.py`) |
+| 🔧 Fix (P2) | `_do_create_linear_card` 的 `except FeishuAPIError` 未捕获异常对象，log_id 丢失 | `except FeishuAPIError:` 没有 `as e`，日志只输出固定文本不输出异常详情和 log_id | 改为 `except FeishuAPIError as e:` 并在日志中输出 `%s` 异常对象（自动带 log_id）(`controller/linear_mixin.py`) |
+| ✨ Feature | 飞书 log_id 排查能力——所有 `FeishuAPIError` 携带 `[log_id=...]`，可在飞书开放平台后台查请求链路 | 插件日志只输出错误码和消息，无法定位飞书服务端的具体请求链路 | `FeishuAPIError` 新增 `log_id` 字段 + `__str__` 自动附加。`_check` 从 SDK 响应提取 log_id（含 async 路径 SDK bug 兜底：`get_log_id()` 返回 None 时从 `response.error` dict 提取）。Issue 模板新增 log_id 排查章节 (`feishu/client.py`, `docs/ISSUES_TEMPLATE.md`) |
+| 🧪 Test | 新增 3 个回归测试 | 覆盖 v1.3.4 关键修复 | `test_v134_concurrency_seal_no_duplicate_session`（concurrency seal 不重复创建）、`test_v134_aborted_session_keeps_aborted_state`（ABORTED 状态保持）、`test_v134_aowen_handler_exception_returns_skip_not_none`（/aowen 异常返回 skip） |
+| 🧪 Test | 更新 `test_im_fallback_seal_aborted_with_header` | v1.3.4 的 ABORTED 状态保持修复影响该测试 | 断言从 `COMPLETED` 改为 `ABORTED` |
+| 📝 Docs | `docs/ISSUES_TEMPLATE.md` 新增 Feishu log_id 排查章节 | 用户报 Bug 时无法提供飞书请求链路 ID，维护者难以定位是插件问题还是飞书服务端问题 | 新增章节说明 log_id 含义、日志提取命令、Issue 提交建议 (`docs/ISSUES_TEMPLATE.md`) |
+
+**审计方法**: 两轮深度审计。第一轮 5 模块并行（controller/cardkit/patching/feishu/state+aowen），覆盖全部 ~13.7k 行代码。第二轮聚焦生产主流程 3 路径深挖（agent 卡片生命周期 / patching 层与 hermes 交互 / 网关卡片+cron+异常路径）。所有发现均有 file:line 证据 + 代码片段，每个修复前重新读代码确认。飞书相关结论经真飞书 E2E 验证（log_id 提取、column_set 可用性）。审计前 891 tests passed，审计后 894 tests passed（+3 回归测试，0 回归）。
+
+**已知限制（本次未修复，评估为低优先级或需更大范围改动）**:
+- `_preservative_seal` retry 路径（300317 触发）未应用 195 元素安全网和内容守卫——retry 失败会走全量重建（已应用安全网），风险较低
+- `_wrap_run_agent` 的 COMPLETE hook 段未纳入 try/except BaseException 覆盖——COMPLETE hook 内部已 `except Exception`，仅 BaseException（CancelledError/KeyboardInterrupt）泄漏，hermes 崩溃场景下非首要问题
+- patching 层并发 background task / cron deliver 的 `adapter.send` per-call 替换竞态——需重构为 per-task context flag，影响范围大
+- `_wrap_handle_message_with_agent` 入口 `event.message_id` / `self._reply_anchor_for_event` 无 try/except——hermes Event schema 变化才会触发，需 hermes 多版本兼容性测试
+
+---
+
+## v1.3.3 (2026-06-25)
+
+P0 紧急修复 — 占位卡片永久卡在"正在加载上下文..."问题（issue: placeholder_card_stuck）
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | 占位卡片永久卡在"正在加载上下文..."，永远看不见回答内容 | Phase 2 的 `cardkit_batch_update(add_elements + delete_loading_hint)` 调用失败后，`_creation_stages` 永远不写入 `"answer"`/`"panel"`/`"hint_removed"`。而所有后续写入路径（drain 循环、seal 内容守卫、seal Step 1/2）都通过 `"xxx" in session._creation_stages` 判断元素是否存在——判断为 False 则跳过写入。seal 最终"成功"关闭了流式模式但未写入任何内容，全量重建 fallback 永远不被触发。这是**标志位死锁**：没有元素存在标志 → 不写入内容 → 没有元素存在标志。 | **检测 Phase 2 失败并强制全量重建**：`_do_linear_complete` 在调用 `_preservative_seal` 前检查 `"answer" not in _creation_stages and (answer_text or panel_visible or reasoning_rounds)`，如果为 True 说明 Phase 2 从未成功，跳过 preservative seal（会静默"成功"不写内容），直接走全量重建 fallback（`build_unified_complete_card` + `cardkit_update`），用完整内容替换整张占位卡片。 |
+| 🐛 Bug Fix (P0) | Phase 2 网络异常/超时未捕获，`_creation_stages` 为空且 `_first_flush_done` 已设 True | Phase 2 的 `cardkit_batch_update` 只捕获 `FeishuAPIError`，`asyncio.TimeoutError`/`aiohttp.ClientError` 等网络异常未被捕获，传播到 `FlushController._do_flush` 的 `except Exception` 被静默吞掉。`_creation_stages` 为空 + `_first_flush_done=True`（设值过早）→ 后续内容到达时走节流 flush 而非立即 flush，增加延迟。 | 1) Phase 2 增加外层 `except Exception` 捕获非 `FeishuAPIError` 异常，记录 warning 日志并重置 `_first_flush_done=False` 让下次内容到达时走立即 flush 重试。2) FeishuAPIError 的 transient 分支（非 schema/非 element_not_found）也重置 `_first_flush_done=False`。 |
+| 🧪 Test | 新增回归测试 `test_phase2_failure_forces_full_rebuild_not_stuck` | 验证 Phase 2 失败后 `_do_linear_complete` 走全量重建而非 preservative seal，且 `cardkit_update` 收到的完整卡片包含 answer 文本 | 模拟 Phase 2 从未成功的场景（`_creation_stages` 为空 + `answer_text` 有内容），断言 `_preservative_seal` 不被调用、`cardkit_update` 被调用且卡片内容包含回答文本。 |
+| 🧪 Test | 3 个 header 相关测试更新 `_creation_stages` 设置 | v1.3.3 的 Phase 2 失败检测会影响未设置 `_creation_stages` 的测试 | `test_header_disabled_uses_preservative_seal`、`test_header_enabled_skips_preservative_seal`、`test_header_rebuild_does_not_pollute_full_rebuilds_metric`、`test_real_failure_rebuild_counts_full_rebuilds` 增加 `session._creation_stages.add("answer")` 模拟 Phase 2 已成功。 |
+
+**根因分析**（issue: placeholder_card_stuck）:
+```
+占位卡创建成功 → _creation_stages = {}（空）
+      ↓
+LLM 首字到达 → Phase 2（_do_unified_flush）
+      ↓  执行 cardkit_batch_update(add_elements + delete_loading_hint)
+      ↓
+  ❌ API 失败（网络超时/频控/auth刷新/非瞬态错误）
+      ↓
+  _creation_stages 无变化 → 无 "answer", "panel", "hint_removed"
+      ↓
+on_completed → _do_linear_complete
+      ↓
+  Step 2 Drain 循环：检查 "answer" in _creation_stages → False → 跳过
+  Step 5 _preservative_seal：
+    → 内容守卫检查 "panel"/"answer" in _creation_stages → False → 全部跳过
+    → Step 1 更新面板：检查 "panel" → False → 跳过
+    → Step 2 更新回答：检查 "answer" → False → 跳过
+    → Step 5 batch_update（只有 footer + delete）→ 成功
+    → Step 6 close_streaming → 成功
+    → 返回 True（"成功"）
+      ↓
+seal_ok = True → 全量重建 fallback 不触发
+      ↓
+卡片永久停留在：只有加载提示 + 加载图标
+```
+
+---
+
+## v1.3.2 (2026-06-25)
+
+全面代码审计修复版 — 3-5 轮审计共发现 35 个问题（0 P0, 5 P1, 15 P2, 15 P3），本次修复全部 P1/P2 和主要 P3 问题。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🔧 Fix (P1) | 配置文件读取未捕获 OSError/UnicodeDecodeError | `config/reader.py` 的 `_load()` 和 `_reload_cached()` 只捕获 `yaml.YAMLError`，权限不足/磁盘错误/编码问题会导致未捕获异常 | 两处文件读取增加 `except (OSError, UnicodeDecodeError)` 分支，返回空配置并 warning 日志 |
+| 🔧 Fix (P1) | `_to_float` 允许 nan/inf 值通过 | `float('nan')`/`float('inf')` 是合法 Python float，不触发 ValueError。下游 `max()`/`min()` 比较因 NaN 传播失效，节流逻辑永远不触发或永远立即触发 | `_to_float` 增加 `math.isnan()`/`math.isinf()` 检查，nan/inf 值返回 default 并 warning |
+| 🔧 Fix (P1) | `_to_int` 的 float 路径未捕获 OverflowError/ValueError | `int(float('inf'))` 抛 OverflowError，`int(float('nan'))` 抛 ValueError，均未捕获 | `_to_int` 的 float 分支增加 try/except (OverflowError, ValueError) |
+| 🔧 Fix (P1) | `__init__.py` 模块 docstring 与代码矛盾 | docstring 声称"默认 flush 间隔 100ms"和"主动 TTL 延长"，二者分别已在 v1.3.1 恢复为 200ms 和删除 | 更新 docstring：100ms→200ms，"Proactive TTL extension"→"300309 stream-closed fallback" |
+| 🔧 Fix (P1) | `docs/SKILL.md` 引用已删除的 `on_reload()` 回调 | v1.3.0 删除了 `on_reload()` 回调（死代码），但 SKILL.md 4.13 节仍写"`on_reload` 回调注册" | 移除"`on_reload` 回调注册"描述 |
+| 🐛 Bug Fix (P2) | `_wait_and_abort` 异步路径绕过 COMPLETING 短路 | `on_interrupted` 的同步路径检查 `state == COMPLETING` 跳过 abort，但异步 `_wait_and_abort` 在 await 后直接设 `state = ABORTED` 未重新检查，竞态导致完成流程被中断 | `_wait_and_abort` 在 await 后增加 COMPLETING 重新检查，与同步路径一致 |
+| 🐛 Bug Fix (P2) | `/stop` 响应检测使用脆弱子串匹配 | `any(kw in content for kw in ("已停止", "stopped", "Stopped"))` 会误匹配 AI 回答中的"已停止"等词，错误 abort 活跃卡片 | 改为三重条件：内容 <50 字符 + 以 ⚡ 开头 + 包含关键词，避免误触发 |
+| 🐛 Bug Fix (P2) | `_fire_and_forget` 未持有 Task 引用 + 协程泄漏 | `loop.create_task(coro)` 返回的 Task 未保存强引用，GC 可能在完成前回收。fallback 失败时协程未 close，产生 "coroutine was never awaited" 警告 | 新增 `_pending_tasks` 集合持有强引用，task 完成后自动移除。fallback 失败时 `coro.close()` |
+| 🐛 Bug Fix (P2) | `aowen/__init__.py` 使用废弃 `asyncio.get_event_loop()` | Python 3.14 将移除 `get_event_loop()` 的隐式创建行为，届时会抛 RuntimeError | 改为 `asyncio.get_running_loop()`，显式获取运行中的事件循环 |
+| 🐛 Bug Fix (P2) | `aowen` 命令 `loop.create_task` 未持有 Task 引用 | 与 `_fire_and_forget` 相同的 GC 回收风险 | 新增 `_aowen_pending_tasks` 集合持有强引用 |
+| 🔧 Fix (P2) | 多处 `asyncio.get_event_loop()` 废弃 API | `plugin/__init__.py:253`、`controller/linear_mixin.py:271` 使用废弃 API | 改为 `asyncio.get_running_loop()`（在 async 上下文中安全） |
+| 🔧 Fix (P2) | `docs/SKILL.md` 引用已删除的 TTL 延长功能 | v1.3.1 删除了 `cardkit_extend_ttl`，但 SKILL.md 仍写"TTL 延长" | 更新为"300309 fallback"描述 |
+| 🔧 Fix (P2) | `docs/AGENT_GUIDE.md` 手动更新指令用错分支名 | 写 `git pull origin master`，但主仓库使用 `DEV` 分支 | 改为 `git pull origin DEV` |
+| 🔧 Fix (P3) | `_stream_consumed_len` 字典无清理，持续增长 | interrupt-reuse 场景下每个新 eid 追加到字典永不清理，长时间运行内存泄漏 | thinking_wrapper 检测到消息完成时调用 `_cleanup_consumed_len(_eid)` 清理 |
+| 🔧 Fix (P3) | aowen 指标记录 `except Exception: pass` 静默吞异常 | 7 处指标记录调用完全静默，指标系统故障不可见 | 改为 `except Exception: _logger.debug(...)` 记录异常 |
+| 🔧 Fix (P3) | `_INTERRUPT_MAP_MAX` 定义在函数体内 | 每次调用 `on_interrupted` 都重新创建局部变量 | 提升为模块级常量 |
+| 🔧 Fix (P3) | `upload_image` API 调用缺少 try/except | 与 `upload_local_image` 不一致，网络/认证错误会传播未捕获 | 增加 try/except 包裹上传调用，返回 None 并 debug 日志 |
+| 🔧 Fix (P3) | `_schedule_confirm_card` 冗余 `import asyncio` | asyncio 已在模块级导入，函数内重复导入 | 移除冗余 import |
+| 🔧 Fix (P3) | `_hls_bg_sending`/`_hls_cron_sending` 默认值不对称 | 递增时 default=0，递减时 default=1，语义不一致 | 统一为 default=0 |
+| 📝 Docs | `docs/CHANGELOG.md` 附录 F3 引用已废弃 TTL 延长 | F3 "主动 TTL 延长" 作为经验教训，但功能已删除 | 标注删除线 + v1.3.1 移除说明 |
+| 📝 Docs | `docs/CHANGELOG.md` F1 默认刷新间隔仍写 100ms | v1.3.1 已恢复 200ms | 更新为 200ms |
+| 📝 Docs | `docs/ISSUES_TEMPLATE.md` 引用已废弃 TTL 主动延长 | Debug Tips 表格写"卡片 TTL + 主动延长" | 更新为"300309 fallback" |
+| 📝 Docs | `docs/ISSUES_TEMPLATE.md` 未引导用户使用 /aowen 自查 | 用户提交 issue 前无自助排查手段 | 新增"/aowen 命令自查"章节，引导用户先发 /aowen status/monitor |
+
+**审计方法**: 3-5 轮全面审计，涵盖代码健壮性、性能、Bug、用户体验、文档对齐五个维度。所有发现均有文件:行号证据，不基于经验猜测。飞书 CardKit v2.0 相关优化已对照官方文档验证。
+
+---
+
 ## v1.3.1 (2026-06-24)
 
 | 类型 | 问题/功能 | 原因 | 修复/说明 |
@@ -13,6 +125,7 @@
 | 🔧 Fix | 数值配置项非数字字符串导致崩溃 | `print_step`/`max_tool_steps`/`max_reasoning_rounds`/`flush_interval_ms`/`card_ttl_sec` 用 `int()`/`float()` 直接转换，用户写 `print_step: abc` 时抛未捕获 `ValueError`。 | **新增 `_to_int` / `_to_float` helper**：类似 `_to_bool` 的类型容错，非数字输入返回默认值 + WARNING 日志。5 个数值配置项全部接入。 |
 | 🔧 Fix | `_gateway_cards` 字典内存泄漏 | `_register_gateway_card` 生产代码调用 2 次，`_unregister_gateway_card` 从未在生产代码调用。字典只增不删，无 TTL，无容量限制。 | **容量限制**：`_register_gateway_card` 内添加 500 条上限，超限时按 `registered_at` 清理最旧 20%。新增 `registered_at` 时间戳字段。 |
 | 🔧 Fix | `_send_text_fallback` 在数据释放后执行 | `_do_linear_complete` 失败时先执行 `_release_session_data`（清空 `session.text`），然后返回 False，接着 `_send_text_fallback` 读取 `session.text.display_text` 已为空。 | **提前快照**：`_do_linear_complete_with_fallback` 在调用 `_do_linear_complete` 前保存 `answer_text`/`error_message` 快照，通过 `fallback_text` 参数传给 `_send_text_fallback`。 |
+| 🐛 Bug Fix | `header=true` 全量重建路径遗漏 `escape_markdown_asterisks` | `build_unified_complete_card`（header=true 时使用）未调用 `escape_markdown_asterisks`，而 `_preservative_seal`（header=false）调用了。`header=true` 时 AI 回复中的乘号 `*`（如 `2*4000+4*3000`）不被转义，飞书 markdown 把 `*4000+4*` 配对为斜体，乘号消失、数字拼合。 | **添加 escape**：`build_unified_complete_card` 的 answer 处理增加 `escape_markdown_asterisks`，与 `_preservative_seal` 路径一致。真飞书 API 实测验证：close_streaming 后 cardkit_update 全量替换可行（code=0）。 |
 
 ---
 
@@ -139,7 +252,7 @@
 | 🐛 Bug Fix (P0-3) | 部分配置属性 mtime 热更新失效 | `_check_mtime_and_invalidate()` 只在 `enabled` 属性中调用，其他属性（`linear`/`flush_interval_ms`/`max_tool_steps` 等）走 `_plugin_sec()` 不检测 mtime，改完配置文件后这些属性最多延迟 60s（TTL）才生效 | 将 mtime 检测从 `enabled` 属性移到 `_plugin_sec()`，所有走该方法的属性都检测文件变化 |
 
 > **勘误（v1.2.0 补）**：上述 mtime 自动检测机制已在 **v1.1.0 内部**（提交 `0d468cd`，2026-06-18）被**有意移除**——删除了 `_check_mtime_and_invalidate()` 方法和 `_config_mtime` 字段，`_plugin_sec()` 不再调 `stat()`。原因：流式输出期间高频读配置，每次 stat 系统调用开销不可接受。配置刷新方式改为：`/aowen config reload` 立即生效，或重启网关。仅 `inject_time`/`show_reasoning`/`gateway_cards` 三个属性走 60s TTL 缓存（`_reload_cached()`）。**此为有意设计，非 bug**，v1.2.0 不补回 mtime 检测。
-| ✨ Feature (P0-3) | `/aowen config reload` 命令 | 改完 config.yaml 后必须等最多 60 秒 mtime 检测才生效，调试不便 | `aowen/__init__.py` 新增 `/aowen config reload` 命令，立即清缓存并触发 `on_reload` 回调，配置秒级生效 |
+| ✨ Feature (P0-3) | `/aowen config reload` 命令 | 改完 config.yaml 后必须等最多 60 秒 mtime 检测才生效，调试不便 | `aowen/__init__.py` 新增 `/aowen config reload` 命令，立即清缓存，配置秒级生效。（注：v1.3.0 移除了 `on_reload` 回调——该回调从未被任何模块调用，属死代码） |
 | 🐛 Bug Fix (P0-4) | pyproject.toml packages 列表遗漏 5 个子包 | `[tool.setuptools.packages.find].include` 只列了 controller/cardkit/patching/state，缺 feishu/config/monitor/plugin/flush，pip install 时这 5 个子包不会被打包，运行时 ImportError | packages 列表补全 9 个子包（含 `feishu*`/`config*`/`aowen*`/`plugin*`/`flush*`） |
 | 🐛 Bug Fix (P0-5) | `unregister()` 未清理活跃会话 | `plugin/__init__.py` `unregister()` 只清理 config，未清空 `ctrl._sessions`，卸载/重装后旧会话残留导致内存泄漏与潜在竞态 | `unregister()` 新增 `ctrl._sessions.clear()` 清空活跃会话 |
 | 🏗️ Architecture (P0-6) | 删除 `cardkit/theme.py` | v1.1.0 引入的主题系统实际未被任何业务代码引用，颜色/图标仍硬编码在 `elements.py` 中，主题配置项无效 | 删除 `cardkit/theme.py` + `cardkit/__init__.py` 中的 `from .theme import *`；README/AGENT_GUIDE/SKILL 同步移除 `theme.*` 配置项说明 |
@@ -285,9 +398,9 @@
 
 | # | 陷阱 | 教训 |
 |---|------|------|
-| F1 | 性能参数应可配置 | 性能敏感参数不应硬编码。默认 100ms 刷新间隔（可配置 70~2000ms，最低 70ms 对齐飞书官方 `print_frequency_ms`） |
+| F1 | 性能参数应可配置 | 性能敏感参数不应硬编码。默认 200ms 刷新间隔（v1.3.1 恢复，可配置 70~2000ms，最低 70ms 对齐飞书官方 `print_frequency_ms`） |
 | F2 | 流式参数不低于官方推荐值 | `print_frequency_ms` 官方默认 70ms，`print_step` 官方默认 1，不可低于此值 |
-| F3 | 主动 TTL 延长 | 卡片生存时间接近 540s 时自动延长 600s，防止 300309 流式关闭 |
+| F3 | ~~主动 TTL 延长~~ (v1.3.1 已移除) | 原设计：卡片生存时间接近 540s 时自动延长 600s。**v1.3.1 真飞书 API 实测发现 `streaming_config.ttl_seconds` 参数返回 300122 "unknown property"，飞书 CardKit v2.0 settings API 不支持 TTL 延长参数**。功能已删除，改为 300309 fallback（`_fallback_write_answer`）处理长对话流式关闭 |
 | F4 | 延迟 Markdown 优化 | 流式期间发送原始文本，仅在封卡时执行完整 Markdown 优化 |
 | F5 | 卡片未就绪时的延迟 flush | `card_message_ready=False` 时标记 `_pending_flush`，卡片创建完成后立即执行 |
 

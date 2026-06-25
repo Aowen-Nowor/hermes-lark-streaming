@@ -10,7 +10,7 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 1.3.1 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
+| 版本 | 1.3.4 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
 
 ---
 
@@ -59,7 +59,7 @@ Background: _run_background_task ── [Hook 1/2]
 | `├ __init__.py` | 重导出门面 | StreamCardController + CardSession + 状态常量 |
 | `├ core.py` | 主控制器(单例) | 管理生命周期 + 并发限流 (v1.1.0) + epoch 校验 + _sessions/_interrupt_map 线程安全锁 (v1.3.0) |
 | `├ mixin.py` | cron/gateway 编排 | `_do_cron_deliver`/`_do_gateway_deliver` + 共享工具方法 |
-| `└ linear_mixin.py` | 线性模式编排(主路径) | 统一面板更新、保留式封卡、卡片级安全网、TTL 延长、300313 fallback |
+| `└ linear_mixin.py` | 线性模式编排(主路径) | 统一面板更新、保留式封卡、卡片级安全网、300309 fallback、300313 fallback |
 | **state/** | **状态与数据子包** | |
 | `├ __init__.py` | 重导出门面 | CardSession + TextState + UnifiedLinearState + CardPhase |
 | `├ phase.py` | 卡片生命周期状态机 | `CardPhase`/`TerminalReason` + `PHASE_TRANSITIONS` |
@@ -111,7 +111,7 @@ Background: _run_background_task ── [Hook 1/2]
 
 **4.12 并发限流 (v1.1.0)**: `on_message_started` 时 seal 同 chat_id 的旧活跃卡片为"被新消息取代"，防止多张活跃卡片竞争 API 调用。
 
-**4.13 配置刷新 (v1.1.0)**: 不做自动 mtime 检测（避免每 token 一次 stat()）。配置刷新方式：`/aowen config reload` 命令立即生效，或重启网关生效。`Config.reload()` 清缓存，`on_reload` 回调注册。
+**4.13 配置刷新 (v1.1.0)**: 不做自动 mtime 检测（避免每 token 一次 stat()）。配置刷新方式：`/aowen config reload` 命令立即生效，或重启网关生效。`Config.reload()` 清缓存。
 
 **4.14 /aowen 命令体系 (v1.1.0)**: `aowen/` 子包通过 `pre_gateway_dispatch` hook 拦截 `/aowen` 命令，直接回复飞书卡片，不经过 Hermes AI。命令：`/aowen help`、`/aowen status`（含配置折叠面板）、`/aowen monitor`、`/aowen monitor reset`、`/aowen config reload`。零后台内存占用。卡片视觉重构采用统一设计语言（banner→指标列→详情图标行→折叠→footer），颜色语义化（green=success/orange=warning/red=error/blue=info/grey=neutral），全部 column_set 用 flex_mode=stretch 实现响应式，只用 v2 安全标签，不引入 button/form_container/interactive_container。
 
@@ -220,7 +220,7 @@ CardKit v2 Streaming → CardKit v2 Create+Patch → IM Create+Patch → Hermes 
 - **Phase 3** — 流式更新面板内容（推理/工具）+ 回答文本
 - **Phase 4** — 完成 → 添加页脚
 
-**TTL 延长**: 当卡片接近 540s 生存时间时，自动延长 TTL 600s，防止 300309 流式关闭。
+**300309 fallback**: 长对话（>9分钟）遇到飞书自动关闭流式时，通过 `_fallback_write_answer` 将剩余内容写入卡片，不会崩溃。
 
 **保留式封卡**: 封卡时仅删除实际存在的元素，更新统一面板为最终状态。不再有渐进降级。
 
@@ -351,4 +351,4 @@ hermes gateway restart
 
 ---
 
-*Last updated: 2026-06-24 | Version: 1.3.1*
+*Last updated: 2026-06-25 | Version: 1.3.4*

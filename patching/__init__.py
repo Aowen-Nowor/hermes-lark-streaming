@@ -590,8 +590,12 @@ def _apply_direct_agent_patch() -> None:
 
         # v1.3.0 perf: compute signature check ONCE at wrap time (the signature
         # never changes at runtime). Was ~10-50μs wasted per message.
+        # v1.3.4 fix (P1): inspect.signature 可能对 C 扩展/wrapped callable 抛异常
         import inspect
-        _has_persist_ts = "persist_user_timestamp" in inspect.signature(_orig_method).parameters
+        try:
+            _has_persist_ts = "persist_user_timestamp" in inspect.signature(_orig_method).parameters
+        except (ValueError, TypeError):
+            _has_persist_ts = False
 
         def _patched_run_conversation(
             self,
