@@ -1,3 +1,16 @@
+## v1.3.5 (2026-06-25)
+
+紧急修复 v1.3.4 引入的两个生产问题 — markdown 占位符泄漏导致飞书卡片显示乱码 + E2E 测试竞态超时。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | AI 回复含粗体包裹行内代码时，飞书卡片显示 `P12P`、`P13P` 等乱码（如 `_msg_ctx` → `P12P`、`inspect.signature()` → `P13P`） | `escape_markdown_asterisks` 的 Step 5 还原保护区域用 `re.sub` 从左到右匹配，当粗体包裹行内代码时（外层粗体占位符索引 > 内层代码占位符索引），`re.sub` 跳过替换文本中的内容，导致内层占位符 `\x00P{i}P\x00` 泄漏。飞书渲染时吃掉 null byte，显示 `P12P`。这是 v1.3.0 perf 优化（re.sub 替代 str.replace）引入的回归 | 改用逆向 `str.replace` 遍历（高索引→低索引）：先恢复外层（含内层占位符），后恢复内层。`str.replace` 扫描全串不会跳过替换内容中的匹配，确保嵌套占位符正确还原 (`cardkit/md.py`) |
+| 🐛 Bug Fix (P1) | E2E 测试 `test_prune_skips_streaming_session` 在 GitHub Actions 超时（`_card_ready` 永远等不到） | v1.3.4 P0 修复（concurrency seal 复用 session）中，`on_interrupted` 创建 session2 后 fire-and-forget `_do_create_linear_card`，若被旧 session 的 `_wait_and_abort` + `_complete_session` + `_do_linear_complete_with_fallback` 级联任务链延迟执行，`_card_ready` 超时 | `on_message_started` 复用路径兜底：若 `existing._card_ready` 未 set，重新 fire-and-forget `_do_create_linear_card`。`_do_create_linear_card` 内部有 `state != IDLE` 守卫，已运行的调用不会被重复执行 (`controller/core.py`) |
+
+**审计方法**: 用户报告飞书卡片乱码后，先发真飞书 E2E 测试卡排除飞书渲染问题（纯 markdown 正常），再用本地复现定位到 `escape_markdown_asterisks` 占位符泄漏。E2E 测试超时问题由云服务器实际运行 GitHub Actions 工作流发现，根因是 v1.3.4 concurrency seal 修复的竞态边缘场景。两处修复均在本地 + 真飞书 E2E 验证通过。
+
+---
+
 ## v1.3.4 (2026-06-25)
 
 全面代码审计修复版 — 两轮深度审计（第一轮 5 模块并行 + 第二轮 3 路径深挖生产主流程），共修复 2 P0 + 10 P1 + 4 P2 问题，新增飞书 log_id 排查能力。

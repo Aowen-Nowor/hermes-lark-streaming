@@ -263,12 +263,18 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         #   1. 两张卡片被创建（on_interrupted 一张 + 这里一张）
         #   2. on_interrupted 创建的那张卡片成为孤儿（永远停在"正在加载上下文..."）
         # 修复：如果 session 已存在（由 on_interrupted 创建），直接复用，仅补记 metrics。
+        # v1.3.5 fix: on_interrupted 中 fire-and-forget 的 _do_create_linear_card
+        # 可能因旧 session 的 _wait_and_abort + _complete_session 级联任务链而延迟执行，
+        # 导致 _card_ready 永远等不到。在此兜底重试调度，_do_create_linear_card
+        # 内部有 state != IDLE 守卫，已运行的调用不会被重复执行。
         existing = self._sess_get(message_id)
         if existing is not None:
             _logger.info(
                 "HLS: session already created by concurrency seal, reusing msg=%s trace=%s",
                 (message_id or "?")[:12], existing.card_trace_id,
             )
+            if not existing._card_ready.is_set():
+                self._fire_and_forget(self._do_create_linear_card(existing), loop)
             try:
                 from ..aowen import record_card_created, set_active_sessions
                 record_card_created()
