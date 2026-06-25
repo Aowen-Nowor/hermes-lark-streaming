@@ -29,6 +29,7 @@ from .i18n import _LOCALES, _T, _i18n, _t
 from .md import (
     _downgrade_tables,
     _split_long_text,
+    escape_markdown_asterisks,
     optimize_markdown_style,
 )
 
@@ -371,7 +372,11 @@ def build_unified_complete_card(
 
     # ── Answer text ──
     if answer_text:
-        content = _downgrade_tables(optimize_markdown_style(answer_text))
+        # v1.3.1 fix: apply escape_markdown_asterisks to match _preservative_seal path.
+        # Without this, header=true (full rebuild) path would not escape * in
+        # expressions like "2*4000+4*3000", causing Feishu markdown to pair
+        # *4000+4* as italic — the * disappears and numbers merge.
+        content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(answer_text)))
         content, img_elements = _extract_images_from_markdown(content)
         elements.extend(img_elements)
         for chunk in _split_long_text(content):

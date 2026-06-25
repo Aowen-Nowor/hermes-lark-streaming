@@ -13,6 +13,7 @@
 | 🔧 Fix | 数值配置项非数字字符串导致崩溃 | `print_step`/`max_tool_steps`/`max_reasoning_rounds`/`flush_interval_ms`/`card_ttl_sec` 用 `int()`/`float()` 直接转换，用户写 `print_step: abc` 时抛未捕获 `ValueError`。 | **新增 `_to_int` / `_to_float` helper**：类似 `_to_bool` 的类型容错，非数字输入返回默认值 + WARNING 日志。5 个数值配置项全部接入。 |
 | 🔧 Fix | `_gateway_cards` 字典内存泄漏 | `_register_gateway_card` 生产代码调用 2 次，`_unregister_gateway_card` 从未在生产代码调用。字典只增不删，无 TTL，无容量限制。 | **容量限制**：`_register_gateway_card` 内添加 500 条上限，超限时按 `registered_at` 清理最旧 20%。新增 `registered_at` 时间戳字段。 |
 | 🔧 Fix | `_send_text_fallback` 在数据释放后执行 | `_do_linear_complete` 失败时先执行 `_release_session_data`（清空 `session.text`），然后返回 False，接着 `_send_text_fallback` 读取 `session.text.display_text` 已为空。 | **提前快照**：`_do_linear_complete_with_fallback` 在调用 `_do_linear_complete` 前保存 `answer_text`/`error_message` 快照，通过 `fallback_text` 参数传给 `_send_text_fallback`。 |
+| 🐛 Bug Fix | `header=true` 全量重建路径遗漏 `escape_markdown_asterisks` | `build_unified_complete_card`（header=true 时使用）未调用 `escape_markdown_asterisks`，而 `_preservative_seal`（header=false）调用了。`header=true` 时 AI 回复中的乘号 `*`（如 `2*4000+4*3000`）不被转义，飞书 markdown 把 `*4000+4*` 配对为斜体，乘号消失、数字拼合。 | **添加 escape**：`build_unified_complete_card` 的 answer 处理增加 `escape_markdown_asterisks`，与 `_preservative_seal` 路径一致。真飞书 API 实测验证：close_streaming 后 cardkit_update 全量替换可行（code=0）。 |
 
 ---
 
