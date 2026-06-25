@@ -62,6 +62,7 @@ from ..feishu import (
     FeishuAPIError,
     is_element_not_found_error,
     is_schema_error,
+    is_terminal_api_code,
 )
 from ..flush import PATCH_MS
 
@@ -234,8 +235,8 @@ class UnifiedControllerMixin:
                 }
                 session._creation_stages.discard("panel")  # Panel NOT in initial card
 
-            except FeishuAPIError:
-                _logger.info("linear CardKit create failed, falling back to IM card")
+            except FeishuAPIError as e:
+                _logger.info("linear CardKit create failed, falling back to IM card: %s", e)
                 card = build_im_fallback_card(header_enabled=self._cfg.header_enabled)
                 card_msg_id = await self._client.reply_card(reply_to, card)
                 session.card_msg_id = card_msg_id
@@ -268,8 +269,11 @@ class UnifiedControllerMixin:
                 if not session._first_flush_done:
                     # First content → immediate flush (首字即显)
                     session._first_flush_done = True
-                    asyncio.get_event_loop().create_task(
-                        session.flush.flush_now(lambda: self._do_unified_flush(session))
+                    # v1.3.4 fix (P2): 持有 Task 强引用防止 GC 回收
+                    # （与 core.py _fire_and_forget 同模式）
+                    self._fire_and_forget(
+                        session.flush.flush_now(lambda: self._do_unified_flush(session)),
+                        asyncio.get_running_loop(),
                     )
                 else:
                     # Subsequent content → throttled flush
@@ -286,8 +290,15 @@ class UnifiedControllerMixin:
                 session.linear,
                 (session.card_id or "")[:12],
             )
-        except Exception:
+        except Exception as e:
             _logger.exception("_do_create_linear_card failed")
+            # v1.3.4 fix (P1): 消息被删/撤回时触发 UnavailableGuard，避免后续
+            # 对已删除消息的无效 API 调用。原实现 guard 从未被调用（死代码）。
+            if isinstance(e, FeishuAPIError) and is_terminal_api_code(e.code):
+                try:
+                    session.guard.terminate("_do_create_linear_card", err=e)
+                except Exception:
+                    _logger.debug("guard.terminate failed in create path", exc_info=True)
             session.state = CREATION_FAILED
             session.enter_terminal(
                 reason=TerminalReason.CREATION_FAILED,
@@ -346,8 +357,10 @@ class UnifiedControllerMixin:
             except RuntimeError:
                 loop = session._loop
             if loop is not None and not loop.is_closed():
-                loop.create_task(
-                    session.flush.flush_now(lambda: self._do_unified_flush(session))
+                # v1.3.4 fix (P2): 持有 Task 强引用防止 GC 回收
+                self._fire_and_forget(
+                    session.flush.flush_now(lambda: self._do_unified_flush(session)),
+                    loop,
                 )
             return
 
@@ -490,6 +503,16 @@ class UnifiedControllerMixin:
             return
         assert self._client is not None
 
+        # v1.3.4 fix (P1): Phase 2 永久失败（schema_error / element_not_found）
+        # 时，不再重试 Phase 2 也不再执行 Phase 3（元素不存在，partial_update
+        # 会无限返回 300313）。清空脏标志避免节流 flush 空转，等内容完成后
+        # 由 _phase2_never_succeeded 检测并走全量重建。
+        if getattr(session, "_phase2_failed", False):
+            state.panel_dirty = False
+            state.answer_dirty = False
+            state.tool_steps_dirty = False
+            return
+
         actions: list[dict[str, Any]] = []
 
         # ── Phase 2: First content — add answer element (and panel if needed), delete loading hint ──
@@ -590,23 +613,85 @@ class UnifiedControllerMixin:
                         # ── Schema error (300315): permanent, don't retry ──
                         # This typically means an invalid property on a CardKit
                         # element.  Log with full error so the developer can
-                        # identify the offending property, then mark element as
-                        # created to prevent infinite retry loops.
+                        # identify the offending property.
+                        #
+                        # v1.3.4 fix (P1): 原实现 mark "answer" as created 会导致：
+                        #   1. Phase 3 在不存在的元素上 partial_update → 300313 无限重试
+                        #      （~15 次/秒 futile API calls，可能触发飞书频控）
+                        #   2. _phase2_never_succeeded 守卫被掩盖（"answer" in stages → False）
+                        #      → 完成时不走全量重建，改走 preservative seal（再次失败 2 次）
+                        # 修复：设置 _phase2_failed 标志，清空脏数据，return。
+                        #   - Phase 2 不再重试（_phase2_failed 守卫在函数顶部拦截）
+                        #   - Phase 3 不再执行（同上）
+                        #   - 完成时 _phase2_never_succeeded=True → 全量重建写内容
                         _logger.error(
                             "unified flush phase 2 SCHEMA ERROR (permanent): %s — "
                             "detail: %s — "
-                            "marking elements as created to prevent retry loop, card=%s",
+                            "setting _phase2_failed, will full-rebuild at completion, card=%s",
                             e, e.extract_schema_detail(), session.card_id[:12],
                         )
-                        session._creation_stages.add("answer")  # Prevent retry loop
-                        session._creation_stages.add("panel")
-                        session._creation_stages.add("hint_removed")
-                        # Fall through to Phase 3 (partial_update may still fail
-                        # if panel wasn't actually added, but at least we won't
-                        # loop infinitely on Phase 2)
-                    else:
-                        _logger.warning("unified flush phase 2 batch_update failed: %s", e)
+                        session._phase2_failed = True
+                        state.panel_dirty = False
+                        state.answer_dirty = False
+                        state.tool_steps_dirty = False
                         return
+                    elif is_element_not_found_error(e):
+                        # v1.3.1 fix: insert_before 引用不存在的元素 (300315 + "not find elementID")
+                        # 这不是真正的 schema error——loading_hint 可能已被删除。
+                        #
+                        # v1.3.4 fix (P1): 同 schema_error，不再 mark as created。
+                        # 设置 _phase2_failed，清空脏数据，return。
+                        # 完成时由 _phase2_never_succeeded 检测并走全量重建。
+                        _logger.warning(
+                            "unified flush phase 2 element not found (non-fatal): %s — "
+                            "setting _phase2_failed, will full-rebuild at completion, card=%s",
+                            e, session.card_id[:12],
+                        )
+                        session._phase2_failed = True
+                        session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
+                        state.panel_dirty = False
+                        state.answer_dirty = False
+                        state.tool_steps_dirty = False
+                        return
+                    else:
+                        # v1.3.3 fix (P0): transient API error (rate limit, auth
+                        # refresh, etc.) — _creation_stages stays empty. Reset
+                        # _first_flush_done so next content retries via flush_now.
+                        _logger.warning(
+                            "unified flush phase 2 batch_update failed: %s — "
+                            "resetting _first_flush_done for retry, card=%s",
+                            e, session.card_id[:12] if session.card_id else "?",
+                        )
+                        session._first_flush_done = False
+                        return
+                except asyncio.CancelledError:
+                    # v1.3.4 fix (P1): CancelledError 是 BaseException 子类，
+                    # except Exception 无法捕获（v1.3.3 注释声称能捕获但实际不能）。
+                    # 如果 flush 任务被取消（gateway 关闭/超时），必须重置
+                    # _first_flush_done 否则下次内容到达走节流而非立即 flush，
+                    # 增加"占位卡卡住"风险。重置后 re-raise 让取消语义传播。
+                    _logger.debug(
+                        "unified flush phase 2 cancelled — resetting _first_flush_done, card=%s",
+                        session.card_id[:12] if session.card_id else "?",
+                    )
+                    session._first_flush_done = False
+                    raise
+                except Exception as e:
+                    # v1.3.3 fix (P0): catch non-FeishuAPIError exceptions (network
+                    # timeout, connection error, etc.) that would otherwise propagate
+                    # to FlushController._do_flush's except Exception, leaving
+                    # _creation_stages empty and causing the "placeholder card stuck
+                    # forever" bug.
+                    # Reset _first_flush_done so the next content arrival retries
+                    # Phase 2 via immediate flush_now instead of throttled schedule.
+                    _logger.warning(
+                        "unified flush phase 2 non-API exception: %s — "
+                        "resetting _first_flush_done for retry, card=%s",
+                        e, session.card_id[:12] if session.card_id else "?",
+                        exc_info=True,
+                    )
+                    session._first_flush_done = False
+                    return
 
             # ── Stream answer text if also dirty ──
             # Note: skip markdown optimization during streaming for performance;
@@ -1430,8 +1515,17 @@ class UnifiedControllerMixin:
                                 retry + 1, card_id[:12],
                             )
                             continue
+                        # v1.3.4 fix (P1): retry 路径 300309 应与主路径一致 return False
+                        # 走全量重建，而非 raise（raise 虽被外层 except Exception 兜底，
+                        # 但语义不一致且依赖外层兜底，显式 return False 更清晰）。
                         if retry_e.code == CARDKIT_STREAMING_CLOSED:
                             session._streaming_closed = True
+                            _logger.debug(
+                                "preservative seal: retry hit streaming closed, "
+                                "falling back to full rebuild card=%s",
+                                card_id[:12],
+                            )
+                            return False
                         raise
                 # All retries exhausted
                 _logger.warning(
@@ -1663,6 +1757,14 @@ class UnifiedControllerMixin:
 
         # ── Build footer data ──
         footer_data = session.footer
+        # v1.3.4 fix (P2): bg_review_messages 存在 state 中但从未传给
+        # build_unified_complete_card，导致后台审查消息被静默丢弃。
+        # 原代码 has_dirty() 包含 bg_review_messages 检查会触发 flush，
+        # 但 flush 路径不渲染它，完成时 footer_data 也不含它 → 功能失效。
+        if state and state.bg_review_messages:
+            if footer_data is None:
+                footer_data = {}
+            footer_data = {**footer_data, "bg_review_messages": list(state.bg_review_messages)}
         is_aborted = getattr(session, "_was_aborted", False) or session.state == ABORTED
         error_message = getattr(session, "error_message", "")
         # v1.2.0 B1 fix: is_error 必须兼顾 error_message。
@@ -1679,6 +1781,36 @@ class UnifiedControllerMixin:
         # v1.1.3: IM 降级模式用 update_card 封卡（不走 _preservative_seal）
         # v1.2.0 Y1 fix: header 主动重建走独立标志，不复用"failed"日志/指标
         _header_driven_rebuild = False  # True = header 主动全量重建（非失败）
+
+        # v1.3.3 fix (P0 — issue: placeholder_card_stuck):
+        # Detect if Phase 2 never succeeded (answer element was never created).
+        # If so, the preservative seal's content guards will ALL skip (they
+        # check "answer"/"panel" in _creation_stages), and the seal would
+        # "succeed" at closing streaming mode without writing ANY content —
+        # leaving the card permanently stuck at "正在加载上下文...".
+        # Force seal_ok=False to trigger the full card rebuild fallback,
+        # which replaces the entire card with complete content via
+        # build_unified_complete_card + cardkit_update.
+        _phase2_never_succeeded = (
+            session.use_cardkit  # Only CardKit path has Phase 2
+            and session.card_id  # Card was created
+            and (
+                "answer" not in session._creation_stages  # Phase 2 never succeeded
+                or getattr(session, "_phase2_failed", False)  # v1.3.4: Phase 2 permanently failed
+            )
+            and state is not None
+            and (state.answer_text or state.panel_visible or state.reasoning_rounds)
+        )
+        if _phase2_never_succeeded:
+            _logger.warning(
+                "HLS: Phase 2 never succeeded (no answer element created) — "
+                "card stuck at placeholder, forcing full rebuild: card=%s trace=%s "
+                "answer_len=%d panel_visible=%s",
+                (session.card_id or "")[:12], session.card_trace_id,
+                len(state.answer_text) if state else 0,
+                state.panel_visible if state else False,
+            )
+
         if not session.use_cardkit and session.card_msg_id:
             seal_ok = await self._do_im_fallback_seal(
                 session,
@@ -1687,6 +1819,11 @@ class UnifiedControllerMixin:
                 is_aborted=is_aborted,
                 error_message=error_message,
             )
+        elif _phase2_never_succeeded:
+            # v1.3.3 fix (P0): Phase 2 never succeeded — skip preservative
+            # seal (which would silently succeed without writing content)
+            # and force full rebuild to replace the entire placeholder card.
+            seal_ok = False  # 触发下方全量重建 fallback
         elif self._cfg.header_enabled:
             # v1.2.0 H6 方案B: 开启 header 时跳过增量封卡，直接走全量重建
             # 原因：飞书 CardKit settings/batch_update 接口不支持更新 card-level
@@ -1822,7 +1959,7 @@ class UnifiedControllerMixin:
                         from ..aowen import record_full_rebuild
                         record_full_rebuild()
                     except Exception:
-                        pass
+                        _logger.debug('metrics: record_full_rebuild failed', exc_info=True)
             except Exception:
                 _logger.warning(
                     "full rebuild also failed: card=%s",
@@ -1832,7 +1969,13 @@ class UnifiedControllerMixin:
                 seal_ok = False
 
         if seal_ok:
-            session.state = COMPLETED
+            # v1.3.4 fix (P1): 如果会话已被 on_aborted 标记为 ABORTED，
+            # 不要覆盖为 COMPLETED——否则状态机不一致（ABORTED→COMPLETED 非法转换）。
+            # _was_aborted 已保留，卡片视觉状态正确，但 session.state 应反映真实终态。
+            if session._was_aborted:
+                session.state = ABORTED
+            else:
+                session.state = COMPLETED
             # v1.1.1: 释放重数据（unified_state/text/tool_use），减少内存占用
             # session 留最小元数据等 _prune_stale_sessions 清理
             try:
@@ -1844,7 +1987,7 @@ class UnifiedControllerMixin:
                 from ..aowen import record_card_completed
                 record_card_completed()
             except Exception:
-                pass
+                _logger.debug('metrics: record_card_completed failed', exc_info=True)
         else:
             session.state = CREATION_FAILED
             session.enter_terminal(
@@ -1861,7 +2004,7 @@ class UnifiedControllerMixin:
                 from ..aowen import record_card_failed
                 record_card_failed()
             except Exception:
-                pass
+                _logger.debug('metrics: record_card_failed failed', exc_info=True)
 
         return seal_ok
 

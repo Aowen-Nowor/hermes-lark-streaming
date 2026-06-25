@@ -1239,6 +1239,87 @@ class TestDoLinearComplete:
             "close_streaming fires before Feishu's typewriter queue finishes rendering."
         )
 
+    @pytest.mark.asyncio
+    async def test_phase2_failure_forces_full_rebuild_not_stuck(self) -> None:
+        """v1.3.3 regression: Phase 2 failure must NOT leave card stuck at placeholder.
+
+        Bug (issue: placeholder_card_stuck): When Phase 2's cardkit_batch_update
+        fails (network timeout, rate limit, auth error, etc.), _creation_stages
+        stays empty. All subsequent write paths (drain, seal) check
+        "answer"/"panel" in _creation_stages and skip — the seal "succeeds" at
+        closing streaming mode without writing ANY content, leaving the card
+        permanently stuck at "正在加载上下文..." (Loading context...).
+
+        Fix (v1.3.3): _do_linear_complete detects if Phase 2 never succeeded
+        (answer not in _creation_stages but content exists) and forces
+        seal_ok=False, triggering the full card rebuild fallback which
+        replaces the entire card with complete content via cardkit_update.
+
+        This test simulates the exact bug scenario:
+        1. Card created (card_id set, streaming mode active)
+        2. Phase 2 never succeeded (_creation_stages empty)
+        3. Answer text exists in unified_state
+        4. _do_linear_complete is called
+        5. Full rebuild (cardkit_update) MUST be called with the complete card
+        """
+        ctrl = _setup_ctrl(linear=True)
+        ctrl._release_session_data = lambda s: None
+        session = _make_session("msg_p2fail", linear=True)
+        ctrl._sessions["msg_p2fail"] = session
+
+        await ctrl._do_create_linear_card(session)
+        assert session.state == STREAMING
+
+        # Simulate Phase 2 never succeeding: answer text exists but
+        # _creation_stages is empty (no "answer", "panel", "hint_removed")
+        session.unified_state.answer_text = "这是完整的回答内容"
+        session.unified_state.answer_dirty = False
+        assert "answer" not in session._creation_stages  # Phase 2 never ran
+
+        # _preservative_seal should NOT be called (would silently succeed
+        # without content). Instead, full rebuild should be triggered.
+        preservative_called = False
+
+        async def _should_not_be_called(*a, **kw):
+            nonlocal preservative_called
+            preservative_called = True
+            return True
+
+        ctrl._preservative_seal = _should_not_be_called  # type: ignore[method-assign]
+
+        result = await ctrl._do_linear_complete(session)
+
+        # Full rebuild should succeed
+        assert result is True, "full rebuild should succeed"
+        assert session.state == COMPLETED
+
+        # Preservative seal must NOT have been called
+        assert preservative_called is False, (
+            "v1.3.3: when Phase 2 never succeeded, _preservative_seal must "
+            "NOT be called (it would silently succeed without writing content). "
+            "Full rebuild should be triggered instead."
+        )
+
+        # cardkit_update MUST have been called (full rebuild replaces card)
+        assert ctrl._client.cardkit_update.called, (
+            "v1.3.3: when Phase 2 never succeeded, cardkit_update (full rebuild) "
+            "MUST be called to replace the placeholder card with complete content."
+        )
+
+        # Verify the complete card contains the answer text
+        update_call = ctrl._client.cardkit_update.call_args
+        complete_card = update_call.args[1] if len(update_call.args) > 1 else update_call.kwargs.get("card")
+        assert complete_card is not None, "cardkit_update must receive a card dict"
+
+        # Extract all markdown content from the card body
+        card_text = ""
+        for elem in complete_card.get("body", {}).get("elements", []):
+            if elem.get("tag") == "markdown":
+                card_text += elem.get("content", "")
+        assert "这是完整的回答内容" in card_text, (
+            f"full rebuild card must contain the answer text, got: {card_text!r}"
+        )
+
 
 class TestLinearOnThinkingNativeReasoningDedup:
     """Bug fix: _linear_on_thinking must skip reasoning when already tracked.
@@ -1597,6 +1678,10 @@ class TestHeaderSealPath:
         assert session.state == STREAMING
         session.unified_state.answer_text = "answer"
         session.unified_state.answer_dirty = False  # 避免 drain 循环
+        # v1.3.3: simulate Phase 2 having succeeded so preservative seal
+        # path is exercised (not the Phase-2-never-succeeded full rebuild).
+        session._creation_stages.add("answer")
+        session._creation_stages.add("hint_removed")
 
         preservative_called = False
 
@@ -1636,6 +1721,10 @@ class TestHeaderSealPath:
         assert session.state == STREAMING
         session.unified_state.answer_text = "answer"
         session.unified_state.answer_dirty = False
+        # v1.3.3: simulate Phase 2 having succeeded (header test is about
+        # header-driven rebuild, not Phase-2-failure rebuild).
+        session._creation_stages.add("answer")
+        session._creation_stages.add("hint_removed")
 
         preservative_called = False
 
@@ -1682,6 +1771,10 @@ class TestHeaderSealPath:
         await ctrl._do_create_linear_card(session)
         session.unified_state.answer_text = "answer"
         session.unified_state.answer_dirty = False
+        # v1.3.3: simulate Phase 2 having succeeded (this test is about
+        # header-driven rebuild, not Phase-2-failure rebuild).
+        session._creation_stages.add("answer")
+        session._creation_stages.add("hint_removed")
 
         await ctrl._do_linear_complete(session)
 
@@ -1705,6 +1798,10 @@ class TestHeaderSealPath:
         await ctrl._do_create_linear_card(session)
         session.unified_state.answer_text = "answer"
         session.unified_state.answer_dirty = False
+        # v1.3.3: simulate Phase 2 having succeeded so preservative_seal
+        # is called (and fails), not the Phase-2-never-succeeded path.
+        session._creation_stages.add("answer")
+        session._creation_stages.add("hint_removed")
 
         async def _failing_seal(*a, **kw):
             return False  # 模拟封卡失败
@@ -1911,7 +2008,8 @@ class TestIMFallbackHeader:
 
         await ctrl._do_linear_complete(session)
 
-        assert session.state == COMPLETED
+        # v1.3.4 fix: aborted session 保持 ABORTED 终态，不再被覆盖为 COMPLETED
+        assert session.state == ABORTED
         assert "card" in captured
         assert captured["card"]["header"]["template"] == "red"
 
@@ -1952,3 +2050,64 @@ class TestIMFallbackHeader:
         assert captured_seal_args.get("is_error") is True, \
             f"B1 副作用: 默认路径 agent 报错时 is_error 应为 True，实际: {captured_seal_args.get('is_error')}"
         assert captured_seal_args.get("error_message") == "rate limit"
+
+
+# ─── v1.3.4 Regression Tests ──────────────────────────────────────────
+
+def test_v134_concurrency_seal_no_duplicate_session() -> None:
+    """v1.3.4 P0 fix: on_message_started 不应在 on_interrupted 已创建 session 后再创建。
+
+    场景：用户在卡片流式中发送新消息 → concurrency seal 调 on_interrupted
+    → on_interrupted 创建新 session + fire _do_create_linear_card。
+    原 bug：on_message_started 继续创建第二个 session 并覆盖，导致：
+      1. 两张卡片被创建（on_interrupted 一张 + on_message_started 一张）
+      2. on_interrupted 的卡片成为孤儿（永远停在"正在加载上下文..."）
+
+    修复：on_message_started 检测到 session 已存在时复用，不重复创建。
+    """
+    ctrl = StreamCardController()
+    _enable(ctrl, linear=True)
+
+    # 模拟 concurrency seal：先创建一个 active session（旧消息）
+    with patch.object(ctrl, "_fire_and_forget", side_effect=lambda coro, loop: coro.close()):
+        ctrl.on_message_started(message_id="old_msg", chat_id="chat")
+        assert "old_msg" in ctrl._sessions
+
+        # 用户发送新消息 → 触发 concurrency seal
+        # on_interrupted 会被 on_message_started 的 concurrency seal 调用，
+        # 创建 new_msg 的 session
+        ctrl.on_message_started(message_id="new_msg", chat_id="chat")
+
+    # 关键断言：new_msg 只有一个 session（不应有重复创建）
+    assert "new_msg" in ctrl._sessions
+    session = ctrl._sessions["new_msg"]
+    # session 应该是有效的（有 chat_id 和 loop）
+    assert session.chat_id == "chat"
+    # 旧消息应被 abort
+    assert ctrl._sessions["old_msg"].state == ABORTED
+
+
+@pytest.mark.asyncio
+async def test_v134_aborted_session_keeps_aborted_state() -> None:
+    """v1.3.4 P1 fix: 被 abort 的 session 完成后应保持 ABORTED 状态，不被覆盖为 COMPLETED。"""
+    ctrl = _setup_ctrl(linear=True)
+    ctrl._release_session_data = lambda s: None
+    session = _make_session("msg_abort_state", linear=True)
+    ctrl._sessions["msg_abort_state"] = session
+
+    await ctrl._do_create_linear_card(session)
+
+    session.unified_state.answer_text = "partial answer"
+    session.unified_state.answer_dirty = False
+    session._was_aborted = True
+    session._creation_stages.add("answer")  # Phase 2 已成功
+
+    # 模拟 seal 成功
+    async def _ok_seal(*args, **kwargs):
+        return True
+    ctrl._preservative_seal = _ok_seal  # type: ignore[method-assign]
+
+    await ctrl._do_linear_complete(session)
+
+    # v1.3.4 fix: aborted session 应保持 ABORTED
+    assert session.state == ABORTED, f"Expected ABORTED, got {session.state}"

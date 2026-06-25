@@ -131,6 +131,19 @@ grep 'HLS:' ~/.hermes/logs/agent.log | tail -100
 
 ---
 
+## /aowen 命令自查（推荐）
+
+在提交 Issue 前，建议先在飞书中发送以下命令自查插件状态：
+
+```
+/aowen status    — 查看插件配置和凭据状态
+/aowen monitor   — 查看运行指标（卡片创建数、API调用数、错误码分布）
+```
+
+如果上述命令无响应，说明插件补丁未成功应用或控制器未初始化——请在日志中搜索 `apply_patches` 和 `patches applied` 确认。
+
+---
+
 ## Debug Tips — 快速定位
 
 | 症状 | 优先检查 | 关键日志 |
@@ -139,13 +152,34 @@ grep 'HLS:' ~/.hermes/logs/agent.log | tail -100
 | 内容重复 | 回调是否被双重包装 | `_maybe_wrap_callbacks`、`consumed` |
 | 面板思考内容重复（DeepSeek） | 是否同时检查两个回调的 `_hls_wrapper` | `_thinking_wrapper` |
 | 会话列表永久显示"处理中..." | `close_streaming` 是否传入 `summary` + `i18n_content` | `close_streaming`、`summary` |
-| 流式关闭 (300309) | 卡片 TTL + 主动延长 | `300309`、`TTL` |
+| 流式关闭 (300309) | 300309 fallback 是否生效（长对话>9分钟飞书自动关闭流式） | `300309`、`_fallback_write_answer` |
 | 300317 序列冲突 | `_streaming_closed` 守卫是否生效 | `300317`、`_streaming_closed` |
 | 页脚早于内容出现 | drain 步骤是否执行 | `drain`、`answer_dirty` |
 | 回答内容不显示 | `already_streamed` 处理 + 去重长度追踪 | `already_streamed`、`_stream_consumed_len` |
 | 完成卡片被覆盖成"已停止" | `on_interrupted`/`on_aborted` 是否错误触发于 COMPLETING 状态 | `abort old msg=... (after flush wait)` + `on_aborted: ... state=ABORTED` + `linear complete with fallback failed` |
 
 > 详细的架构背景和调试指南请参阅 [SKILL.md](SKILL.md)。
+
+---
+
+## Feishu log_id — 飞书请求链路排查
+
+> **v1.3.4+ 新增**：插件日志中的 `FeishuAPIError` 会携带 `[log_id=...]` 字段。
+
+飞书开放平台为每个 API 请求分配唯一的 `log_id`（如 `202407211618216F3E9EB64DC7E1234`）。当卡片出现 API 报错（如 300313、300317、300305、300309）时，插件日志会自动记录对应的 `log_id`：
+
+```
+HLS: unified flush phase 2 batch_update failed: cardkit_batch_update: code=300317, msg=... [log_id=202606251519045A9BCC41DB3540A997BA]
+```
+
+**如何使用 log_id**：
+1. 在插件日志（`~/.hermes/logs/agent.log`）中搜索报错行，找到 `[log_id=...]`
+2. 提交 Issue 时附上 `log_id`——维护者可凭此去飞书开放平台后台查具体请求链路，精确定位是插件构造的卡片 JSON 有问题，还是飞书服务端的问题
+
+```bash
+# 提取所有 log_id
+grep -oP '\[log_id=\K[A-Z0-9]+' ~/.hermes/logs/agent.log | sort -u
+```
 
 ---
 

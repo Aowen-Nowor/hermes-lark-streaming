@@ -149,7 +149,16 @@ def _maybe_wrap_callbacks(agent) -> None:
     #   - stream_delta_callback delivers incremental deltas: "The ", "user ", ...
     #   - interim_assistant_callback delivers accumulated text: "The user keeps asking"
     #   - Exact match on last chunk fails; length-based check is robust.
+    #
+    # v1.3.2 fix (P3-02): _stream_consumed_len is cleaned up when the thinking
+    # wrapper detects the message is complete (text length <= consumed_len and
+    # already_streamed=True), preventing unbounded growth in long-running agents
+    # that handle many messages (interrupt-reuse scenario).
     _stream_consumed_len: dict[str, int] = {}
+
+    def _cleanup_consumed_len(_eid: str) -> None:
+        """Remove consumed-length tracking for a completed message."""
+        _stream_consumed_len.pop(_eid, None)
 
     if getattr(agent, "stream_delta_callback", None):
         _orig_stream = agent.stream_delta_callback
@@ -248,6 +257,10 @@ def _maybe_wrap_callbacks(agent) -> None:
                         "HLS: thinking_wrapper SKIP(already_streamed) eid=%s len=%d",
                         _eid[:12], len(text) if text else 0,
                     )
+                    # v1.3.2 fix (P3-02): clean up consumed-length tracking for
+                    # this message — the streaming is done, no need to keep the
+                    # entry. Prevents unbounded growth in interrupt-reuse scenarios.
+                    _cleanup_consumed_len(_eid)
                     return _orig_interim(text, *args, **kwargs)
 
                 # ── Length-based dedup ──
@@ -258,6 +271,9 @@ def _maybe_wrap_callbacks(agent) -> None:
                         "consumed=%d interim=%d",
                         _eid[:12], consumed_len, len(text),
                     )
+                    # v1.3.2 fix (P3-02): same cleanup — text fully consumed,
+                    # message streaming is done.
+                    _cleanup_consumed_len(_eid)
                     return _orig_interim(text, *args, **kwargs)
 
                 if text:

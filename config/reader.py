@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -50,7 +51,13 @@ def _to_int(val: Any, default: int) -> int:
     if isinstance(val, int):
         return val
     if isinstance(val, float):
-        return int(val)
+        # v1.3.2 fix: int(float('inf')) raises OverflowError,
+        # int(float('nan')) raises ValueError — both uncaught.
+        try:
+            return int(val)
+        except (OverflowError, ValueError):
+            _logger.warning("HLS: config float value %r cannot convert to int, using default %d", val, default)
+            return default
     if isinstance(val, str):
         try:
             return int(val)
@@ -61,17 +68,30 @@ def _to_int(val: Any, default: int) -> int:
 
 
 def _to_float(val: Any, default: float) -> float:
-    """安全 float 转换，类型错误时返回 default。"""
+    """安全 float 转换，类型错误时返回 default。
+
+    v1.3.2 fix: 拒绝 nan/inf 值。``float('nan')`` 和 ``float('inf')`` 是
+    合法的 Python float，不会触发 ValueError，但会导致下游 ``max()``/
+    ``min()`` 比较失效（NaN 传播特性），节流逻辑永远不触发或永远立即触发。
+    """
     if isinstance(val, bool):
         return float(val)
     if isinstance(val, (int, float)):
-        return float(val)
+        result = float(val)
+        if math.isnan(result) or math.isinf(result):
+            _logger.warning("HLS: config float value %r is nan/inf, using default %f", val, default)
+            return default
+        return result
     if isinstance(val, str):
         try:
-            return float(val)
+            result = float(val)
         except ValueError:
             _logger.warning("HLS: config value %r is not a valid float, using default %f", val, default)
             return default
+        if math.isnan(result) or math.isinf(result):
+            _logger.warning("HLS: config float value %r is nan/inf, using default %f", val, default)
+            return default
+        return result
     return default
 
 
@@ -370,6 +390,10 @@ class Config:
                 except yaml.YAMLError:
                     _logger.warning("HLS: config YAML syntax error in %s, using empty config", config_path)
                     self._raw = {}
+                except (OSError, UnicodeDecodeError):
+                    # v1.3.2 fix: 文件读取可能因权限不足、磁盘错误或编码问题失败
+                    _logger.warning("HLS: config file read error in %s, using empty config", config_path)
+                    self._raw = {}
             else:
                 self._raw = {}
             return self._raw
@@ -393,6 +417,10 @@ class Config:
                     self._reload_cache = yaml.safe_load(text) or {}
                 except yaml.YAMLError:
                     _logger.warning("HLS: config YAML syntax error in %s (reload), using empty config", config_path)
+                    self._reload_cache = {}
+                except (OSError, UnicodeDecodeError):
+                    # v1.3.2 fix: 文件读取可能因权限不足、磁盘错误或编码问题失败
+                    _logger.warning("HLS: config file read error in %s (reload), using empty config", config_path)
                     self._reload_cache = {}
             else:
                 self._reload_cache = {}

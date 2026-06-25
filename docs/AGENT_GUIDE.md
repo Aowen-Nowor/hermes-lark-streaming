@@ -79,7 +79,7 @@ hermes gateway restart
 
 ```bash
 cd ~/.hermes/plugins/hermes-lark-streaming
-git pull origin master
+git pull origin DEV
 hermes plugins reload hermes-lark-streaming
 hermes gateway restart
 ```
