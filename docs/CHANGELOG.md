@@ -1,3 +1,43 @@
+## v1.3.3 (2026-06-25)
+
+P0 紧急修复 — 占位卡片永久卡在"正在加载上下文..."问题（issue: placeholder_card_stuck）
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | 占位卡片永久卡在"正在加载上下文..."，永远看不见回答内容 | Phase 2 的 `cardkit_batch_update(add_elements + delete_loading_hint)` 调用失败后，`_creation_stages` 永远不写入 `"answer"`/`"panel"`/`"hint_removed"`。而所有后续写入路径（drain 循环、seal 内容守卫、seal Step 1/2）都通过 `"xxx" in session._creation_stages` 判断元素是否存在——判断为 False 则跳过写入。seal 最终"成功"关闭了流式模式但未写入任何内容，全量重建 fallback 永远不被触发。这是**标志位死锁**：没有元素存在标志 → 不写入内容 → 没有元素存在标志。 | **检测 Phase 2 失败并强制全量重建**：`_do_linear_complete` 在调用 `_preservative_seal` 前检查 `"answer" not in _creation_stages and (answer_text or panel_visible or reasoning_rounds)`，如果为 True 说明 Phase 2 从未成功，跳过 preservative seal（会静默"成功"不写内容），直接走全量重建 fallback（`build_unified_complete_card` + `cardkit_update`），用完整内容替换整张占位卡片。 |
+| 🐛 Bug Fix (P0) | Phase 2 网络异常/超时未捕获，`_creation_stages` 为空且 `_first_flush_done` 已设 True | Phase 2 的 `cardkit_batch_update` 只捕获 `FeishuAPIError`，`asyncio.TimeoutError`/`aiohttp.ClientError` 等网络异常未被捕获，传播到 `FlushController._do_flush` 的 `except Exception` 被静默吞掉。`_creation_stages` 为空 + `_first_flush_done=True`（设值过早）→ 后续内容到达时走节流 flush 而非立即 flush，增加延迟。 | 1) Phase 2 增加外层 `except Exception` 捕获非 `FeishuAPIError` 异常，记录 warning 日志并重置 `_first_flush_done=False` 让下次内容到达时走立即 flush 重试。2) FeishuAPIError 的 transient 分支（非 schema/非 element_not_found）也重置 `_first_flush_done=False`。 |
+| 🧪 Test | 新增回归测试 `test_phase2_failure_forces_full_rebuild_not_stuck` | 验证 Phase 2 失败后 `_do_linear_complete` 走全量重建而非 preservative seal，且 `cardkit_update` 收到的完整卡片包含 answer 文本 | 模拟 Phase 2 从未成功的场景（`_creation_stages` 为空 + `answer_text` 有内容），断言 `_preservative_seal` 不被调用、`cardkit_update` 被调用且卡片内容包含回答文本。 |
+| 🧪 Test | 3 个 header 相关测试更新 `_creation_stages` 设置 | v1.3.3 的 Phase 2 失败检测会影响未设置 `_creation_stages` 的测试 | `test_header_disabled_uses_preservative_seal`、`test_header_enabled_skips_preservative_seal`、`test_header_rebuild_does_not_pollute_full_rebuilds_metric`、`test_real_failure_rebuild_counts_full_rebuilds` 增加 `session._creation_stages.add("answer")` 模拟 Phase 2 已成功。 |
+
+**根因分析**（issue: placeholder_card_stuck）:
+```
+占位卡创建成功 → _creation_stages = {}（空）
+      ↓
+LLM 首字到达 → Phase 2（_do_unified_flush）
+      ↓  执行 cardkit_batch_update(add_elements + delete_loading_hint)
+      ↓
+  ❌ API 失败（网络超时/频控/auth刷新/非瞬态错误）
+      ↓
+  _creation_stages 无变化 → 无 "answer", "panel", "hint_removed"
+      ↓
+on_completed → _do_linear_complete
+      ↓
+  Step 2 Drain 循环：检查 "answer" in _creation_stages → False → 跳过
+  Step 5 _preservative_seal：
+    → 内容守卫检查 "panel"/"answer" in _creation_stages → False → 全部跳过
+    → Step 1 更新面板：检查 "panel" → False → 跳过
+    → Step 2 更新回答：检查 "answer" → False → 跳过
+    → Step 5 batch_update（只有 footer + delete）→ 成功
+    → Step 6 close_streaming → 成功
+    → 返回 True（"成功"）
+      ↓
+seal_ok = True → 全量重建 fallback 不触发
+      ↓
+卡片永久停留在：只有加载提示 + 加载图标
+```
+
+---
+
 ## v1.3.2 (2026-06-25)
 
 全面代码审计修复版 — 3-5 轮审计共发现 35 个问题（0 P0, 5 P1, 15 P2, 15 P3），本次修复全部 P1/P2 和主要 P3 问题。

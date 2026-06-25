@@ -621,8 +621,32 @@ class UnifiedControllerMixin:
                         session._creation_stages.add("hint_removed")
                         session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
                     else:
-                        _logger.warning("unified flush phase 2 batch_update failed: %s", e)
+                        # v1.3.3 fix (P0): transient API error (rate limit, auth
+                        # refresh, etc.) — _creation_stages stays empty. Reset
+                        # _first_flush_done so next content retries via flush_now.
+                        _logger.warning(
+                            "unified flush phase 2 batch_update failed: %s — "
+                            "resetting _first_flush_done for retry, card=%s",
+                            e, session.card_id[:12] if session.card_id else "?",
+                        )
+                        session._first_flush_done = False
                         return
+                except Exception as e:
+                    # v1.3.3 fix (P0): catch non-FeishuAPIError exceptions (network
+                    # timeout, connection error, asyncio.CancelledError, etc.) that
+                    # would otherwise propagate to FlushController._do_flush's
+                    # except Exception, leaving _creation_stages empty and causing
+                    # the "placeholder card stuck forever" bug.
+                    # Reset _first_flush_done so the next content arrival retries
+                    # Phase 2 via immediate flush_now instead of throttled schedule.
+                    _logger.warning(
+                        "unified flush phase 2 non-API exception: %s — "
+                        "resetting _first_flush_done for retry, card=%s",
+                        e, session.card_id[:12] if session.card_id else "?",
+                        exc_info=True,
+                    )
+                    session._first_flush_done = False
+                    return
 
             # ── Stream answer text if also dirty ──
             # Note: skip markdown optimization during streaming for performance;
@@ -1695,6 +1719,33 @@ class UnifiedControllerMixin:
         # v1.1.3: IM 降级模式用 update_card 封卡（不走 _preservative_seal）
         # v1.2.0 Y1 fix: header 主动重建走独立标志，不复用"failed"日志/指标
         _header_driven_rebuild = False  # True = header 主动全量重建（非失败）
+
+        # v1.3.3 fix (P0 — issue: placeholder_card_stuck):
+        # Detect if Phase 2 never succeeded (answer element was never created).
+        # If so, the preservative seal's content guards will ALL skip (they
+        # check "answer"/"panel" in _creation_stages), and the seal would
+        # "succeed" at closing streaming mode without writing ANY content —
+        # leaving the card permanently stuck at "正在加载上下文...".
+        # Force seal_ok=False to trigger the full card rebuild fallback,
+        # which replaces the entire card with complete content via
+        # build_unified_complete_card + cardkit_update.
+        _phase2_never_succeeded = (
+            session.use_cardkit  # Only CardKit path has Phase 2
+            and session.card_id  # Card was created
+            and "answer" not in session._creation_stages  # Phase 2 never succeeded
+            and state is not None
+            and (state.answer_text or state.panel_visible or state.reasoning_rounds)
+        )
+        if _phase2_never_succeeded:
+            _logger.warning(
+                "HLS: Phase 2 never succeeded (no answer element created) — "
+                "card stuck at placeholder, forcing full rebuild: card=%s trace=%s "
+                "answer_len=%d panel_visible=%s",
+                (session.card_id or "")[:12], session.card_trace_id,
+                len(state.answer_text) if state else 0,
+                state.panel_visible if state else False,
+            )
+
         if not session.use_cardkit and session.card_msg_id:
             seal_ok = await self._do_im_fallback_seal(
                 session,
@@ -1703,6 +1754,11 @@ class UnifiedControllerMixin:
                 is_aborted=is_aborted,
                 error_message=error_message,
             )
+        elif _phase2_never_succeeded:
+            # v1.3.3 fix (P0): Phase 2 never succeeded — skip preservative
+            # seal (which would silently succeed without writing content)
+            # and force full rebuild to replace the entire placeholder card.
+            seal_ok = False  # 触发下方全量重建 fallback
         elif self._cfg.header_enabled:
             # v1.2.0 H6 方案B: 开启 header 时跳过增量封卡，直接走全量重建
             # 原因：飞书 CardKit settings/batch_update 接口不支持更新 card-level
