@@ -270,7 +270,7 @@ class FeishuClient:
                     from ..aowen import record_api_call
                     record_api_call(operation)
                 except Exception:
-                    pass
+                    _logger.debug("metrics: record_api_call failed", exc_info=True)
                 return result
             except FeishuAPIError as e:
                 last_error = e
@@ -298,7 +298,7 @@ class FeishuClient:
                 from ..aowen import record_api_error
                 record_api_error(code, operation)
             except Exception:
-                pass
+                _logger.debug("metrics: record_api_error failed", exc_info=True)
             raise FeishuAPIError(
                 _sanitize_message(f"{operation}: code={code}, msg={msg}"),
                 code,
@@ -632,16 +632,23 @@ class FeishuClient:
         if data is None:
             return None
 
-        file = io.BytesIO(data)
-        request = (
-            CreateImageRequest.builder()
-            .request_body(CreateImageRequestBody.builder().image_type("message").image(file).build())
-            .build()
-        )
-        resp = await self._client.im.v1.image.acreate(request)
-        if resp.success() and resp.data and resp.data.image_key:
-            return str(resp.data.image_key)
-        return None
+        # v1.3.2 fix (P1-03): wrap the upload call in try/except to match
+        # upload_local_image's error handling. Without this, a network error
+        # or auth failure during upload would propagate uncaught.
+        try:
+            file = io.BytesIO(data)
+            request = (
+                CreateImageRequest.builder()
+                .request_body(CreateImageRequestBody.builder().image_type("message").image(file).build())
+                .build()
+            )
+            resp = await self._client.im.v1.image.acreate(request)
+            if resp.success() and resp.data and resp.data.image_key:
+                return str(resp.data.image_key)
+            return None
+        except Exception:
+            _logger.debug("image upload (API call) failed for %s", image_url, exc_info=True)
+            return None
 
     async def upload_local_image(self, image_path: str) -> str | None:
         """Upload a local image file to Feishu and return the img_key.

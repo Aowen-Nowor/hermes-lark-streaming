@@ -37,6 +37,9 @@ from ..state.tooluse import ToolUseTracker
 _logger = logging.getLogger("hermes_lark_streaming")
 
 
+# v1.3.2: module-level constant (was previously re-defined on every on_interrupted call)
+_INTERRUPT_MAP_MAX = 200
+
 from ..state.session import CardSession  # noqa: F401 — re-exported for backward compatibility
 
 
@@ -62,6 +65,9 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         self._init_lock = asyncio.Lock()
         self._session_ttl = self._cfg.card_duration_sec
         self._loop: asyncio.AbstractEventLoop | None = None
+        # v1.3.2 fix: hold strong references to fire-and-forget tasks to prevent
+        # GC from collecting them mid-execution (asyncio only holds weak refs).
+        self._pending_tasks: set[asyncio.Task] = set()
 
     # ── v1.3.0 P1-01: thread-safe _sessions access helpers ──
     # All external and internal access to self._sessions should go through
@@ -169,13 +175,25 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         return session
 
     def _fire_and_forget(self, coro: Coroutine[Any, Any, Any], loop: asyncio.AbstractEventLoop) -> None:
+        """Schedule a coroutine for background execution without awaiting.
+
+        v1.3.2 fix: hold strong reference to the created Task to prevent GC
+        from collecting it mid-execution. Also close the coroutine if
+        scheduling fails to avoid 'coroutine was never awaited' warnings.
+        """
         try:
-            loop.create_task(coro)
+            task = loop.create_task(coro)
+            # Hold strong reference until task completes
+            self._pending_tasks.add(task)
+            task.add_done_callback(self._pending_tasks.discard)
         except RuntimeError:
+            # Loop might be closed — try run_coroutine_threadsafe as fallback
             try:
                 fut = asyncio.run_coroutine_threadsafe(coro, loop)
                 fut.add_done_callback(self._on_bg_task_done)
             except Exception:
+                # v1.3.2 fix: close the coroutine to avoid 'never awaited' warning
+                coro.close()
                 _logger.debug("fire_and_forget failed", exc_info=True)
 
     def on_message_started(
@@ -251,7 +269,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             record_card_created()
             set_active_sessions(self._sess_active_count())
         except Exception:
-            pass
+            _logger.debug('metrics: record_card_created failed', exc_info=True)
 
         # v1.1.0 (Task 1.1+1.2): The non-linear _do_create_card path was
         # removed — linear is the only creation path now. When CardKit v2
@@ -424,7 +442,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             from ..aowen import record_card_aborted
             record_card_aborted()
         except Exception:
-            pass
+            _logger.debug('metrics: record_card_aborted failed', exc_info=True)
 
         self._complete_session(session)
 
@@ -486,6 +504,17 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                                     "on_interrupted: flush wait timed out, proceeding with abort: msg=%s",
                                     old_message_id[:12],
                                 )
+                            # v1.3.2 fix (B3-01): re-check COMPLETING after the
+                            # await — the session may have transitioned to COMPLETING
+                            # during the wait. If so, skip the abort and let
+                            # _do_linear_complete finish naturally (same logic as
+                            # the synchronous path above).
+                            if old_session.state == COMPLETING:
+                                _logger.info(
+                                    "on_interrupted: skip abort for msg=%s (session transitioned to COMPLETING during flush wait)",
+                                    old_message_id[:12],
+                                )
+                                return
                             old_session.state = ABORTED
                             old_session.flush.mark_completed()
                             _logger.info(
@@ -538,8 +567,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             for key, val in list(self._interrupt_map.items()):
                 if val == old_message_id:
                     self._interrupt_map[key] = new_message_id
-            # Prevent unbounded growth: keep only the most recent 200 entries
-            _INTERRUPT_MAP_MAX = 200
+            # Prevent unbounded growth: keep only the most recent entries
             if len(self._interrupt_map) > _INTERRUPT_MAP_MAX:
                 # Remove oldest entries (first inserted)
                 excess = len(self._interrupt_map) - _INTERRUPT_MAP_MAX

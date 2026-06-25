@@ -1,3 +1,37 @@
+## v1.3.2 (2026-06-25)
+
+全面代码审计修复版 — 3-5 轮审计共发现 35 个问题（0 P0, 5 P1, 15 P2, 15 P3），本次修复全部 P1/P2 和主要 P3 问题。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🔧 Fix (P1) | 配置文件读取未捕获 OSError/UnicodeDecodeError | `config/reader.py` 的 `_load()` 和 `_reload_cached()` 只捕获 `yaml.YAMLError`，权限不足/磁盘错误/编码问题会导致未捕获异常 | 两处文件读取增加 `except (OSError, UnicodeDecodeError)` 分支，返回空配置并 warning 日志 |
+| 🔧 Fix (P1) | `_to_float` 允许 nan/inf 值通过 | `float('nan')`/`float('inf')` 是合法 Python float，不触发 ValueError。下游 `max()`/`min()` 比较因 NaN 传播失效，节流逻辑永远不触发或永远立即触发 | `_to_float` 增加 `math.isnan()`/`math.isinf()` 检查，nan/inf 值返回 default 并 warning |
+| 🔧 Fix (P1) | `_to_int` 的 float 路径未捕获 OverflowError/ValueError | `int(float('inf'))` 抛 OverflowError，`int(float('nan'))` 抛 ValueError，均未捕获 | `_to_int` 的 float 分支增加 try/except (OverflowError, ValueError) |
+| 🔧 Fix (P1) | `__init__.py` 模块 docstring 与代码矛盾 | docstring 声称"默认 flush 间隔 100ms"和"主动 TTL 延长"，二者分别已在 v1.3.1 恢复为 200ms 和删除 | 更新 docstring：100ms→200ms，"Proactive TTL extension"→"300309 stream-closed fallback" |
+| 🔧 Fix (P1) | `docs/SKILL.md` 引用已删除的 `on_reload()` 回调 | v1.3.0 删除了 `on_reload()` 回调（死代码），但 SKILL.md 4.13 节仍写"`on_reload` 回调注册" | 移除"`on_reload` 回调注册"描述 |
+| 🐛 Bug Fix (P2) | `_wait_and_abort` 异步路径绕过 COMPLETING 短路 | `on_interrupted` 的同步路径检查 `state == COMPLETING` 跳过 abort，但异步 `_wait_and_abort` 在 await 后直接设 `state = ABORTED` 未重新检查，竞态导致完成流程被中断 | `_wait_and_abort` 在 await 后增加 COMPLETING 重新检查，与同步路径一致 |
+| 🐛 Bug Fix (P2) | `/stop` 响应检测使用脆弱子串匹配 | `any(kw in content for kw in ("已停止", "stopped", "Stopped"))` 会误匹配 AI 回答中的"已停止"等词，错误 abort 活跃卡片 | 改为三重条件：内容 <50 字符 + 以 ⚡ 开头 + 包含关键词，避免误触发 |
+| 🐛 Bug Fix (P2) | `_fire_and_forget` 未持有 Task 引用 + 协程泄漏 | `loop.create_task(coro)` 返回的 Task 未保存强引用，GC 可能在完成前回收。fallback 失败时协程未 close，产生 "coroutine was never awaited" 警告 | 新增 `_pending_tasks` 集合持有强引用，task 完成后自动移除。fallback 失败时 `coro.close()` |
+| 🐛 Bug Fix (P2) | `aowen/__init__.py` 使用废弃 `asyncio.get_event_loop()` | Python 3.14 将移除 `get_event_loop()` 的隐式创建行为，届时会抛 RuntimeError | 改为 `asyncio.get_running_loop()`，显式获取运行中的事件循环 |
+| 🐛 Bug Fix (P2) | `aowen` 命令 `loop.create_task` 未持有 Task 引用 | 与 `_fire_and_forget` 相同的 GC 回收风险 | 新增 `_aowen_pending_tasks` 集合持有强引用 |
+| 🔧 Fix (P2) | 多处 `asyncio.get_event_loop()` 废弃 API | `plugin/__init__.py:253`、`controller/linear_mixin.py:271` 使用废弃 API | 改为 `asyncio.get_running_loop()`（在 async 上下文中安全） |
+| 🔧 Fix (P2) | `docs/SKILL.md` 引用已删除的 TTL 延长功能 | v1.3.1 删除了 `cardkit_extend_ttl`，但 SKILL.md 仍写"TTL 延长" | 更新为"300309 fallback"描述 |
+| 🔧 Fix (P2) | `docs/AGENT_GUIDE.md` 手动更新指令用错分支名 | 写 `git pull origin master`，但主仓库使用 `DEV` 分支 | 改为 `git pull origin DEV` |
+| 🔧 Fix (P3) | `_stream_consumed_len` 字典无清理，持续增长 | interrupt-reuse 场景下每个新 eid 追加到字典永不清理，长时间运行内存泄漏 | thinking_wrapper 检测到消息完成时调用 `_cleanup_consumed_len(_eid)` 清理 |
+| 🔧 Fix (P3) | aowen 指标记录 `except Exception: pass` 静默吞异常 | 7 处指标记录调用完全静默，指标系统故障不可见 | 改为 `except Exception: _logger.debug(...)` 记录异常 |
+| 🔧 Fix (P3) | `_INTERRUPT_MAP_MAX` 定义在函数体内 | 每次调用 `on_interrupted` 都重新创建局部变量 | 提升为模块级常量 |
+| 🔧 Fix (P3) | `upload_image` API 调用缺少 try/except | 与 `upload_local_image` 不一致，网络/认证错误会传播未捕获 | 增加 try/except 包裹上传调用，返回 None 并 debug 日志 |
+| 🔧 Fix (P3) | `_schedule_confirm_card` 冗余 `import asyncio` | asyncio 已在模块级导入，函数内重复导入 | 移除冗余 import |
+| 🔧 Fix (P3) | `_hls_bg_sending`/`_hls_cron_sending` 默认值不对称 | 递增时 default=0，递减时 default=1，语义不一致 | 统一为 default=0 |
+| 📝 Docs | `docs/CHANGELOG.md` 附录 F3 引用已废弃 TTL 延长 | F3 "主动 TTL 延长" 作为经验教训，但功能已删除 | 标注删除线 + v1.3.1 移除说明 |
+| 📝 Docs | `docs/CHANGELOG.md` F1 默认刷新间隔仍写 100ms | v1.3.1 已恢复 200ms | 更新为 200ms |
+| 📝 Docs | `docs/ISSUES_TEMPLATE.md` 引用已废弃 TTL 主动延长 | Debug Tips 表格写"卡片 TTL + 主动延长" | 更新为"300309 fallback" |
+| 📝 Docs | `docs/ISSUES_TEMPLATE.md` 未引导用户使用 /aowen 自查 | 用户提交 issue 前无自助排查手段 | 新增"/aowen 命令自查"章节，引导用户先发 /aowen status/monitor |
+
+**审计方法**: 3-5 轮全面审计，涵盖代码健壮性、性能、Bug、用户体验、文档对齐五个维度。所有发现均有文件:行号证据，不基于经验猜测。飞书 CardKit v2.0 相关优化已对照官方文档验证。
+
+---
+
 ## v1.3.1 (2026-06-24)
 
 | 类型 | 问题/功能 | 原因 | 修复/说明 |
@@ -140,7 +174,7 @@
 | 🐛 Bug Fix (P0-3) | 部分配置属性 mtime 热更新失效 | `_check_mtime_and_invalidate()` 只在 `enabled` 属性中调用，其他属性（`linear`/`flush_interval_ms`/`max_tool_steps` 等）走 `_plugin_sec()` 不检测 mtime，改完配置文件后这些属性最多延迟 60s（TTL）才生效 | 将 mtime 检测从 `enabled` 属性移到 `_plugin_sec()`，所有走该方法的属性都检测文件变化 |
 
 > **勘误（v1.2.0 补）**：上述 mtime 自动检测机制已在 **v1.1.0 内部**（提交 `0d468cd`，2026-06-18）被**有意移除**——删除了 `_check_mtime_and_invalidate()` 方法和 `_config_mtime` 字段，`_plugin_sec()` 不再调 `stat()`。原因：流式输出期间高频读配置，每次 stat 系统调用开销不可接受。配置刷新方式改为：`/aowen config reload` 立即生效，或重启网关。仅 `inject_time`/`show_reasoning`/`gateway_cards` 三个属性走 60s TTL 缓存（`_reload_cached()`）。**此为有意设计，非 bug**，v1.2.0 不补回 mtime 检测。
-| ✨ Feature (P0-3) | `/aowen config reload` 命令 | 改完 config.yaml 后必须等最多 60 秒 mtime 检测才生效，调试不便 | `aowen/__init__.py` 新增 `/aowen config reload` 命令，立即清缓存并触发 `on_reload` 回调，配置秒级生效 |
+| ✨ Feature (P0-3) | `/aowen config reload` 命令 | 改完 config.yaml 后必须等最多 60 秒 mtime 检测才生效，调试不便 | `aowen/__init__.py` 新增 `/aowen config reload` 命令，立即清缓存，配置秒级生效。（注：v1.3.0 移除了 `on_reload` 回调——该回调从未被任何模块调用，属死代码） |
 | 🐛 Bug Fix (P0-4) | pyproject.toml packages 列表遗漏 5 个子包 | `[tool.setuptools.packages.find].include` 只列了 controller/cardkit/patching/state，缺 feishu/config/monitor/plugin/flush，pip install 时这 5 个子包不会被打包，运行时 ImportError | packages 列表补全 9 个子包（含 `feishu*`/`config*`/`aowen*`/`plugin*`/`flush*`） |
 | 🐛 Bug Fix (P0-5) | `unregister()` 未清理活跃会话 | `plugin/__init__.py` `unregister()` 只清理 config，未清空 `ctrl._sessions`，卸载/重装后旧会话残留导致内存泄漏与潜在竞态 | `unregister()` 新增 `ctrl._sessions.clear()` 清空活跃会话 |
 | 🏗️ Architecture (P0-6) | 删除 `cardkit/theme.py` | v1.1.0 引入的主题系统实际未被任何业务代码引用，颜色/图标仍硬编码在 `elements.py` 中，主题配置项无效 | 删除 `cardkit/theme.py` + `cardkit/__init__.py` 中的 `from .theme import *`；README/AGENT_GUIDE/SKILL 同步移除 `theme.*` 配置项说明 |
@@ -286,9 +320,9 @@
 
 | # | 陷阱 | 教训 |
 |---|------|------|
-| F1 | 性能参数应可配置 | 性能敏感参数不应硬编码。默认 100ms 刷新间隔（可配置 70~2000ms，最低 70ms 对齐飞书官方 `print_frequency_ms`） |
+| F1 | 性能参数应可配置 | 性能敏感参数不应硬编码。默认 200ms 刷新间隔（v1.3.1 恢复，可配置 70~2000ms，最低 70ms 对齐飞书官方 `print_frequency_ms`） |
 | F2 | 流式参数不低于官方推荐值 | `print_frequency_ms` 官方默认 70ms，`print_step` 官方默认 1，不可低于此值 |
-| F3 | 主动 TTL 延长 | 卡片生存时间接近 540s 时自动延长 600s，防止 300309 流式关闭 |
+| F3 | ~~主动 TTL 延长~~ (v1.3.1 已移除) | 原设计：卡片生存时间接近 540s 时自动延长 600s。**v1.3.1 真飞书 API 实测发现 `streaming_config.ttl_seconds` 参数返回 300122 "unknown property"，飞书 CardKit v2.0 settings API 不支持 TTL 延长参数**。功能已删除，改为 300309 fallback（`_fallback_write_answer`）处理长对话流式关闭 |
 | F4 | 延迟 Markdown 优化 | 流式期间发送原始文本，仅在封卡时执行完整 Markdown 优化 |
 | F5 | 卡片未就绪时的延迟 flush | `card_message_ready=False` 时标记 `_pending_flush`，卡片创建完成后立即执行 |
 

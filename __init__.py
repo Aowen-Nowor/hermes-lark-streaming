@@ -111,8 +111,8 @@ This eliminates:
 Performance improvements:
   - Phase 1 placeholder card has only 2 elements (loading hint + icon)
   - Client pre-warming eliminates first-message latency
-  - Default flush interval 100ms (configurable 70~2000ms)
-  - Proactive TTL extension prevents 300309 stream closure
+  - Default flush interval 200ms (configurable 70~2000ms)
+  - 300309 stream-closed fallback ensures content delivery on long conversations
   - Element existence tracking eliminates 300314 seal failures
 """
 

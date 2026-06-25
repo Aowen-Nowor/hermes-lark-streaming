@@ -47,6 +47,9 @@ _logger = logging.getLogger("hermes_lark_streaming")
 
 _metrics_lock = threading.Lock()
 
+# v1.3.2 fix (B3-03): hold strong references to fire-and-forget tasks
+_aowen_pending_tasks: set = set()
+
 _metrics: dict[str, Any] = {
     "cards_created": 0,
     "cards_completed": 0,
@@ -871,10 +874,14 @@ def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
         _logger.warning("HLS: /aowen %s but controller not enabled", cmd_name)
         return
 
+    # v1.3.2 fix (B3-02): use get_running_loop() instead of the deprecated
+    # get_event_loop(). In Python 3.14, get_event_loop() will raise
+    # RuntimeError when no loop is running, making the old code rely on
+    # the except clause — get_running_loop() is the correct, explicit API.
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        _logger.warning("HLS: /aowen %s but no event loop", cmd_name)
+        _logger.warning("HLS: /aowen %s but no running event loop", cmd_name)
         return
 
     if not loop.is_running():
@@ -893,7 +900,11 @@ def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
         except Exception:
             _logger.error("HLS: failed to send %s card", cmd_name, exc_info=True)
 
-    loop.create_task(_init_and_send())
+    # v1.3.2 fix (B3-03): hold strong reference to the task to prevent GC
+    # from collecting it mid-execution.
+    task = loop.create_task(_init_and_send())
+    _aowen_pending_tasks.add(task)
+    task.add_done_callback(_aowen_pending_tasks.discard)
 
 
 def _skip(reason: str) -> dict:

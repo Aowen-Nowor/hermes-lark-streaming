@@ -268,7 +268,10 @@ class UnifiedControllerMixin:
                 if not session._first_flush_done:
                     # First content → immediate flush (首字即显)
                     session._first_flush_done = True
-                    asyncio.get_event_loop().create_task(
+                    # v1.3.2 fix (P2-05): use get_running_loop() instead of
+                    # the deprecated get_event_loop(). We're inside an async
+                    # method so a running loop always exists here.
+                    asyncio.get_running_loop().create_task(
                         session.flush.flush_now(lambda: self._do_unified_flush(session))
                     )
                 else:
@@ -1835,7 +1838,7 @@ class UnifiedControllerMixin:
                         from ..aowen import record_full_rebuild
                         record_full_rebuild()
                     except Exception:
-                        pass
+                        _logger.debug('metrics: record_full_rebuild failed', exc_info=True)
             except Exception:
                 _logger.warning(
                     "full rebuild also failed: card=%s",
@@ -1857,7 +1860,7 @@ class UnifiedControllerMixin:
                 from ..aowen import record_card_completed
                 record_card_completed()
             except Exception:
-                pass
+                _logger.debug('metrics: record_card_completed failed', exc_info=True)
         else:
             session.state = CREATION_FAILED
             session.enter_terminal(
@@ -1874,7 +1877,7 @@ class UnifiedControllerMixin:
                 from ..aowen import record_card_failed
                 record_card_failed()
             except Exception:
-                pass
+                _logger.debug('metrics: record_card_failed failed', exc_info=True)
 
         return seal_ok
 

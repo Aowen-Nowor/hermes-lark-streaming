@@ -754,7 +754,9 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
         finally:
             if original_send and adapter:
                 adapter.send = original_send
-                adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 1) - 1
+                # v1.3.2 fix (B3-06): default to 0 (not 1) for consistency —
+                # a counter should never default to 1 when decrementing.
+                adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 0) - 1
 
         # ── Fire COMPLETE hook ──
         ctx = _msg_ctx.get()
@@ -939,7 +941,8 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
             return orig(job, content, adapters=adapters, loop=loop, **kwargs)
         finally:
             feishu_adapter.send = original_send
-            feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 1) - 1
+            # v1.3.2 fix (B3-06): default to 0 (not 1) for consistency.
+            feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 0) - 1
 
     return wrapper
 
