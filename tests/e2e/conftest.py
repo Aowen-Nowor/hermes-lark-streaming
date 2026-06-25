@@ -8,6 +8,10 @@ v1.1.1: chat_id 和 open_id 都必填（分别测群聊和私聊场景）。
 v1.1.1: 真飞书模式下测试间加 1 秒延迟，避免触发飞书 API 频率限制
         （CardKit 流式模式豁免 QPS，但 create/send/close 计入 1000/分 & 50/秒）。
 
+v1.3.6: runner fixture 改为 module 级——同一测试文件的所有测试方法共享
+        1 个 runner（1 条 anchor 消息），减少真飞书模式群聊消息数 ~85%。
+        每个测试方法通过 autouse fixture 清理 controller sessions 保证隔离。
+
 Test code is identical in both modes — only the underlying client differs.
 """
 
@@ -34,24 +38,46 @@ def _has_real_feishu_creds() -> bool:
     )
 
 
-# ── Single fixture — auto mock/real ──
+# ── Module-level runner — 1 anchor per file, not per test ──
 
-@pytest.fixture
-async def runner():
-    """E2E test runner.
+@pytest.fixture(scope="module")
+async def _module_runner():
+    """v1.3.6: module 级 runner——同一文件所有测试共享 1 个 runner（1 条 anchor）。
 
-    Automatically selects mode:
-    - Real Feishu API if FEISHU_E2E_* env vars are set
-    - Mock server otherwise
-
-    Tests use this fixture the same way regardless of mode.
+    真飞书模式下每个 anchor 是一条群聊文本消息，改为 module 级后：
+    - test_e2e_full.py: 12 anchor → 1 anchor
+    - test_e2e_clarify.py: 5 anchor → 1 anchor
+    - test_e2e_header.py: 4 anchor → 1 anchor
+    总共从 ~21 条群聊消息减少到 3 条。
     """
     r = E2ETestRunner()
     await r.setup()
-    if r.is_real_mode:
-        pytest.mark.real_feishu  # noqa: B018 — marker for reporting
     yield r
     await r.teardown()
+
+
+@pytest.fixture
+async def runner(_module_runner):
+    """每个测试方法拿到 module 级 runner，但先清理 controller sessions 保证隔离。
+
+    v1.3.6: 清理前一个测试残留的 session，避免 concurrency seal 误触发。
+    mock_server 也 reset（mock 模式清理调用记录）。
+    重置配置（如 header_enabled）避免前一个测试的配置残留。
+    """
+    # 清理前一个测试的残留状态
+    try:
+        _module_runner.controller._sess_clear()
+    except Exception:
+        pass
+    _module_runner.mock_server.reset()
+    _module_runner._sessions.clear()
+    _module_runner._real_card_states.clear()
+    # 重置配置到默认值（避免 enable_header 等残留）
+    try:
+        _module_runner.controller._cfg.header_enabled = False
+    except Exception:
+        pass
+    yield _module_runner
 
 
 @pytest.fixture(autouse=True)

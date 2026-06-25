@@ -1,3 +1,17 @@
+## v1.3.7 (2026-06-25)
+
+E2E 测试优化 — 真飞书模式群聊消息数减少 ~85%。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🔧 Improvement | E2E 真飞书模式群聊测试消息过多（每次跑完群聊收到 ~21 条 anchor 文本 + ~21 张卡片） | `runner` fixture 是函数级，每个测试方法都重新 setup 发一条 anchor 消息。3 个测试文件共 21 个测试方法 = 21 条 anchor 消息 | `runner` fixture 改为 module 级（`_module_runner`），同一测试文件的所有方法共享 1 个 runner（1 条 anchor）。函数级 `runner` fixture 从 `_module_runner` 拿实例，每个测试方法前清理 controller sessions + 重置配置保证隔离 (`tests/e2e/conftest.py`) |
+| 🐛 Bug Fix | module 级 runner 共享导致 `test_header_disabled_no_header` 失败（前一个测试 `enable_header()` 的配置残留） | `Config` 是单例，module 级 runner 的 `header_enabled=True` 残留到下一个测试 | 函数级 `runner` fixture 每次重置 `header_enabled=False` 到默认值 |
+| 📊 统计 | 群聊 anchor 消息：21 条 → 3 条（减 85%）；群聊总消息（anchor+卡片）：~42 条 → ~24 条 | test_e2e_full.py 12→1, test_e2e_clarify.py 5→1, test_e2e_header.py 4→1 | 私聊测试不受影响（本来就是 3 条） |
+
+**审计方法**: 统计 E2E 测试在真飞书模式下的群聊消息数，定位到 `runner` fixture 函数级 setup 是消息重复的根因。改为 module 级后用 mock 模式（24 passed）+ 真飞书模式（header + session 7 passed）验证无回归。配置残留问题由 mock 模式 `test_header_disabled_no_header` 失败发现并修复。
+
+---
+
 ## v1.3.6 (2026-06-25)
 
 紧急修复 v1.3.5 遗留的两个生产问题 — GitHub Actions 真飞书 E2E 测试竞态 + /aowen 命令无法识别。
