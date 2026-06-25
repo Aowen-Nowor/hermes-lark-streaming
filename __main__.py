@@ -185,6 +185,26 @@ def main() -> int:
 
     cmd = args[0]
 
+    # v1.3.1 fix: doctor/status/verify need Hermes Python (for lark_oapi + .env)
+    # If running with a different Python, auto-restart with Hermes Python.
+    if cmd in ("doctor", "status", "verify"):
+        hermes_python = _find_hermes_python()
+        if hermes_python:
+            try:
+                doctor_py = Path(sys.executable).resolve()
+                hermes_py = Path(hermes_python).resolve()
+                if doctor_py != hermes_py:
+                    # Re-run ourselves with Hermes Python
+                    import subprocess
+                    print(f"Switching to Hermes Python: {hermes_python}", file=sys.stderr)
+                    result = subprocess.run(
+                        [hermes_python, __file__] + args,
+                        timeout=60,
+                    )
+                    return result.returncode
+            except Exception:
+                pass  # Fall through to run with current Python
+
     if cmd == "status":
         return _cmd_status()
     if cmd == "verify":
