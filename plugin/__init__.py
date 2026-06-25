@@ -244,21 +244,21 @@ def register(ctx: "PluginContext") -> None:
     # Initialize the Feishu API client at plugin registration time instead of
     # lazily on the first message.  This eliminates ~50-100ms latency on the
     # first card creation, improving the time-to-first-paint for users.
+    # v1.3.6 fix (issue: aowen-unrecognized-bug): 原实现在 except RuntimeError
+    # 块里有 return，导致后续 /aowen hook 注册代码从不执行。改为只跳过预热，
+    # 不 return——hook 注册必须总能到达。
     try:
         from ..controller import get_controller
         import asyncio
 
         ctrl = get_controller()
         if ctrl.enabled:
-            # v1.3.2 fix (P2-05): use get_running_loop() instead of the
-            # deprecated get_event_loop(). register() is called from the
-            # Hermes gateway which has a running event loop.
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 _logger.debug("hermes-lark-streaming v%s: no running event loop, skipping pre-warm", __version__)
-                return
-            if loop.is_running():
+                loop = None
+            if loop is not None and loop.is_running():
                 loop.create_task(ctrl._ensure_init())
                 _logger.info("hermes-lark-streaming v%s: FeishuClient pre-warm scheduled", __version__)
             else:
