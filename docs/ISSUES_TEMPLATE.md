@@ -162,4 +162,25 @@ grep 'HLS:' ~/.hermes/logs/agent.log | tail -100
 
 ---
 
+## Feishu log_id — 飞书请求链路排查
+
+> **v1.3.4+ 新增**：插件日志中的 `FeishuAPIError` 会携带 `[log_id=...]` 字段。
+
+飞书开放平台为每个 API 请求分配唯一的 `log_id`（如 `202407211618216F3E9EB64DC7E1234`）。当卡片出现 API 报错（如 300313、300317、300305、300309）时，插件日志会自动记录对应的 `log_id`：
+
+```
+HLS: unified flush phase 2 batch_update failed: cardkit_batch_update: code=300317, msg=... [log_id=202606251519045A9BCC41DB3540A997BA]
+```
+
+**如何使用 log_id**：
+1. 在插件日志（`~/.hermes/logs/agent.log`）中搜索报错行，找到 `[log_id=...]`
+2. 提交 Issue 时附上 `log_id`——维护者可凭此去飞书开放平台后台查具体请求链路，精确定位是插件构造的卡片 JSON 有问题，还是飞书服务端的问题
+
+```bash
+# 提取所有 log_id
+grep -oP '\[log_id=\K[A-Z0-9]+' ~/.hermes/logs/agent.log | sort -u
+```
+
+---
+
 *感谢你的耐心填写！完整的信息能大幅缩短问题定位时间。*

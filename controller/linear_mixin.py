@@ -62,6 +62,7 @@ from ..feishu import (
     FeishuAPIError,
     is_element_not_found_error,
     is_schema_error,
+    is_terminal_api_code,
 )
 from ..flush import PATCH_MS
 
@@ -234,8 +235,8 @@ class UnifiedControllerMixin:
                 }
                 session._creation_stages.discard("panel")  # Panel NOT in initial card
 
-            except FeishuAPIError:
-                _logger.info("linear CardKit create failed, falling back to IM card")
+            except FeishuAPIError as e:
+                _logger.info("linear CardKit create failed, falling back to IM card: %s", e)
                 card = build_im_fallback_card(header_enabled=self._cfg.header_enabled)
                 card_msg_id = await self._client.reply_card(reply_to, card)
                 session.card_msg_id = card_msg_id
@@ -268,11 +269,11 @@ class UnifiedControllerMixin:
                 if not session._first_flush_done:
                     # First content → immediate flush (首字即显)
                     session._first_flush_done = True
-                    # v1.3.2 fix (P2-05): use get_running_loop() instead of
-                    # the deprecated get_event_loop(). We're inside an async
-                    # method so a running loop always exists here.
-                    asyncio.get_running_loop().create_task(
-                        session.flush.flush_now(lambda: self._do_unified_flush(session))
+                    # v1.3.4 fix (P2): 持有 Task 强引用防止 GC 回收
+                    # （与 core.py _fire_and_forget 同模式）
+                    self._fire_and_forget(
+                        session.flush.flush_now(lambda: self._do_unified_flush(session)),
+                        asyncio.get_running_loop(),
                     )
                 else:
                     # Subsequent content → throttled flush
@@ -289,8 +290,15 @@ class UnifiedControllerMixin:
                 session.linear,
                 (session.card_id or "")[:12],
             )
-        except Exception:
+        except Exception as e:
             _logger.exception("_do_create_linear_card failed")
+            # v1.3.4 fix (P1): 消息被删/撤回时触发 UnavailableGuard，避免后续
+            # 对已删除消息的无效 API 调用。原实现 guard 从未被调用（死代码）。
+            if isinstance(e, FeishuAPIError) and is_terminal_api_code(e.code):
+                try:
+                    session.guard.terminate("_do_create_linear_card", err=e)
+                except Exception:
+                    _logger.debug("guard.terminate failed in create path", exc_info=True)
             session.state = CREATION_FAILED
             session.enter_terminal(
                 reason=TerminalReason.CREATION_FAILED,
@@ -349,8 +357,10 @@ class UnifiedControllerMixin:
             except RuntimeError:
                 loop = session._loop
             if loop is not None and not loop.is_closed():
-                loop.create_task(
-                    session.flush.flush_now(lambda: self._do_unified_flush(session))
+                # v1.3.4 fix (P2): 持有 Task 强引用防止 GC 回收
+                self._fire_and_forget(
+                    session.flush.flush_now(lambda: self._do_unified_flush(session)),
+                    loop,
                 )
             return
 
@@ -1505,8 +1515,17 @@ class UnifiedControllerMixin:
                                 retry + 1, card_id[:12],
                             )
                             continue
+                        # v1.3.4 fix (P1): retry 路径 300309 应与主路径一致 return False
+                        # 走全量重建，而非 raise（raise 虽被外层 except Exception 兜底，
+                        # 但语义不一致且依赖外层兜底，显式 return False 更清晰）。
                         if retry_e.code == CARDKIT_STREAMING_CLOSED:
                             session._streaming_closed = True
+                            _logger.debug(
+                                "preservative seal: retry hit streaming closed, "
+                                "falling back to full rebuild card=%s",
+                                card_id[:12],
+                            )
+                            return False
                         raise
                 # All retries exhausted
                 _logger.warning(

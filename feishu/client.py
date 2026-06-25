@@ -68,11 +68,23 @@ def _sanitize_message(msg: str) -> str:
 
 
 class FeishuAPIError(RuntimeError):
-    """飞书 API 错误，携带 API 错误码."""
+    """飞书 API 错误，携带 API 错误码和 log_id.
 
-    def __init__(self, message: str, code: int = 0) -> None:
+    log_id 可用于飞书开放平台后台排查具体请求链路。
+    获取方式：调用方从 SDK 响应的 ``resp.get_log_id()`` 提取。
+    """
+
+    def __init__(self, message: str, code: int = 0, log_id: str = "") -> None:
         super().__init__(message)
         self.code = code
+        # v1.3.4: 飞书 log_id，用于开放平台后台排查请求链路
+        self.log_id = log_id
+
+    def __str__(self) -> str:
+        base = super().__str__()
+        if self.log_id:
+            return f"{base} [log_id={self.log_id}]"
+        return base
 
     def extract_sub_code(self) -> int | None:
         """从 msg 字符串中提取子错误码.
@@ -343,10 +355,29 @@ class FeishuClient:
 
     @staticmethod
     def _check(response: Any, operation: str) -> None:
-        """检查 SDK 响应，失败时抛出 FeishuAPIError."""
+        """检查 SDK 响应，失败时抛出 FeishuAPIError（携带 log_id）."""
         if not response.success():
             code = response.code or 0
             msg = response.msg or ""
+            # v1.3.4: 提取飞书 log_id，用于开放平台后台排查请求链路。
+            # 注意：lark_oapi SDK async 路径（acreate 等）的 get_log_id()
+            # 返回 None（SDK bug），需从 response.error dict 兜底提取。
+            log_id = ""
+            try:
+                log_id = response.get_log_id() or ""
+            except Exception:
+                pass
+            if not log_id:
+                # SDK async 路径 bug 兜底：error 是 dict，含 log_id 字段
+                err = getattr(response, 'error', None)
+                if isinstance(err, dict):
+                    log_id = err.get("log_id", "") or ""
+                elif isinstance(err, str):
+                    # error 可能是 JSON 字符串或含 log_id 的文本
+                    import re as _re
+                    m = _re.search(r'log_id["\']?\s*[:=]\s*["\']?([A-Za-z0-9]{20,})', err)
+                    if m:
+                        log_id = m.group(1)
             # v1.1.0: Record API error metrics
             try:
                 from ..aowen import record_api_error
@@ -356,6 +387,7 @@ class FeishuClient:
             raise FeishuAPIError(
                 _sanitize_message(f"{operation}: code={code}, msg={msg}"),
                 code,
+                log_id=log_id,
             )
 
     @staticmethod

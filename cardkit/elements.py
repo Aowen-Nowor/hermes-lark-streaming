@@ -994,6 +994,24 @@ def build_preservative_seal_actions(
             },
         })
 
+    # ── Background review panel (if any) ──
+    # v1.3.4 fix (P1): bg_review_messages 之前只在 build_unified_complete_card
+    # （全量重建路径）渲染，preservative seal 路径遗漏。默认配置（header_enabled=False）
+    # 走 preservative seal，导致 background review 功能完全失效。
+    bg_review_messages = footer_data.get("bg_review_messages") if footer_data else None
+    if bg_review_messages:
+        actions.append({
+            "action": "add_elements",
+            "params": {
+                "type": "insert_before",
+                "target_element_id": _LOADING_ELEMENT_ID,
+                "elements": [_build_background_review_panel(
+                    bg_review_messages,
+                    expanded=True,
+                )],
+            },
+        })
+
     # ── Partial indicator or footer ──
     if partial:
         en_text, zh_text = _T["partial_continues"]
