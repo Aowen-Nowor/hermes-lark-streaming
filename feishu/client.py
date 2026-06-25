@@ -97,11 +97,21 @@ class FeishuAPIError(RuntimeError):
 CARDKIT_CONTENT_FAILED = 230099  # 卡片内容创建失败（通用码，需检查子错误）
 CARDKIT_ELEMENT_LIMIT = 11310  # 子码: 卡片元素数量超限
 CARDKIT_ELEMENT_LIMIT_DIRECT = 300305  # 直报码: 卡片元素数量超限（cardkit_update 返回此码）
-CARDKIT_SCHEMA_ERROR = 300315  # 卡片 Schema 非法属性 (unknown property)
+CARDKIT_SCHEMA_ERROR = 300315  # 卡片 Schema 非法属性 (unknown property) OR element not found for insert_before
 CARDKIT_STREAMING_CLOSED = 300309  # 卡片流式模式已关闭
 CARDKIT_SEQUENCE_CONFLICT = 300317  # sequence 冲突
 CARDKIT_ELEMENT_NOT_FOUND = 300313  # 元素不存在（add_elements 后服务端尚未持久化时的竞态）
+CARDKIT_ELEMENT_NOT_FOUND_ALT = 300314  # delete_elements 不存在的元素
 MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
+
+# v1.3.1 fix: 300315 错误码有两种含义：
+# 1. 真正的 Schema Error (unknown property) — msg 含 "unknown property" 或 "invalid"
+# 2. Element Not Found for insert_before — msg 含 "not find elementID"
+# 飞书 API 对 insert_before 引用不存在的元素返回 300315 而非 300313，
+# 导致 is_schema_error 误判，把 element not found 当 schema error 处理，
+# 清除脏数据放弃重试，内容丢失。
+# 修复：is_schema_error 增加文本检查，排除 "not find elementID" 的情况。
+_RE_ELEMENT_NOT_FOUND = re.compile(r"not find elementID", re.IGNORECASE)
 
 # ── CardKit 瞬态错误码 — 可自动重试 ──
 # 参考 Cheerwhy / openclaw-lark: 这三个错误码是飞书 CardKit 的瞬态错误，
@@ -145,23 +155,42 @@ def is_schema_error(e: "FeishuAPIError") -> bool:
     飞书 API 返回 code=300315 表示卡片 JSON 包含不支持属性，
     例如在 ``plain_text`` 标签上放置 ``icon`` 属性。
     这类错误是永久性的——重试不会成功，需要修正卡片结构。
+
+    v1.3.1 fix: 300315 也用于 insert_before 引用不存在的元素
+    ("not find elementID")。这不是真正的 schema error——元素可能
+    在之前的操作中已被删除。用文本检查区分两种情况，避免把
+    element not found 误当 schema error 处理导致内容丢失。
     """
-    return e.code == CARDKIT_SCHEMA_ERROR
+    if e.code != CARDKIT_SCHEMA_ERROR:
+        return False
+    # 排除 "not find elementID" 的情况——这是 element not found，不是 schema error
+    if _RE_ELEMENT_NOT_FOUND.search(str(e)):
+        return False
+    return True
 
 
 def is_element_not_found_error(e: "FeishuAPIError") -> bool:
-    """判断 FeishuAPIError 是否为"元素不存在"错误（300313）。
+    """判断 FeishuAPIError 是否为"元素不存在"错误。
+
+    涵盖三种错误码：
+    - 300313: stream_element 引用不存在的元素（服务端传播延迟）
+    - 300314: delete_elements 删除不存在的元素
+    - 300315 + "not find elementID": insert_before 引用不存在的元素
+      （飞书用 300315 而非 300313 表示这种情况，v1.3.1 修复）
 
     生产日志（2026-06-17）发现：Phase 2 的 add_elements 成功后，
     如果 on_completed 在 ~1s 内触发 drain，cardkit_stream_element
     可能返回 300313 "not find elementID : answer_content"。
     这是飞书服务端元素持久化的传播延迟，等待 200ms 后重试通常成功。
-
-    此错误不应在 drain 阶段直接放弃并触发 full rebuild（会导致卡片闪烁），
-    而应短暂等待后重试；若重试仍失败，调用方应改用 batch_update
-    的 partial_update_element 写入 answer 文本（绕过 stream_element）。
     """
-    return e.code == CARDKIT_ELEMENT_NOT_FOUND
+    if e.code == CARDKIT_ELEMENT_NOT_FOUND:
+        return True
+    if e.code == CARDKIT_ELEMENT_NOT_FOUND_ALT:
+        return True
+    # 300315 + "not find elementID" = insert_before 引用不存在的元素
+    if e.code == CARDKIT_SCHEMA_ERROR and _RE_ELEMENT_NOT_FOUND.search(str(e)):
+        return True
+    return False
 
 
 @dataclass(frozen=True)

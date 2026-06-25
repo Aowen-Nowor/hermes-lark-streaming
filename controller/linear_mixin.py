@@ -604,6 +604,19 @@ class UnifiedControllerMixin:
                         # Fall through to Phase 3 (partial_update may still fail
                         # if panel wasn't actually added, but at least we won't
                         # loop infinitely on Phase 2)
+                    elif is_element_not_found_error(e):
+                        # v1.3.1 fix: insert_before 引用不存在的元素 (300315 + "not find elementID")
+                        # 这不是真正的 schema error——loading_hint 可能已被删除。
+                        # 标记元素为已创建防止重试，但不清除脏数据（让 Phase 3/seal 重试写入）。
+                        _logger.warning(
+                            "unified flush phase 2 element not found (non-fatal): %s — "
+                            "marking elements as created, will retry via Phase 3/seal, card=%s",
+                            e, session.card_id[:12],
+                        )
+                        session._creation_stages.add("answer")
+                        session._creation_stages.add("panel")
+                        session._creation_stages.add("hint_removed")
+                        session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
                     else:
                         _logger.warning("unified flush phase 2 batch_update failed: %s", e)
                         return
