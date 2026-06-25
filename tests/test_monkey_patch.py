@@ -32,6 +32,34 @@ class TestPatchBasics:
         version_logged = any(__version__ in call for call in info_calls)
         assert version_logged, f"Version {__version__} not found in log calls: {info_calls}"
 
+    def test_register_always_registers_aowen_hook(self) -> None:
+        """v1.3.6: register() must always register pre_gateway_dispatch hook,
+        even when no event loop is running (pre-warm skip path).
+
+        Regression: v1.3.2 pre-warm code had `return` in except RuntimeError
+        block, causing /aowen hook registration to be skipped when gateway
+        starts without a running event loop.
+        """
+        from hermes_lark_streaming.plugin import register
+
+        mock_ctx = MagicMock()
+        # 模拟无运行事件循环的场景（触发 pre-warm 的 except RuntimeError）
+        with (
+            patch("hermes_lark_streaming.plugin._ensure_streaming_config"),
+            patch("hermes_lark_streaming.patching.apply_patches"),
+            patch("asyncio.get_running_loop", side_effect=RuntimeError("no running loop")),
+            patch("asyncio.get_event_loop", side_effect=RuntimeError("no event loop")),
+        ):
+            register(mock_ctx)
+
+        # 关键断言：pre_gateway_dispatch hook 必须被注册
+        assert mock_ctx.register_hook.called, \
+            "register_hook was never called — /aowen commands will not work"
+        call_args = mock_ctx.register_hook.call_args
+        hook_name = call_args[0][0] if call_args[0] else call_args[1].get("hook_name")
+        assert hook_name == "pre_gateway_dispatch", \
+            f"Expected pre_gateway_dispatch hook, got: {hook_name}"
+
     def test_monkey_patch_module_imports_version(self) -> None:
         """patching module should import __version__ from the package."""
         from hermes_lark_streaming.patching import __version__ as mp_version

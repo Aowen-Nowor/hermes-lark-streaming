@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/项目-Vibe%20Coding-ff69b4" alt="Vibe Coding">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-1.3.5-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.3.6-ff9800.svg" alt="Version">
 </p>
 
 <p align="center">
