@@ -151,21 +151,14 @@ def escape_markdown_asterisks(text: str) -> str:
     text = _RE_UNPAIRED_ASTERISK.sub(r'\\*', text)
 
     # Step 5: 还原保护区域
-    # v1.3.0 perf: single regex sub instead of per-block str.replace (O(K×N) → O(N))
-    # v1.3.0 fix: wrap in try/except to prevent IndexError from leaking placeholders
-    # if the text contains spurious placeholder patterns we didn't create.
+    # v1.3.5 fix: 逆向遍历（高索引→低索引）以确保嵌套占位符正确恢复。
+    # 当粗体包裹行内代码时，外层（粗体）索引高于内层（行内代码）。
+    # re.sub 从左到右匹配并跳过替换文本中的内容，导致内层占位符泄漏。
+    # 改用 str.replace 逆向遍历：先恢复外层（含内层占位符），
+    # 后恢复内层——str.replace 扫描全串，不会跳过替换内容中的匹配。
     if _protected:
-        try:
-            text = _RE_PROTECTED_PLACEHOLDER.sub(
-                lambda m: _protected[int(m.group(1))], text
-            )
-        except (IndexError, ValueError):
-            # Fallback: per-block str.replace (the original v1.2.1 approach).
-            # This only replaces placeholders with valid indices; any spurious
-            # placeholder patterns (from AI text or encoding artifacts) are
-            # left in place and stripped by the final null-byte cleanup below.
-            for i, block in enumerate(_protected):
-                text = text.replace(f'\x00P{i}P\x00', block)
+        for i in range(len(_protected) - 1, -1, -1):
+            text = text.replace(f'\x00P{i}P\x00', _protected[i])
 
     # v1.3.0 fix: final safety net — strip any remaining null bytes.
     # This catches: (a) spurious placeholder patterns we didn't create,
