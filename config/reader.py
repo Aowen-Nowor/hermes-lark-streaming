@@ -275,6 +275,13 @@ class Config:
         return str(self._platform_cfg().get("base_url", "https://open.feishu.cn/open-apis"))
 
     @property
+    def width_mode(self) -> str:
+        """卡片宽度模式: default(600px), compact(400px), fill(撑满窗口)."""
+        sec = self._plugin_sec()
+        mode = sec.get("width_mode", "default")
+        return mode if mode in ("default", "compact", "fill") else "default"
+
+    @property
     def card_duration_sec(self) -> int:
         """卡片存活检测超时."""
         return _to_int(self._plugin_sec().get("card_ttl_sec", 600), default=600)
@@ -329,7 +336,7 @@ class Config:
 
     @staticmethod
     def _default_footer_fields() -> list[list[str]]:
-        return [["status", "elapsed", "model", "cost", "compression_exhausted"]]
+        return [["status", "elapsed", "model", "provider", "cost", "compression_exhausted"]]
 
     @property
     def env_app_id(self) -> str:

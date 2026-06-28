@@ -218,6 +218,7 @@ class UnifiedControllerMixin:
                     print_strategy=self._cfg.print_strategy,
                     print_step=self._cfg.print_step,
                     header_enabled=self._cfg.header_enabled,
+                    width_mode=self._cfg.width_mode,
                 )
                 card_id = await self._client.cardkit_create(card)
                 card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
@@ -1936,6 +1937,7 @@ class UnifiedControllerMixin:
                     max_tool_steps=self._cfg.max_tool_steps,
                     max_reasoning_rounds=self._cfg.max_reasoning_rounds,
                     card_trace_id=session.card_trace_id,
+                    width_mode=self._cfg.width_mode,
                 )
                 session.sequence += 1
                 assert self._client is not None

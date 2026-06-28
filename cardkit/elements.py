@@ -901,7 +901,7 @@ def _build_footer_elements(
     show_label: bool = False,
 ) -> list[dict]:
     if fields is None:
-        fields = [["status", "elapsed", "context", "model"]]
+        fields = [["status", "elapsed", "model", "provider", "context"]]
 
     data = footer_data or {}
     en_lines: list[str] = []
@@ -1097,6 +1097,10 @@ def _render_footer_field(
 
     if name == "model":
         v = data.get("model") or None
+        return v, v
+
+    if name == "provider":
+        v = data.get("provider") or None
         return v, v
 
     if name == "tokens":

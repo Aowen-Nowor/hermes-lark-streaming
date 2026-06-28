@@ -200,6 +200,7 @@ def build_streaming_card_v2(
     include_unified_panel: bool = True,
     include_loading_hint: bool = True,
     include_answer_element: bool = True,
+    width_mode: str = "default",
 ) -> dict[str, Any]:
     """CardKit 2.0 流式占位卡片 — placeholder card for streaming mode.
 
@@ -252,6 +253,7 @@ def build_streaming_card_v2(
                 "print_strategy": print_strategy,
             },
             "locales": _LOCALES,
+            "width_mode": width_mode,
             "summary": {
                 "content": _T["processing"][0],
                 "i18n_content": _t("processing"),
@@ -308,6 +310,7 @@ def build_unified_complete_card(
     max_tool_steps: int = 20,
     max_reasoning_rounds: int = 20,
     card_trace_id: str = "",
+    width_mode: str = "default",
 ) -> dict[str, Any]:
     """Unified panel complete card — single panel for reasoning+tools, plus answer.
 
@@ -423,6 +426,7 @@ def build_unified_complete_card(
             "update_multi": True,
             "streaming_mode": False,
             "locales": _LOCALES,
+            "width_mode": width_mode,
         },
     }
     if summary:

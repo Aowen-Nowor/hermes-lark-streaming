@@ -466,12 +466,14 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     reasoning_tokens = getattr(_agent_ref_child, "session_reasoning_tokens", 0) if _agent_ref_child else 0
                     estimated_cost_usd = getattr(_agent_ref_child, "session_estimated_cost_usd", 0) if _agent_ref_child else 0
                     cost_status = getattr(_agent_ref_child, "session_cost_status", "unknown") if _agent_ref_child else "unknown"
+                    provider = getattr(_agent_ref_child, "provider", "") if _agent_ref_child else ""
 
                     card_sent_child = on_message_completed(
                         message_id=ctx["message_id"],
                         answer=result.get("final_response", ""),
                         duration=_elapsed_child,
                         model=result.get("model", ""),
+                        provider=provider,
                         tokens={
                             "input_tokens": result.get("input_tokens", 0),
                             "output_tokens": result.get("output_tokens", 0),
@@ -583,12 +585,14 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
                 estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                 cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
+                provider = getattr(_agent_ref, "provider", "") if _agent_ref else ""
 
                 card_sent = on_message_completed(
                     message_id=ctx["message_id"],
                     answer=result.get("final_response", ""),
                     duration=_elapsed,
                     model=result.get("model", ""),
+                    provider=provider,
                     tokens={
                         "input_tokens": result.get("input_tokens", 0),
                         "output_tokens": result.get("output_tokens", 0),
@@ -785,12 +789,14 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                     reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
                     estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                     cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
+                    provider = getattr(_agent_ref, "provider", "") if _agent_ref else ""
 
                     card_sent = on_message_completed(
                         message_id=task_id,
                         answer=(result or {}).get("final_response", ""),
                         duration=_elapsed,
                         model=(result or {}).get("model", ""),
+                        provider=provider,
                         tokens={
                             "input_tokens": (result or {}).get("input_tokens", 0),
                             "output_tokens": (result or {}).get("output_tokens", 0),
