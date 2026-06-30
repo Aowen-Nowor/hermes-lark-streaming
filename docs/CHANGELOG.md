@@ -1,3 +1,25 @@
+## v1.4.0 (2026-06-30)
+
+Hermes v0.17.0 兼容性修复 — Clarify 卡片消失 + delegate_task 卡片降级两个生产问题，根因同为 hermes bundled platform deferred loading 导致 FeishuAdapter 补丁打在替身类。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | hermes update 升级到 v0.17.0 后，Clarify 交互卡片消失，变成纯文本编号列表 | hermes v0.17.0 引入 bundled platform **deferred loading**（延迟加载）。插件 `apply_patches()` 在启动早期运行，此时 `hermes_plugins.feishu_platform.adapter`（真身，gateway 运行时用）还没被加载，`HermesCompat` fallback 到 `plugins.platforms.feishu.adapter`（替身，源码路径）。插件把 `send_clarify` / `_on_card_action_trigger` 补丁打在替身类上。2 秒后 `_schedule_direct_patch` 触发，真身类已被 deferred loader 加载，但该函数**只重新 patch AIAgent，没有重新 patch FeishuAdapter**。gateway 用的真身类没补丁 → clarify 退回 `BasePlatformAdapter.send_clarify` 纯文本路径。日志铁证：`10:04:17 FeishuAdapter resolved via plugins.platforms.feishu.adapter`（替身）→ `10:04:19 FeishuAdapter resolved via hermes_plugins.feishu_platform.adapter`（真身，2s 后，但只 re-patch AIAgent） | 抽取 `_apply_feishu_adapter_patches(FeishuAdapter, *, is_repatch=False)` 函数；`_schedule_direct_patch` 在 2s 延迟后除 re-patch AIAgent 外，**新增 FeishuAdapter primary repatch**（resolve 真身 → 若 `id(cls)` 不在 `_patched_feishu_classes` 则 repatch + WARNING 日志）；再 sleep 8s（启动后 10s）做 secondary 兜底，防慢加载环境。`_patched_feishu_classes: set[int]` 用 `id(cls)` 去重避免重复打补丁 (`patching/__init__.py`) |
+| 🐛 Bug Fix (P0) | `delegate_task` 子代理返回后，主代理续写输出从卡片降级为纯文本（单线程正常，仅并发场景触发） | 双重根因：①hermes 在调用任何工具前发 `stream_delta_callback(None)` 流式边界信号。普通工具执行快（毫秒级），卡片流式会话未进入终态。但 `delegate_task` 派子代理跑很久（几秒~几十秒），期间卡片流式被服务端关闭（`_streaming_closed=True`）。子代理返回、主代理续写 answer token 时 `cardkit_stream_element` 失败（300309）→ fallback → 退回 `adapter.send`。②`adapter.send` 因同一 deferred loading 根因补丁打错类 → 纯文本 fallback | ①新增 `_reactivate_session_for_continuation(stale_session)`：用旧 session 的 chat_id/anchor_id 创建新 CardSession（`new_message_id = {anchor_id}-cont-{seq}`），设 `_is_continuation=True`，预置 `unified_state` 防 on_answer 早到丢 token，fire-and-forget `_do_create_linear_card` 建新卡；旧 session 转 COMPLETING 异步封卡保留 partial 内容。②`on_answer` 入口检测终态+`_streaming_closed=True` 时触发重激活，`_continuation_map[old_msg]=new_msg` 透明重定向后续 token，`on_completed` pop 映射让最终封卡落新卡。③`_continuation_reactivation_count` 限制最多 1 次，防递归。④`_apply_feishu_adapter_patches` 的 deferred repatch（见 P0 上条）同时治好 `adapter.send` 补丁错类根因 (`controller/core.py`, `state/session.py`, `controller/linear_mixin.py`) |
+| 🐛 Bug Fix (P1) | `send_clarify` / `_on_card_action_trigger` 在兼容性测试中标记为 OPTIONAL，hermes 升级移除/改名时 CI 仍绿，问题只在生产暴露 | `OPTIONAL_CLASS_METHOD_TARGETS` 缺失时只 `pytest.skip` 不 fail。开发者已知道 hermes 不同版本接口可能不同，但 clarify 是用户可见功能，不应该 optional | 两个目标从 `OPTIONAL_CLASS_METHOD_TARGETS` 移到 `CLASS_METHOD_TARGETS`（REQUIRED）。AST fallback 增强：多路径回退（`gateway.platforms.feishu` → `plugins.platforms.feishu.adapter`）+ 继承链回退（`BasePlatformAdapter` @ `gateway.platforms.base`，覆盖 `send_clarify` 这种 FeishuAdapter 继承自基类的方法）(`tests/integration/test_hermes_compat.py`) |
+| ✨ Feature | FeishuAdapter 补丁身份运行时校验——`/aowen doctor` 可主动检测补丁是否打在 gateway 实际使用的类上 | deferred loading 根因隐蔽，启动日志显示 `patched ✓` 但实际打错类，用户无感知 | 新增 `_verify_feishu_patch_identity(adapter_instance) -> bool`：检查 `id(type(adapter_instance))` 是否在 `_patched_feishu_classes` 里，mismatch 时 ERROR 日志提示 `/aowen doctor`。本次仅实现+导出，未集成到每条消息调用链（避免性能开销），供 doctor 命令或手动诊断调用 (`patching/__init__.py`) |
+| 🔧 Improvement | `HermesCompat` FeishuAdapter 解析增加 deferred loading 感知日志 | 启动早期真身未加载时静默 fallback 到替身，无日志线索 | 真身路径 import 失败时新增 DEBUG 日志说明 fallback + 提示将在 deferred 阶段重打。新增 `resolve_feishu_adapter_class_fresh()` 方法供延迟重打阶段重新 resolve（不复用缓存）(`patching/hermes_adapter.py`) |
+
+**审计方法**: 四路调研对齐求证。2-a 克隆 DEV 分支（HEAD=v1.3.7）分析插件代码，定位 clarify 走 `FeishuAdapter.send_clarify` patch、panel 走 `partial_update_element` 全量替换。2-b 浅克隆 hermes-agent v0.17.0 源码，锁定 deferred loading 机制（`hermes_cli/plugins.py:1329` deferred loader + `gateway/platform_registry.py:173` 注释）导致 FeishuAdapter 真身/替身类对象分离，以及 `stream_delta_callback(None)` 在工具前触发的 delegate_task 续写问题。2-c SSH 取服务器 agent.log（4 个 rotated 文件 + gateway.log），对比升级前后日志：升级前有 `clarify card: send_clarify intercepted` + `card sent successfully`，升级后 0 行 clarify card 日志 + 出现 `gateway.platforms.base: Routing message to clarify text-intercept`，铁证 clarify 走文本路径。3 E2E 真飞书复现因提供的凭证（`cli_a951f158a1b89bd7`）与 agent 实际 app（`cli_aa8f3742bba55cba`）不匹配无法触发，但前三路证据链已闭合。所有修复基于代码+源码+日志三方对齐，未自行构造测试卡片。871 单元测试 + 26 集成测试通过（4 skipped 为 OPTIONAL reaction 方法）。
+
+**已知限制**:
+- E2E 真飞书实机验证因凭证不匹配未能执行 delegate_task 降级修复的端到端确认。源码层面根因链路（`stream_delta_callback(None)` → 长任务 → `_streaming_closed=True` → fallback）已成立，建议用户配合蒲正宇真人在 agent 监听的 chat 发触发消息做最终实机盖章
+- `_verify_feishu_patch_identity` 仅实现+导出，未自动集成到每条消息调用链（避免性能开销）。可通过 `/aowen doctor` 手动调用，后续可考虑在 gateway adapter 创建时 hook 一次
+- 会话续写重激活最多 1 次（`_continuation_reactivation_count` 限制），极端场景（连续多次长任务）下仍可能走文本 fallback 作为兜底
+- 折叠面板内推理流式（CardKit API 限制：`collapsible_panel` 不支持 `stream_element`）本次未修，保留 v1.3.7 行为，待后续版本评估"推理临时外置打字机"方案
+
+---
+
 ## v1.3.7 (2026-06-25)
 
 E2E 测试优化 — 真飞书模式群聊消息数减少 ~85%。
