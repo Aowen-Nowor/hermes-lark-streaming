@@ -201,7 +201,14 @@ class UnifiedControllerMixin:
         session.state = CREATING
         session._create_epoch_snap = epoch
         session.linear = True
-        session.unified_state = UnifiedLinearState()
+        # v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
+        # 当本 session 是 _reactivate_session_for_continuation 创建的 continuation
+        # session 时，调用方可能已预先创建 unified_state 并在 _do_create_linear_card
+        # 实际运行前累积了 answer delta（on_answer 在 fire-and-forget 之后立即同
+        # 步路由到新 session）。这里若直接覆盖 unified_state 会丢失这些早期 token。
+        # 仅当 unified_state 为 None（正常 on_message_started 路径）时才创建。
+        if session.unified_state is None:
+            session.unified_state = UnifiedLinearState()
 
         t0 = _time.monotonic()
         try:

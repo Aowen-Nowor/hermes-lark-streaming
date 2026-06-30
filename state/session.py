@@ -37,10 +37,12 @@ class CardSession:
 
     __slots__ = (
         "_card_ready",
+        "_continuation_reactivation_count",
         "_create_epoch_snap",
         "_creation_stages",
         "_first_answer_time",
         "_first_flush_done",
+        "_is_continuation",
         "_loop",
         "_phase2_failed",
         "_pending_flush",
@@ -141,6 +143,18 @@ class CardSession:
         # v1.2.0 L1: "streaming closed" 日志去重——同一张卡第一次打 INFO，之后降 DEBUG
         self._streaming_closed_logged: bool = False
         self._card_ready: asyncio.Event = asyncio.Event()
+        # v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
+        # _is_continuation=True 标记本 session 是为已终态/流式关闭的旧 session
+        # 续写而创建的新卡片（同一 chat/anchor 下重激活）。用于日志区分与防止
+        # 递归重激活。原 session 在 delegate_task 长任务期间被飞书服务端关闭
+        # 流式（_streaming_closed=True），新 token 不再尝试写入旧卡（必失败
+        # 300309），而是开新卡续写。
+        self._is_continuation: bool = False
+        # 同一 session 被重激活的次数计数。每次 _reactivate_session_for_continuation
+        # 触发时 +1。用于限制最多重激活 1 次（防止极端情况下新 session 也 300309
+        # 时无限递归重激活）。当 _continuation_reactivation_count >= 1 时，
+        # on_answer 不再尝试重激活，回退到原 fallback 路径。
+        self._continuation_reactivation_count: int = 0
 
     # ------------------------------------------------------------------
     # State machine — validated transitions
