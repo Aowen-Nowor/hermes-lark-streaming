@@ -314,26 +314,48 @@ class TestAIAgent:
 
 # ── Tests: FeishuAdapter ─────────────────────────────────────────────
 
+# v1.4.0: FeishuAdapter 实际定义位置 —— hermes v0.17.0+ 在 plugins.platforms.feishu.adapter
+# （源码路径），旧版在 gateway.platforms.feishu。AST fallback 按顺序尝试所有候选路径。
+_FEISHU_ADAPTER_MODULE_CANDIDATES = [
+    "gateway.platforms.feishu",         # Legacy path (Hermes < v0.17)
+    "plugins.platforms.feishu.adapter", # v0.17+ source path (always available)
+]
+
+
+def _resolve_feishu_adapter_ast(hermes_src: Path) -> tuple[ast.Module | None, str | None]:
+    """Return (ast_tree, module_path) for the first candidate where FeishuAdapter source is found.
+
+    v1.4.0: 抽取为独立 helper —— hermes v0.17.0+ 重构后 FeishuAdapter 实际定义在
+    plugins.platforms.feishu.adapter（不再是 gateway.platforms.feishu）。多个 TestFeishuAdapter
+    / TestMonkeyPatchTargets 测试都需要按顺序尝试候选路径，避免在 v0.17.0+ 误报缺失。
+    """
+    for mod_path in _FEISHU_ADAPTER_MODULE_CANDIDATES:
+        tree = _parse_ast(hermes_src, mod_path)
+        if tree is not None:
+            return tree, mod_path
+    return None, None
+
 
 class TestFeishuAdapter:
     """Verify that FeishuAdapter class and its patched methods still exist."""
 
     def test_feishu_adapter_class_exists(self, hermes_src: Path) -> None:
-        """FeishuAdapter class should exist in gateway.platforms.feishu."""
-        # Try import first
+        """FeishuAdapter class should exist in gateway.platforms.feishu or plugins.platforms.feishu.adapter."""
+        # Try import first (legacy path only — v0.17+ source path requires lark-oapi deps)
         try:
             from gateway.platforms.feishu import FeishuAdapter  # noqa: F401
 
             return
         except (ImportError, AttributeError):
             pass
-        # Fallback: AST analysis
-        tree = _parse_ast(hermes_src, "gateway.platforms.feishu")
+        # Fallback: AST analysis — v1.4.0: try multiple candidate paths
+        tree, resolved_path = _resolve_feishu_adapter_ast(hermes_src)
         assert tree is not None, (
-            "gateway/platforms/feishu.py (or __init__.py) not found in Hermes source"
+            "FeishuAdapter source not found in any candidate path: "
+            f"{_FEISHU_ADAPTER_MODULE_CANDIDATES}"
         )
         assert _ast_has_class(tree, "FeishuAdapter"), (
-            "FeishuAdapter class not found in gateway/platforms/feishu (AST analysis)"
+            f"FeishuAdapter class not found in {resolved_path} (AST analysis)"
         )
 
     def test_feishu_adapter_has_send(self, hermes_src: Path) -> None:
@@ -345,10 +367,13 @@ class TestFeishuAdapter:
             return
         except (ImportError, AttributeError):
             pass
-        tree = _parse_ast(hermes_src, "gateway.platforms.feishu")
-        assert tree is not None, "gateway/platforms/feishu not found"
+        # v1.4.0: try multiple candidate paths
+        tree, resolved_path = _resolve_feishu_adapter_ast(hermes_src)
+        assert tree is not None, (
+            f"FeishuAdapter source not found in candidates: {_FEISHU_ADAPTER_MODULE_CANDIDATES}"
+        )
         assert _ast_class_has_method(tree, "FeishuAdapter", "send"), (
-            "FeishuAdapter.send not found (AST analysis)"
+            f"FeishuAdapter.send not found in {resolved_path} (AST analysis)"
         )
 
     def test_feishu_adapter_has_edit_message(self, hermes_src: Path) -> None:
@@ -362,10 +387,13 @@ class TestFeishuAdapter:
             return
         except (ImportError, AttributeError):
             pass
-        tree = _parse_ast(hermes_src, "gateway.platforms.feishu")
-        assert tree is not None, "gateway/platforms/feishu not found"
+        # v1.4.0: try multiple candidate paths
+        tree, resolved_path = _resolve_feishu_adapter_ast(hermes_src)
+        assert tree is not None, (
+            f"FeishuAdapter source not found in candidates: {_FEISHU_ADAPTER_MODULE_CANDIDATES}"
+        )
         assert _ast_class_has_method(tree, "FeishuAdapter", "edit_message"), (
-            "FeishuAdapter.edit_message not found (AST analysis)"
+            f"FeishuAdapter.edit_message not found in {resolved_path} (AST analysis)"
         )
 
 
@@ -388,6 +416,15 @@ class TestMonkeyPatchTargets:
         ("run_agent", "AIAgent", "run_conversation"),
         ("gateway.platforms.feishu", "FeishuAdapter", "send"),
         ("gateway.platforms.feishu", "FeishuAdapter", "edit_message"),
+        # v1.4.0: send_clarify / _on_card_action_trigger 从 OPTIONAL 升级到 REQUIRED。
+        # 这两个方法是 clarify 卡片链路的关键 patch 点，hermes 升级若移除/改名
+        # 会导致插件 patch 静默失败 → clarify 退回 BasePlatformAdapter 纯文本
+        # （正是 v1.4.0 修复的根因，详见 worklog Task 2-b）。必须强制校验。
+        # 注意：send_clarify 在 hermes v0.17.0 里是 FeishuAdapter 继承自
+        # BasePlatformAdapter 的方法（不在 FeishuAdapter class body 内定义），
+        # AST fallback 需要查 BasePlatformAdapter 继承链（见 test_required_class_method_exists）。
+        ("gateway.platforms.feishu", "FeishuAdapter", "send_clarify"),
+        ("gateway.platforms.feishu", "FeishuAdapter", "_on_card_action_trigger"),
     ]
 
     # (module_path, function_name) — module-level functions patched
@@ -404,8 +441,17 @@ class TestMonkeyPatchTargets:
         ("gateway.platforms.feishu", "FeishuAdapter", "_add_reaction"),      # new private name
         ("gateway.platforms.feishu", "FeishuAdapter", "delete_reaction"),    # old public name
         ("gateway.platforms.feishu", "FeishuAdapter", "_remove_reaction"),   # new private name
-        ("gateway.platforms.feishu", "FeishuAdapter", "send_clarify"),
-        ("gateway.platforms.feishu", "FeishuAdapter", "_on_card_action_trigger"),
+    ]
+
+    # v1.4.0: FeishuAdapter 实际定义位置 —— 复用模块级 _FEISHU_ADAPTER_MODULE_CANDIDATES
+    # （见 TestFeishuAdapter 上方定义）。AST fallback 按顺序尝试所有候选路径。
+    _FEISHU_ADAPTER_FALLBACK_PATHS = _FEISHU_ADAPTER_MODULE_CANDIDATES
+
+    # v1.4.0: FeishuAdapter 继承自 BasePlatformAdapter，send_clarify 等方法
+    # 定义在 base class 不在 FeishuAdapter class body。AST fallback 找不到时
+    # 需要查继承链。BasePlatformAdapter 位于 gateway.platforms.base。
+    _BASE_PLATFORM_ADAPTER_FALLBACK_PATHS = [
+        "gateway.platforms.base",
     ]
 
     @pytest.mark.parametrize(
@@ -416,7 +462,16 @@ class TestMonkeyPatchTargets:
     def test_required_class_method_exists(
         self, hermes_src: Path, module_path: str, class_name: str, method_name: str,
     ) -> None:
-        """Required class method must exist (import or AST)."""
+        """Required class method must exist (import or AST).
+
+        v1.4.0: AST fallback 增强 —— 对 FeishuAdapter 方法支持：
+          1. 多路径回退：gateway.platforms.feishu（legacy）→ plugins.platforms.feishu.adapter
+             （v0.17+ 真实路径），任意一个找到 class 即算 class 存在。
+          2. 继承链回退：send_clarify 等方法定义在 BasePlatformAdapter（gateway.platforms.base），
+             不在 FeishuAdapter class body 内。若 FeishuAdapter class body 没有该方法，
+             再尝试在 BasePlatformAdapter 里找，找到即算通过。
+        这两个增强确保测试在 hermes v0.17.0+ 重构后仍能正确校验 REQUIRED patch 点。
+        """
         # Try import
         try:
             mod = __import__(module_path, fromlist=[class_name])
@@ -428,11 +483,34 @@ class TestMonkeyPatchTargets:
             return
         except (ImportError, AttributeError):
             pass
-        # Fallback: AST
+        # Fallback: AST — first try the declared module_path
         tree = _parse_ast(hermes_src, module_path)
-        assert tree is not None, f"Source for {module_path} not found"
+        if tree is not None and _ast_class_has_method(tree, class_name, method_name):
+            return  # Found in declared path's class body
+        # v1.4.0: 多路径回退（仅对 FeishuAdapter —— 其他 class 直接跳过）
+        if class_name == "FeishuAdapter":
+            for alt_path in self._FEISHU_ADAPTER_FALLBACK_PATHS:
+                if alt_path == module_path:
+                    continue  # already tried above
+                alt_tree = _parse_ast(hermes_src, alt_path)
+                if alt_tree is not None and _ast_class_has_method(alt_tree, class_name, method_name):
+                    return  # Found in alternative FeishuAdapter path
+            # v1.4.0: 继承链回退 —— FeishuAdapter 继承自 BasePlatformAdapter，
+            # send_clarify 等方法可能在 base class 里定义（不在 FeishuAdapter class body）
+            for base_path in self._BASE_PLATFORM_ADAPTER_FALLBACK_PATHS:
+                base_tree = _parse_ast(hermes_src, base_path)
+                if base_tree is not None and _ast_class_has_method(
+                    base_tree, "BasePlatformAdapter", method_name,
+                ):
+                    return  # Found in BasePlatformAdapter (inherited)
+        # Nothing found — fail with clear message
+        assert tree is not None, (
+            f"Source for {module_path} not found (also tried fallback paths "
+            f"{self._FEISHU_ADAPTER_FALLBACK_PATHS} for FeishuAdapter)"
+        )
         assert _ast_class_has_method(tree, class_name, method_name), (
-            f"{class_name}.{method_name} not found in {module_path} (AST analysis)"
+            f"{class_name}.{method_name} not found in {module_path} (AST analysis); "
+            f"also checked FeishuAdapter fallback paths + BasePlatformAdapter inheritance chain"
         )
 
     @pytest.mark.parametrize(
