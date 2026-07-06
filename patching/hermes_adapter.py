@@ -79,33 +79,9 @@ class HermesCompat:
         except (ImportError, AttributeError):
             _logger.debug("HLS: AIAgent not available yet")
         
-        # FeishuAdapter
-        # CRITICAL: The gateway loads feishu adapter via hermes_plugins namespace
-        # (importlib creates a separate module object). Patching gateway.platforms.feishu
-        # won't affect the gateway's instance. We MUST find the class through the
-        # same namespace the gateway uses.
-        # Verified on Hermes v0.17.0 (2026-06-24):
-        #   - gateway.platforms.feishu → FAILED (No module named)
-        #   - hermes_plugins.feishu_platform.adapter → OK (gateway runtime creates this)
-        #   - plugins.platforms.feishu.adapter → OK (source path, always available)
-        # The gateway's adapter instance is created from hermes_plugins.feishu_platform.adapter,
-        # so we must patch THAT class, not a different import path.
-        _feishu_import_paths = [
-            "hermes_plugins.feishu_platform.adapter",  # Hermes v0.17+ (gateway runtime)
-            "plugins.platforms.feishu.adapter",        # Source path (always available)
-            "gateway.platforms.feishu",                # Legacy path (Hermes < v0.17)
-        ]
-        for _mod_path in _feishu_import_paths:
-            try:
-                mod = importlib.import_module(_mod_path)
-                if hasattr(mod, "FeishuAdapter"):
-                    self.feishu_adapter_class = getattr(mod, "FeishuAdapter")
-                    _logger.debug("HLS: FeishuAdapter resolved via %s", _mod_path)
-                    break
-            except (ImportError, AttributeError):
-                continue
-        if self.feishu_adapter_class is None:
-            _logger.debug("HLS: FeishuAdapter not available via any import path")
+        # FeishuAdapter — 抽取到 _resolve_feishu_adapter()，
+        # 便于 resolve_feishu_adapter_class_fresh() 复用（v1.4.0: fix deferred loading patch miss）
+        self.feishu_adapter_class = self._resolve_feishu_adapter()
         
         # Cron scheduler
         for mod_name in ("cron.scheduler", "gateway.cron.scheduler"):
@@ -119,6 +95,69 @@ class HermesCompat:
         
         # Conversation loop (with namespace collision workaround)
         self._resolve_conversation_loop()
+    
+    def _resolve_feishu_adapter(self) -> Any | None:
+        """Resolve FeishuAdapter class through the gateway's namespace.
+        
+        CRITICAL: The gateway loads feishu adapter via hermes_plugins namespace
+        (importlib creates a separate module object). Patching gateway.platforms.feishu
+        won't affect the gateway's instance. We MUST find the class through the
+        same namespace the gateway uses.
+        
+        Verified on Hermes v0.17.0 (2026-06-24):
+          - gateway.platforms.feishu → FAILED (No module named)
+          - hermes_plugins.feishu_platform.adapter → OK (gateway runtime creates this)
+          - plugins.platforms.feishu.adapter → OK (source path, always available)
+        The gateway's adapter instance is created from hermes_plugins.feishu_platform.adapter,
+        so we must patch THAT class, not a different import path.
+        
+        v1.4.0: 抽取为独立方法，便于 resolve_feishu_adapter_class_fresh() 复用以
+        在 deferred loading 完成后重新解析真身 class（hermes v0.17.0+ bundled
+        platform deferred loading 修复，详见 patching/__init__.py 的
+        _schedule_direct_patch 注释）。
+        """
+        # 顺序很关键：真身（hermes_plugins.feishu_platform.adapter）优先，确保
+        # 如果 deferred loader 已触发，我们能拿到 gateway 实际使用的 class object。
+        _feishu_import_paths = [
+            "hermes_plugins.feishu_platform.adapter",  # Hermes v0.17+ (gateway runtime 真身)
+            "plugins.platforms.feishu.adapter",        # Source path (替身，always available)
+            "gateway.platforms.feishu",                # Legacy path (Hermes < v0.17)
+        ]
+        for _mod_path in _feishu_import_paths:
+            try:
+                mod = importlib.import_module(_mod_path)
+                if hasattr(mod, "FeishuAdapter"):
+                    cls = getattr(mod, "FeishuAdapter")
+                    _logger.debug("HLS: FeishuAdapter resolved via %s", _mod_path)
+                    return cls
+            except (ImportError, AttributeError):
+                # v1.4.0: 真身尚未加载（hermes v0.17.0+ bundled platform
+                # deferred loading），fallback 到替身；将在 _schedule_direct_patch
+                # 延迟重打阶段拿到真身后重新 patch（详见 patching/__init__.py）
+                if _mod_path == "hermes_plugins.feishu_platform.adapter":
+                    _logger.debug(
+                        "HLS: %s not yet loaded (deferred loading), "
+                        "trying fallback paths; will re-patch in deferred stage",
+                        _mod_path,
+                    )
+                continue
+        _logger.debug("HLS: FeishuAdapter not available via any import path")
+        return None
+    
+    def resolve_feishu_adapter_class_fresh(self) -> Any | None:
+        """Re-resolve FeishuAdapter class without reusing cached state.
+        
+        v1.4.0: 新增方法，供 _schedule_direct_patch 延迟重打阶段调用。
+        每次 invoke 都重新跑 _resolve_feishu_adapter 解析逻辑（不复用
+        self.feishu_adapter_class 缓存），返回当前 sys.modules 里能拿到的
+        最新 class。
+        
+        用途：hermes v0.17.0+ bundled platform deferred loading 场景下，
+        apply_patches() 启动早期只能拿到替身（plugins.platforms.feishu.adapter），
+        2s/8s 后 deferred loader 触发真身（hermes_plugins.feishu_platform.adapter）
+        加载进 sys.modules，此时调用本方法可拿到真身 class 重新 patch。
+        """
+        return self._resolve_feishu_adapter()
     
     def _resolve_conversation_loop(self) -> None:
         """Resolve agent.conversation_loop, handling Apple Silicon namespace collision."""

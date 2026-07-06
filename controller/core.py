@@ -33,6 +33,8 @@ from ..feishu import (
 )
 from ..state.text import TextState, strip_reasoning_tags
 from ..state.tooluse import ToolUseTracker
+# v1.4.0 fix (问题3 根因1): _reactivate_session_for_continuation 预创建 unified_state
+from ..state.linear import UnifiedLinearState
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
@@ -61,6 +63,15 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # v1.3.0: _interrupt_map is accessed from event-loop thread (on_interrupted
         # writes, on_completed pops) and worker threads (_cleanup iterates+deletes).
         self._interrupt_map_lock = threading.Lock()
+        # v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
+        # _continuation_map: old_message_id -> new continuation_message_id.
+        # 当主代理在长工具调用（如 delegate_task）后继续输出 answer token，但原
+        # session 的流式已被飞书服务端关闭（_streaming_closed=True）时，插件为同一
+        # chat/anchor 创建一张新的流式卡片续写后续 token。此映射记录"原 message_id
+        # -> 续写 message_id"的对应关系，让后续 on_answer / on_completed 能透明地
+        # 路由到新 session。访问于：on_answer 读写、on_completed pop、_cleanup 清理。
+        self._continuation_map: dict[str, str] = {}
+        self._continuation_map_lock = threading.Lock()
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._session_ttl = self._cfg.card_duration_sec
@@ -173,6 +184,194 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if session is None or session.is_terminal_phase:
             return None
         return session
+
+    # ── v1.4.0 fix (问题3 根因1): 会话续写重激活 ──────────────────
+    # 当主代理在长工具调用（尤其 delegate_task）后继续输出 answer token，
+    # 但原 session 的流式已被飞书服务端关闭（_streaming_closed=True）时，
+    # 不再尝试写入旧卡（必失败 300309）也不仅丢弃 token，而是为同一
+    # chat/anchor 开一张新的流式卡片，把后续 token 流到新卡上。
+    #
+    # 触发条件（_maybe_reactivate_for_continuation 内判定）：
+    #   - text 非空且非 None（真实 answer token，非 boundary 信号）
+    #   - 原存在 session（_sess_get 命中）
+    #   - 该 session 未在终态（is_terminal_phase=False）
+    #   - 但 _streaming_closed=True（流式已被服务端关闭）
+    #   - 且本 session 不是 _is_continuation（防止递归重激活）
+    #   - 且 _continuation_reactivation_count == 0（同一 session 最多重激活一次）
+    #
+    # 路由：成功重激活后，_continuation_map[old_msg] = new_msg；后续 on_answer
+    # 收到 old_msg 时先查映射并透明重定向到 new_msg。on_completed 同样查映射，
+    # 让完成流程在 continuation session 上执行（旧 session 在重激活时已通过
+    # _complete_session 异步收尾，旧卡片保留其最后状态不破坏）。
+
+    def _resolve_continuation_id(self, message_id: str) -> str | None:
+        """查询 message_id 是否已被重激活到 continuation session.
+
+        返回 new_message_id（如有映射），否则 None。线程安全。
+        """
+        with self._continuation_map_lock:
+            return self._continuation_map.get(message_id)
+
+    def _register_continuation(self, old_message_id: str, new_message_id: str) -> None:
+        """记录 old_message_id -> new_message_id 的续写映射。线程安全。"""
+        with self._continuation_map_lock:
+            self._continuation_map[old_message_id] = new_message_id
+
+    def _pop_continuation_id(self, message_id: str) -> str | None:
+        """取出并删除 message_id 对应的 continuation id（用于 on_completed 一次性消费）。"""
+        with self._continuation_map_lock:
+            return self._continuation_map.pop(message_id, None)
+
+    def _reactivate_session_for_continuation(
+        self, stale_session: CardSession
+    ) -> CardSession | None:
+        """为已 _streaming_closed 的 stale session 创建一张新的流式卡片以续写。
+
+        v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
+        背景：delegate_task / 长工具调用期间，原卡片的流式会话可能已被飞书
+        服务端自动关闭（TTL）或被插件 seal/close_streaming。等子代理返回、
+        主代理继续输出 answer token 时，原 session 的 _streaming_closed=True，
+        stream_element 调用必失败（300309）。此方法在同一 chat/anchor 下创建
+        一张全新的流式卡片（新 card_id、新 message_id 作 anchor），让后续
+        token 流到新卡片上，避免降级纯文本。
+
+        旧卡片保留不动（已 seal 或 server-closed 的状态不被破坏）。旧 session
+        被标记为 COMPLETING 并异步触发 _do_linear_complete_with_fallback 做最
+        后的封卡（写入已积累的 partial 内容 + footer，使旧卡视觉上完成）。
+
+        失败返回 None（调用方应回退到原 fallback 路径，即 gateway 累积文本）。
+        """
+        chat_id = stale_session.chat_id
+        # anchor_id 优先（用户原始消息 id），其次回退到 message_id
+        anchor_id = stale_session.anchor_id or stale_session.message_id
+        if not chat_id or not anchor_id:
+            _logger.warning(
+                "HLS: reactivation aborted — missing chat_id/anchor_id "
+                "old_msg=%s chat=%s anchor=%s",
+                (stale_session.message_id or "?")[:12],
+                (chat_id or "?")[:12],
+                (anchor_id or "?")[:12],
+            )
+            return None
+
+        loop = self._get_loop()
+        if loop is None:
+            _logger.warning(
+                "HLS: reactivation aborted — no event loop old_msg=%s",
+                (stale_session.message_id or "?")[:12],
+            )
+            return None
+
+        # 标记 stale_session 已被重激活过（防止后续重复触发，限制最多 1 次）
+        stale_session._continuation_reactivation_count += 1
+
+        # 生成新的 message_id（anchor_id 后缀 -cont-<seq>，便于日志关联）
+        seq = stale_session._continuation_reactivation_count
+        new_message_id = f"{anchor_id}-cont-{seq}"
+
+        # 防止与已有 session 冲突（理论上 -cont-1 后缀不会冲突，但防御性检查）
+        with self._sessions_lock:
+            if new_message_id in self._sessions:
+                _logger.warning(
+                    "HLS: reactivation aborted — new message_id already exists "
+                    "old_msg=%s new_msg=%s",
+                    (stale_session.message_id or "?")[:12],
+                    new_message_id[:12],
+                )
+                return None
+
+        # 创建新 session（复用 CardSession 构造，但跳过 on_message_started 的
+        # 并发 seal 逻辑——这里我们明确知道旧 session 已 _streaming_closed，
+        # 不需要 seal 旧 session，只需新建一个干净的 STREAMING session）。
+        new_session = CardSession(new_message_id, chat_id, loop)
+        # anchor_id 设为原 anchor_id（reply 时仍回复到用户原始消息，保持线程上下文）
+        new_session.anchor_id = anchor_id if anchor_id != new_message_id else None
+        new_session._is_continuation = True
+        # v1.4.0 fix: 预先创建 unified_state + 标记 linear=True，避免 on_answer 在
+        # _do_create_linear_card 实际运行前到达时因 unified_state is None 而丢弃 token。
+        # _do_create_linear_card 内部已加守卫——仅当 unified_state is None 时才创建，
+        # 不会覆盖此处预置的实例（及其已累积的 delta）。
+        new_session.linear = True
+        new_session.unified_state = UnifiedLinearState()
+        self._sess_put(new_message_id, new_session)
+        # 不抢 anchor_id key——原 session 仍可能用 anchor_id 作 alias key，
+        # 新 session 只通过 new_message_id 索引（避免覆盖原 alias 引发误清理）。
+
+        _logger.info(
+            "HLS: reactivating card session for continued output after tool "
+            "(delegate_task?) old_msg=%s new_msg=%s chat=%s trace=%s old_state=%s",
+            (stale_session.message_id or "?")[:12],
+            new_message_id[:12],
+            chat_id[:12],
+            new_session.card_trace_id,
+            stale_session.state,
+        )
+
+        # 异步触发新卡片创建（_do_create_linear_card 内部 IDLE 守卫保证幂等）
+        self._fire_and_forget(self._do_create_linear_card(new_session), loop)
+
+        # 异步收尾旧 session（写入已积累的 partial 内容 + footer）。
+        # 旧 session 仍在 STREAMING/COMPLETING 状态——这里转 COMPLETING 让
+        # _do_linear_complete 走 drain + preservative seal 路径。若旧卡服务端
+        # 已关闭流式，seal 会 fallback 到 cardkit_update（全量重建），把已积累
+        # 的 partial answer 写入旧卡，使旧卡视觉上"已完成"，用户能看出上下文。
+        try:
+            if not stale_session.is_terminal_phase and stale_session.state != COMPLETING:
+                stale_session.state = COMPLETING
+                self._fire_and_forget(
+                    self._do_linear_complete_with_fallback(stale_session),
+                    stale_session._loop,
+                )
+        except Exception:
+            _logger.debug(
+                "HLS: stale session seal trigger failed old_msg=%s",
+                (stale_session.message_id or "?")[:12],
+                exc_info=True,
+            )
+
+        return new_session
+
+    def _maybe_reactivate_for_continuation(self, message_id: str) -> str | None:
+        """检查并按需为 message_id 触发会话续写重激活。
+
+        返回值：
+        - 若已有 continuation 映射或本次成功重激活：返回 new_message_id
+          （调用方应将后续 on_answer 路由到该 id）
+        - 否则（无需重激活或重激活失败）：返回 None
+          （调用方按原 message_id 走正常路径或 fallback）
+
+        幂等：同一 message_id 第二次调用直接返回已存在的映射，不重复创建。
+        线程安全：通过 _continuation_map_lock + _sessions_lock 保护。
+        """
+        # 1. 已有映射 → 直接返回（幂等）
+        existing = self._resolve_continuation_id(message_id)
+        if existing is not None:
+            return existing
+
+        # 2. 查原 session 是否处于"流式已关闭但未终态"的可重激活状态
+        stale = self._sess_get(message_id)
+        if stale is None:
+            return None  # 没有原 session，无法重激活
+        # 已终态（COMPLETED/ABORTED/CREATION_FAILED/TERMINATED）的 session 不重激活
+        # ——on_completed 已封卡，后续 token 是迟到的 race condition，应丢弃而非开新卡
+        if stale.is_terminal_phase:
+            return None
+        # _streaming_closed=False 说明流式仍健康，正常路径处理
+        if not stale._streaming_closed:
+            return None
+        # 防递归：本 session 自己是 continuation session 时不再次重激活
+        if stale._is_continuation:
+            return None
+        # 限制最多重激活 1 次（极端情况：新 session 也遇到 300309 时不再重激活）
+        if stale._continuation_reactivation_count >= 1:
+            return None
+
+        # 3. 触发重激活
+        new_session = self._reactivate_session_for_continuation(stale)
+        if new_session is None:
+            return None
+        self._register_continuation(message_id, new_session.message_id)
+        return new_session.message_id
 
     def _fire_and_forget(self, coro: Coroutine[Any, Any, Any], loop: asyncio.AbstractEventLoop) -> None:
         """Schedule a coroutine for background execution without awaiting.
@@ -409,6 +608,29 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         """答案文本增量（流式）."""
         if not self.enabled:
             return
+
+        # v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
+        # 主代理在长工具调用（尤其 delegate_task）后继续输出 answer token 时，
+        # 原卡片的流式可能已被飞书服务端关闭（_streaming_closed=True）。若直接
+        # 走 _get_active_session 会拿到原 session（仍在 STREAMING 态），后续
+        # stream_element 必失败（300309），最终降级纯文本。
+        #
+        # 此处先检查并按需触发会话续写重激活：把后续 token 透明路由到一张新开的
+        # continuation 卡片上。仅对"真实 answer token"（text 非空且非 None）触发，
+        # None 是 conversation_loop.py 在 tool 边界发的 stream_delta_callback(None)
+        # 信号——边界信号不触发重激活（由 hooks 层 if text 短路保证）。
+        if text:
+            new_id = self._maybe_reactivate_for_continuation(message_id)
+            if new_id is not None:
+                _logger.info(
+                    "HLS: on_answer routed to continuation session "
+                    "old_msg=%s new_msg=%s text_len=%d",
+                    (message_id or "?")[:12],
+                    new_id[:12],
+                    len(text),
+                )
+                message_id = new_id
+
         session = self._get_active_session(message_id)
         if session is None or session.guard.should_skip("on_answer"):
             return
@@ -645,6 +867,20 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if not message_id:
             _logger.warning("on_completed: missing message_id, skipping")
             return False
+
+        # v1.4.0 fix (问题3 根因1): 如果已为该 message_id 重激活过 continuation
+        # session（说明原 session 在 delegate_task 等长工具调用期间被飞书服务端
+        # 关闭流式，已异步触发收尾），on_completed 应转向 continuation session
+        # 完成，让最终封卡 + footer 落在新卡片上。原 session 的封卡流程已在
+        # _reactivate_session_for_continuation 中异步触发，不在此重复处理。
+        cont_id = self._pop_continuation_id(message_id)
+        if cont_id is not None:
+            _logger.info(
+                "on_completed: redirect to continuation msg=%s -> msg=%s",
+                (message_id or "?")[:12],
+                cont_id[:12],
+            )
+            message_id = cont_id
 
         # ── 状态机幂等守卫 ──
         # 先做直接查找（绕过 _TERMINAL 过滤），检查是否已在完成中/已完成。
@@ -895,6 +1131,14 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             stale_keys = [k for k, v in self._interrupt_map.items() if v == message_id]
             for k in stale_keys:
                 del self._interrupt_map[k]
+        # v1.4.0 fix: 清理 _continuation_map 中以本 message_id 为 old 或 new 的条目。
+        # old 端：原 session 已清理，对应映射也应清除；new 端：continuation session
+        # 已清理，反向映射也应清除（防止后续 on_completed 误重定向到已不存在的 id）。
+        with self._continuation_map_lock:
+            self._continuation_map.pop(message_id, None)
+            stale_cont_keys = [k for k, v in self._continuation_map.items() if v == message_id]
+            for k in stale_cont_keys:
+                del self._continuation_map[k]
         session.flush.mark_completed()
 
     def _release_session_data(self, session: CardSession) -> None:
