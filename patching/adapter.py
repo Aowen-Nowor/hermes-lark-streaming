@@ -815,6 +815,99 @@ def _safe_action_value_repr(action_value: Any) -> str:
         return repr(action_value)[:200]
 
 
+def _wrap_handle_card_action_event(original_method: Callable) -> Callable:
+    """Wrap ``FeishuAdapter._handle_card_action_event`` — the REAL interception point.
+
+    v1.4.2: 修复 v1.4.1 `_wrap_feishu_card_action_trigger` 失效的根因。
+
+    WHY THIS LEVEL (not ``_on_card_action_trigger``):
+        飞书 SDK 在 ``register_p2_card_action_trigger(self._on_card_action_trigger)``
+        时保存了 bound method 引用（``P2CardActionTriggerProcessor.f = f``，
+        ``processor.do()`` 调用 ``self.f(data)`` 即存储的引用，非动态查找）。
+        之后替换 ``FeishuAdapter._on_card_action_trigger`` 类属性**不影响** SDK
+        已持有的 bound method 引用 → v1.4.1 的 wrapper 从未被调用（生产日志铁证：
+        ``patched ✓`` 9 次，``"no known marker"`` 0 次，原生路由 11 次）。
+
+        但 ``_on_card_action_trigger`` 方法体调用 ``_handle_card_action_event``
+        时用的是 ``self._handle_card_action_event(data)``（``adapter.py:2615``，
+        动态查找）。即使 SDK 持有 ``_on_card_action_trigger`` 的 stale bound
+        method，该 bound method 的方法体仍会通过 ``self.`` 动态查找当前类属性上
+        的 ``_handle_card_action_event``。所以在类属性上 patch
+        ``_handle_card_action_event`` 能被 stale bound method 间接调用到——
+        这是唯一可靠的拦截点。
+
+    WHAT IT DOES:
+        - ``hermes_clarify_action`` → 复用 ``_handle_clarify_card_action`` 处理
+          clarify 解析（授权检查 + resolve_gateway_clarify + schedule_confirm_card），
+          丢弃返回的 CallBackCard（async 路径无 sync 响应），suppress /card 生成。
+        - 其他无 marker 的 action → suppress /card 生成（Gateway 不认识 /card，
+          放行只会产生 "Unknown command /card" 噪音）。
+
+    TRADEOFF:
+        clarify 卡片在 SDK stale bound method 路径下失去 instant CallBackCard
+        （"已提交"态）sync 响应——用户看到卡片从"待选择"~1s 后跳到"已确认"
+        （由 ``_schedule_confirm_card`` server-side update_card 完成）。
+        ``_on_card_action_trigger`` wrapper 生效时（webhook 模式 / SDK 重新注册）
+        仍提供 instant CallBackCard，两者互补。
+    """
+
+    async def _wrapped(self, data):
+        event = getattr(data, "event", None)
+        action = getattr(event, "action", None)
+        action_value = getattr(action, "value", {}) or {}
+
+        clarify_action = (
+            action_value.get("hermes_clarify_action")
+            if isinstance(action_value, dict) else None
+        )
+
+        if clarify_action:
+            # Clarify action reached here because _on_card_action_trigger wrapper
+            # didn't run (SDK holds stale bound method). Handle clarify resolution
+            # here (async path) and suppress /card synthetic command generation.
+            _cid = action_value.get("clarify_id", "") if isinstance(action_value, dict) else ""
+            _logger.info(
+                "HLS: clarify card action %r reached _handle_card_action_event "
+                "(SDK stale bound method path — _on_card_action_trigger wrapper "
+                "bypassed), handling clarify resolution here, clarify_id=%s",
+                clarify_action,
+                (_cid or "?")[:12],
+            )
+            try:
+                # Reuse existing clarify handler (sync, returns CallBackCard we
+                # discard). It does: authorization check + resolve_gateway_clarify
+                # (via safe_schedule_threadsafe) + _schedule_confirm_card.
+                _handle_clarify_card_action(self, data, clarify_action, action_value)
+            except Exception:
+                _logger.warning(
+                    "HLS: clarify card action handling in _handle_card_action_event "
+                    "failed — clarify_id=%s",
+                    (_cid or "?")[:12],
+                    exc_info=True,
+                )
+            return  # suppress /card synthetic command generation
+
+        # Unknown action (no hermes_clarify_action / hermes_action /
+        # hermes_update_prompt_action marker) — suppress /card synthetic command.
+        # hermes core _handle_card_action_event would generate "/card {tag} {json}"
+        # which Gateway rejects ("Unknown command /card"). Note: hermes_action /
+        # hermes_update_prompt_action actions are handled by _on_card_action_trigger
+        # (sync, before _handle_card_action_event) so they never reach here.
+        try:
+            action_tag = str(getattr(action, "tag", "") or "button")
+        except Exception:
+            action_tag = "button"
+        _logger.warning(
+            "HLS: card action %r reached _handle_card_action_event — suppressing "
+            "/card synthetic command (gateway would reject it). action_value=%s",
+            action_tag,
+            _safe_action_value_repr(action_value),
+        )
+        return  # suppress
+
+    return _wrapped
+
+
 async def _schedule_confirm_card(*, cid: str) -> None:
     """Server-side card update: soft-lock → hard-lock (confirmed state).
 
