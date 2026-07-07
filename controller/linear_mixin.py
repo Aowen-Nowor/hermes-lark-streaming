@@ -848,6 +848,32 @@ class UnifiedControllerMixin:
                     state.panel_dirty = False
                     state.tool_steps_dirty = False
                     return
+                if is_element_not_found_error(e):
+                    # v1.4.1 fix (P1): Phase 3 batch_update 元素不存在 (300315 +
+                    # "not find elementID")。最常见场景：safety net 尝试删除
+                    # _LOADING_HINT_ELEMENT_ID，但 Phase 2 已在飞书侧删除成功
+                    # (例如 Phase 2 await 抛网络异常但飞书已处理 batch)，本地
+                    # _creation_stages / existing_elements 未同步 → 下轮 safety
+                    # net 再次添加 delete_elements → 300315 → 落入下方通用
+                    # warning 分支 → hint_removed 仍未同步 + existing_elements
+                    # 未 discard → 死循环 → partial_update (面板内容) 因 batch
+                    # 原子失败而丢失 → 卡片卡在「正在加载上下文...」。
+                    #
+                    # 修复：与 Phase 2 (line 645) 对齐，新增 is_element_not_found_error
+                    # 分支。300315 = 元素不存在 = 非致命 (我们要删的东西已经没了)。
+                    # 同步本地标志位 (hint_removed + discard from existing_elements)
+                    # → 下次 flush safety net 不再触发 delete。保留 panel_dirty /
+                    # tool_steps_dirty → batch 中其他操作 (partial_update) 下轮
+                    # 重试。info 级别 (不是 warning/error) — 不是真正的故障。
+                    _logger.info(
+                        "unified flush phase 3 element not found (non-fatal): %s — "
+                        "syncing hint tracking, card=%s",
+                        e, session.card_id[:12],
+                    )
+                    session._creation_stages.add("hint_removed")
+                    session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
+                    # 保留 panel_dirty / tool_steps_dirty 以便下轮 flush 重试
+                    return
                 _logger.warning("unified flush batch_update failed: %s", e)
                 return
 

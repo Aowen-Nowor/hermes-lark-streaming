@@ -734,6 +734,16 @@ def _wrap_feishu_card_action_trigger(original_method: Callable) -> Callable:
     All actions return a CallBackCard showing the soft-lock "submitted" state
     (with retry button). After hermes successfully processes the resolve,
     the card is updated server-side to the hard-lock "confirmed" state.
+
+    v1.4.1: 防御性拦截 — hermes core 原生 ``_on_card_action_trigger`` 对无
+    ``hermes_action`` / ``hermes_update_prompt_action`` 的卡片 action 一律
+    路由到 ``_handle_card_action_event``，生成合成 COMMAND ``/card {tag}``，
+    而 Gateway 不认识 ``/card`` (插件也没有此命令) → "Unknown command /card"。
+    本插件的 clarify 卡片只携带 ``hermes_clarify_action``，若补丁已打则在此
+    拦截；但任何无三种已知 marker 的 action 放行给原生必然产生被拒的
+    ``/card`` 合成命令。故对无 marker 的 action 直接返回空响应 (抑制
+    ``/card`` 生成)，仅 ``hermes_action`` / ``hermes_update_prompt_action``
+    放行给原生 (审批/改提示词由 hermes core 处理)。
     """
 
     def _wrapped(self, data):
@@ -747,10 +757,62 @@ def _wrap_feishu_card_action_trigger(original_method: Callable) -> Callable:
         if clarify_action:
             return _handle_clarify_card_action(self, data, clarify_action, action_value)
 
-        # Not a clarify action — pass through to original
-        return original_method(self, data)
+        # v1.4.1: 检查 hermes core 已知的两种 marker — 审批 / 改提示词。
+        # 有这两种 marker 的 action 放行给原生 _on_card_action_trigger 处理
+        # (hermes core 的 _handle_approval_card_action /
+        #  _handle_update_prompt_card_action 负责解析)。
+        _is_dict = isinstance(action_value, dict)
+        _has_approval = _is_dict and bool(action_value.get("hermes_action"))
+        _has_update_prompt = _is_dict and bool(action_value.get("hermes_update_prompt_action"))
+        if _has_approval or _has_update_prompt:
+            # Known hermes-core card action — pass through to original
+            return original_method(self, data)
+
+        # v1.4.1: 无任何已知 marker 的卡片 action — 抑制 /card 合成命令。
+        # hermes core 原生 _handle_card_action_event 会把它转成
+        # "/card {action_tag} {json}" COMMAND，Gateway 不认识 /card →
+        # "Unknown command /card" + unknown-command 提示卡 (用户感知:
+        # 卡片交互无反应)。本插件卡片 (clarify) 已在上方拦截；streaming
+        # 卡片无交互元素；其余无 marker 的 action 多为残留/竞态/旧卡，
+        # 放行只会产生噪音错误。返回空响应 (不更新卡片，不生成命令)。
+        try:
+            action_tag = str(getattr(action, "tag", "") or "button")
+        except Exception:
+            action_tag = "button"
+        _logger.warning(
+            "HLS: card action %r has no known marker (hermes_clarify_action/"
+            "hermes_action/hermes_update_prompt_action) — suppressing to avoid "
+            "/card synthetic command (gateway would reject it). "
+            "action_value=%s",
+            action_tag,
+            _safe_action_value_repr(action_value),
+        )
+        return _empty_card_action_response()
 
     return _wrapped
+
+
+def _empty_card_action_response():
+    """Build an empty P2CardActionTriggerResponse (suppresses native handling).
+
+    v1.4.1: 返回空响应让飞书 SDK 认为回调已被处理，hermes core 原生
+    _on_card_action_trigger 不会被调用，从而不生成 /card 合成命令。
+    """
+    try:
+        from lark_oapi.api.cardkit.v1 import P2CardActionTriggerResponse
+    except ImportError:
+        return None
+    return P2CardActionTriggerResponse()
+
+
+def _safe_action_value_repr(action_value: Any) -> str:
+    """Safely repr an action_value dict for logging (truncated, no secrets)."""
+    try:
+        import json
+        s = json.dumps(action_value, ensure_ascii=False, default=str)
+        return s[:200]
+    except Exception:
+        return repr(action_value)[:200]
 
 
 async def _schedule_confirm_card(*, cid: str) -> None:
