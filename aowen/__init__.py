@@ -762,6 +762,19 @@ def _handle_config_reload() -> dict:
 
 def handle_pre_gateway_dispatch(event: Any, gateway: Any = None, **kwargs) -> dict | None:
     """Handle /aowen commands — intercept and reply with cards."""
+    # v1.4.1: 懒重打 FeishuAdapter 补丁 (节流 60s)。
+    # _schedule_direct_patch 的 2s/10s 固定调度在某些 hermes v0.17.0 环境下
+    # 早于真身 (hermes_plugins.feishu_platform.adapter) 实际加载完成，导致
+    # 真身从未被 patch → clarify 卡片 action 落入 hermes core 原生
+    # _handle_card_action_event → 生成 /card 合成命令 → Gateway "Unknown
+    # command /card" (插件无此命令)。每条消息进入 gateway 前节流检查一次，
+    # 覆盖固定调度漏掉的延迟加载窗口。force=False 时内部 60s 节流，开销极低。
+    try:
+        from ..patching import lazy_repatch_feishu_adapter
+        lazy_repatch_feishu_adapter()
+    except Exception:
+        _logger.debug("HLS: lazy repatch call failed", exc_info=True)
+
     try:
         text = getattr(event, "text", "") or ""
         text_stripped = text.strip()

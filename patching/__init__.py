@@ -73,6 +73,8 @@ __all__ = [
     '_apply_feishu_adapter_patches',
     '_apply_feishu_adapter_deferred_repatch',
     '_verify_feishu_patch_identity',
+    # v1.4.1: throttled lazy repatch (pre_gateway_dispatch)
+    'lazy_repatch_feishu_adapter',
     # From gateway
     '_wrap_handle_message',
     '_wrap_handle_message_with_agent',
@@ -738,8 +740,9 @@ def _verify_feishu_patch_identity(adapter_instance: Any) -> bool:
     bundled platform deferred loading 导致插件 patch 错替身 class），clarify
     /delegate 卡片会退回 BasePlatformAdapter 纯文本 fallback。
 
-    供 ``/aowen doctor`` 命令或运行时校验调用（本次仅实现 + 导出，不强制集成
-    到调用链，避免每条消息增加 ``id()`` + set 查找开销）。
+    v1.4.1: 当检测到 mismatch 时，主动触发一次 lazy repatch（见
+    ``lazy_repatch_feishu_adapter``），尝试把 gateway 实际使用的 class
+    纳入 patched set，而不只是报错。
 
     Args:
         adapter_instance: gateway 运行时持有的 FeishuAdapter 实例
@@ -762,6 +765,74 @@ def _verify_feishu_patch_identity(adapter_instance: Any) -> bool:
         cls_id, sorted(_patched_feishu_classes),
     )
     return False
+
+
+# v1.4.1: 懒重打补丁节流状态。
+# _schedule_direct_patch 的 2s/10s 固定调度在某些 hermes v0.17.0 环境下可能
+# 早于真身 (hermes_plugins.feishu_platform.adapter) 实际加载完成，导致真身
+# 从未被 patch → clarify 卡片 action 落入 hermes core 原生 _handle_card_action_event
+# → 生成 /card 合成命令 → Gateway "Unknown command /card" (插件无此命令)。
+# 懒重打在每条消息 (pre_gateway_dispatch) 触发时节流检查一次，覆盖固定调度
+# 未覆盖的延迟加载窗口。60s 节流兼顾覆盖度与开销 (HermesCompat 实例化 +
+# importlib.import_module 有非零成本)。
+_lazy_repatch_last_ts: float = 0.0
+_lazy_repatch_interval: float = 60.0
+_lazy_repatch_lock = threading.Lock()
+
+
+def lazy_repatch_feishu_adapter(*, force: bool = False) -> bool:
+    """Throttled lazy re-patch of FeishuAdapter — called from pre_gateway_dispatch.
+
+    v1.4.1: 与 ``_apply_feishu_adapter_deferred_repatch`` 共用底层解析 + patch
+    逻辑，但增加 60s 节流 (``_lazy_repatch_interval``)，并在 ``force=True``
+    时跳过节流。供 ``handle_pre_gateway_dispatch`` 在每条消息进入 gateway 前
+    调用，确保即便 2s/10s 固定调度漏掉真身 class，第一条消息到来时也能补打。
+
+    线程安全: ``_lazy_repatch_lock`` 保护节流时间戳读写 (pre_gateway_dispatch
+    可能被多线程调用)。
+
+    Args:
+        force: ``True`` 跳过 60s 节流 (供 /aowen doctor 主动调用)。
+
+    Returns:
+        ``True`` 若本次触发了 repatch (新 class 被 patch)；``False`` 若节流
+        跳过 / class 已 patched / resolve 失败。
+    """
+    global _lazy_repatch_last_ts
+    now = time.monotonic()
+    if not force:
+        with _lazy_repatch_lock:
+            if now - _lazy_repatch_last_ts < _lazy_repatch_interval:
+                return False
+            _lazy_repatch_last_ts = now
+
+    try:
+        new_cls = HermesCompat().resolve_feishu_adapter_class_fresh()
+    except Exception as e:
+        _logger.debug("HLS: lazy repatch — resolve failed: %s", e)
+        return False
+
+    if new_cls is None:
+        _logger.debug("HLS: lazy repatch — FeishuAdapter not resolvable yet, skip")
+        return False
+
+    cls_id = id(new_cls)
+    if cls_id in _patched_feishu_classes:
+        return False
+
+    _logger.info(
+        "HLS: lazy repatch — new FeishuAdapter class_id=%s detected (missed by "
+        "2s/10s schedule), applying patches",
+        cls_id,
+    )
+    ok = _apply_feishu_adapter_patches(new_cls, is_repatch=True)
+    if ok:
+        _logger.warning(
+            "HLS: FeishuAdapter lazy re-patched on class_id=%s "
+            "(deferred loading window missed by fixed schedule)",
+            cls_id,
+        )
+    return ok
 
 
 def _apply_direct_agent_patch() -> None:
