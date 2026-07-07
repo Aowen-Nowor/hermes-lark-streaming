@@ -94,6 +94,7 @@ __all__ = [
     '_wrap_feishu_adapter_delete_reaction',
     '_wrap_feishu_adapter_send_clarify',
     '_wrap_feishu_card_action_trigger',
+    '_wrap_handle_card_action_event',
     '_handle_clarify_card_action',
     '_REACTION_STATUS_MAP',
     '_clarify_choices',
@@ -224,6 +225,7 @@ from .adapter import (  # noqa: E402
     _wrap_feishu_adapter_delete_reaction,
     _wrap_feishu_adapter_send_clarify,
     _wrap_feishu_card_action_trigger,
+    _wrap_handle_card_action_event,
     _handle_clarify_card_action,
     _REACTION_STATUS_MAP,
     _clarify_choices,
@@ -625,6 +627,18 @@ def _apply_feishu_adapter_patches(FeishuAdapter, *, is_repatch: bool = False) ->
             _logger.info("hermes-lark-streaming: FeishuAdapter._on_card_action_trigger patched ✓ (clarify card callback)")
         except AttributeError:
             _logger.debug("hermes-lark-streaming: FeishuAdapter._on_card_action_trigger not found, clarify callback skipped")
+        # v1.4.2: patch _handle_card_action_event — 这是真正可靠的拦截点。
+        # _on_card_action_trigger patch 对 SDK WebSocket 模式无效（SDK 注册回调时
+        # 保存 bound method 引用，类属性替换不影响已保存引用）。但 _on_card_action_trigger
+        # 方法体通过 self._handle_card_action_event(data) 动态查找调用，所以 patch
+        # _handle_card_action_event 类属性能被 stale bound method 间接调用到。
+        # 此 patch 处理 clarify action（复用 _handle_clarify_card_action）+ 抑制
+        # 未知 action 的 /card 合成命令。
+        try:
+            FeishuAdapter._handle_card_action_event = _wrap_handle_card_action_event(FeishuAdapter._handle_card_action_event)
+            _logger.info("hermes-lark-streaming: FeishuAdapter._handle_card_action_event patched ✓ (card action /card suppression — v1.4.2 stale bound method fix)")
+        except AttributeError:
+            _logger.debug("hermes-lark-streaming: FeishuAdapter._handle_card_action_event not found, /card suppression skipped")
 
         # Record this class as patched AFTER successful patch (only on success,
         # so a failed attempt can be retried later in the deferred stage).

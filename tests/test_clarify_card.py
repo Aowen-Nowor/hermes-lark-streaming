@@ -8,6 +8,7 @@ _schedule_clarify_resolve_and_confirm).
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -724,6 +725,312 @@ class TestWrapFeishuCardActionTriggerV141:
         finally:
             _clarify_questions.pop("v141_cid", None)
             _clarify_choices.pop("v141_cid", None)
+
+
+class TestWrapHandleCardActionEventV142:
+    """v1.4.2 regression: _wrap_handle_card_action_event — the REAL fix for /card.
+
+    Root cause (confirmed via hermes core source + production logs): 飞书 SDK 在
+    register_p2_card_action_trigger(self._on_card_action_trigger) 时保存 bound method
+    引用 (P2CardActionTriggerProcessor.f = f)。之后替换 FeishuAdapter._on_card_action_trigger
+    类属性不影响 SDK 已持有的引用 → v1.4.1 _wrap_feishu_card_action_trigger 从未执行
+    (生产日志: patched ✓ 9 次, "no known marker" 0 次, 原生路由 11 次)。
+
+    但 _on_card_action_trigger 方法体调用 _handle_card_action_event 用 self. (动态查找,
+    adapter.py:2615)。即使 SDK 持有 stale bound method, self. 仍查找当前类属性。
+    所以 patch _handle_card_action_event 类属性能被 stale bound method 间接调用到。
+
+    本测试验证 _wrap_handle_card_action_event:
+    - clarify action → 复用 _handle_clarify_card_action, 不调用原生 (不生成 /card)
+    - 未知 action → 抑制 (不调用原生, 不生成 /card)
+    - original_method 永不被调用 (所有 action 都被拦截)
+    """
+
+    def test_wrapper_is_callable(self) -> None:
+        from hermes_lark_streaming.patching import _wrap_handle_card_action_event
+        assert callable(_wrap_handle_card_action_event)
+
+    @pytest.mark.asyncio
+    async def test_unknown_action_suppressed_original_not_called(self) -> None:
+        """v1.4.2: 无 marker 的 action → 抑制, 不调用原生 _handle_card_action_event (不生成 /card)."""
+        from hermes_lark_streaming.patching import _wrap_handle_card_action_event
+
+        original = MagicMock(return_value=None)  # native returns None (async)
+        wrapped = _wrap_handle_card_action_event(original)
+
+        mock_action = MagicMock()
+        mock_action.value = {"some_unknown_key": "x"}
+        mock_action.tag = "select_static"
+
+        mock_event = MagicMock()
+        mock_event.action = mock_action
+
+        mock_data = MagicMock()
+        mock_data.event = mock_event
+
+        # wrapped is async
+        await wrapped(MagicMock(), mock_data)
+
+        # original (native _handle_card_action_event) must NOT be called —
+        # that path generates the rejected /card synthetic command
+        original.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_action_value_suppressed(self) -> None:
+        """v1.4.2: action_value 为空 dict → 抑制."""
+        from hermes_lark_streaming.patching import _wrap_handle_card_action_event
+
+        original = MagicMock(return_value=None)
+        wrapped = _wrap_handle_card_action_event(original)
+
+        mock_action = MagicMock()
+        mock_action.value = {}
+        mock_action.tag = "button"
+
+        mock_event = MagicMock()
+        mock_event.action = mock_action
+
+        mock_data = MagicMock()
+        mock_data.event = mock_event
+
+        await wrapped(MagicMock(), mock_data)
+
+        original.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_clarify_action_handled_and_original_not_called(self) -> None:
+        """v1.4.2: clarify action → 复用 _handle_clarify_card_action, 不调用原生."""
+        from hermes_lark_streaming.patching import (
+            _wrap_handle_card_action_event,
+            _clarify_questions,
+            _clarify_choices,
+        )
+        _clarify_questions["v142_cid"] = "Q?"
+        _clarify_choices["v142_cid"] = ["A", "B"]
+        try:
+            original = MagicMock(return_value=None)
+            wrapped = _wrap_handle_card_action_event(original)
+
+            mock_action = MagicMock()
+            mock_action.value = {"hermes_clarify_action": "select", "clarify_id": "v142_cid"}
+            mock_action.option = "0"
+
+            mock_event = MagicMock()
+            mock_event.action = mock_action
+            mock_event.operator = MagicMock()
+            mock_event.operator.open_id = "user_1"
+
+            mock_data = MagicMock()
+            mock_data.event = mock_event
+
+            mock_adapter = MagicMock()
+            mock_adapter._is_interactive_operator_authorized.return_value = True
+            mock_adapter._loop = None
+
+            mock_cg = MagicMock()
+            mock_cg.resolve_gateway_clarify = MagicMock()
+
+            with patch.dict("sys.modules", {
+                "tools": MagicMock(),
+                "tools.clarify_gateway": mock_cg,
+            }):
+                await wrapped(mock_adapter, mock_data)
+
+            # original (native _handle_card_action_event) must NOT be called —
+            # clarify is handled by _handle_clarify_card_action, /card suppressed
+            original.assert_not_called()
+            # clarify resolution should be called with the selected choice
+            mock_cg.resolve_gateway_clarify.assert_called_once_with("v142_cid", "A")
+        finally:
+            _clarify_questions.pop("v142_cid", None)
+            _clarify_choices.pop("v142_cid", None)
+
+    @pytest.mark.asyncio
+    async def test_clarify_action_exception_does_not_fall_through_to_native(self) -> None:
+        """v1.4.2: clarify handler 抛异常时也不放行给原生 (不生成 /card)."""
+        from hermes_lark_streaming.patching import _wrap_handle_card_action_event
+
+        original = MagicMock(return_value=None)
+        wrapped = _wrap_handle_card_action_event(original)
+
+        mock_action = MagicMock()
+        mock_action.value = {"hermes_clarify_action": "select", "clarify_id": "bad_cid"}
+        mock_action.option = "0"
+
+        mock_event = MagicMock()
+        mock_event.action = mock_action
+        mock_event.operator = MagicMock()
+        mock_event.operator.open_id = "user_1"
+
+        mock_data = MagicMock()
+        mock_data.event = mock_event
+
+        mock_adapter = MagicMock()
+        mock_adapter._is_interactive_operator_authorized.return_value = True
+        mock_adapter._loop = None
+
+        # _handle_clarify_card_action will be called; it may succeed or fail.
+        # Either way, original (native) must NOT be called.
+        with patch.dict("sys.modules", {
+            "tools": MagicMock(),
+            "tools.clarify_gateway": MagicMock(),
+        }):
+            await wrapped(mock_adapter, mock_data)
+
+        original.assert_not_called()
+
+
+class TestStaleBoundMethodSimulation:
+    """v1.4.2: Simulate the SDK stale bound method scenario end-to-end.
+
+    验证：即使 _on_card_action_trigger 是 stale bound method (注册时保存的旧引用,
+    未被 wrapper 包裹)，它调用 self._handle_card_action_event(data) 时仍会通过
+    self. 动态查找命中 patched _handle_card_action_event → /card 被抑制。
+    """
+
+    @pytest.mark.asyncio
+    async def test_stale_on_card_action_trigger_calls_patched_handle_event(self) -> None:
+        """Simulate: SDK holds stale _on_card_action_trigger (unpatched), but
+        _handle_card_action_event is patched on the class. The stale method's
+        body does self._handle_card_action_event(data) → hits the patch."""
+        from hermes_lark_streaming.patching import (
+            _wrap_handle_card_action_event,
+            _clarify_questions,
+            _clarify_choices,
+        )
+        _clarify_questions["stale_cid"] = "Q?"
+        _clarify_choices["stale_cid"] = ["X", "Y"]
+        try:
+            # Build a fake adapter class mimicking hermes core's structure:
+            # - _on_card_action_trigger: the NATIVE (unpatched) method that
+            #   checks hermes_action/hermes_update_prompt_action then calls
+            #   self._handle_card_action_event(data) via self. (dynamic lookup)
+            # - _handle_card_action_event: will be patched on the CLASS
+
+            class FakeAdapter:
+                def __init__(self):
+                    self._loop = None
+                    self._loop_accepts_callbacks = lambda loop: True
+                    self._submit_on_loop = lambda loop, coro: asyncio.ensure_future(coro)
+                    self._is_interactive_operator_authorized = lambda oid: True
+
+                # Simulate hermes core _on_card_action_trigger (the stale bound method).
+                # This is what the SDK captured BEFORE patching. Its body calls
+                # self._handle_card_action_event(data) — dynamic lookup via self.
+                def _on_card_action_trigger(self, data):
+                    event = getattr(data, "event", None)
+                    action = getattr(event, "action", None)
+                    action_value = getattr(action, "value", {}) or {}
+                    hermes_action = action_value.get("hermes_action") if isinstance(action_value, dict) else None
+                    update_prompt = action_value.get("hermes_update_prompt_action") if isinstance(action_value, dict) else None
+                    if hermes_action or update_prompt:
+                        return "approval/update_prompt handled"
+                    # THIS is the key line — self. dynamic lookup
+                    self._submit_on_loop(self._loop, self._handle_card_action_event(data))
+                    return "empty_response"
+
+                # _handle_card_action_event — the NATIVE version (generates /card).
+                # Will be REPLACED on the class by the patch.
+                async def _handle_card_action_event(self, data):
+                    return "NATIVE /card GENERATED (should NOT happen)"
+
+            adapter = FakeAdapter()
+
+            # Capture the stale bound method (simulating SDK registration)
+            stale_bound_method = adapter._on_card_action_trigger
+
+            # NOW patch _handle_card_action_event on the CLASS (simulating plugin patch)
+            original_handle = FakeAdapter._handle_card_action_event
+            FakeAdapter._handle_card_action_event = _wrap_handle_card_action_event(original_handle)
+
+            # Build a clarify action
+            mock_action = MagicMock()
+            mock_action.value = {"hermes_clarify_action": "select", "clarify_id": "stale_cid"}
+            mock_action.option = "0"
+
+            mock_event = MagicMock()
+            mock_event.action = mock_action
+            mock_event.operator = MagicMock()
+            mock_event.operator.open_id = "user_1"
+
+            mock_data = MagicMock()
+            mock_data.event = mock_event
+
+            mock_cg = MagicMock()
+            mock_cg.resolve_gateway_clarify = MagicMock()
+
+            # SDK dispatches via the STALE bound method (not via class attribute).
+            # The stale method's body calls self._handle_card_action_event(data)
+            # which should hit the PATCHED version (dynamic lookup via self.).
+            with patch.dict("sys.modules", {
+                "tools": MagicMock(),
+                "tools.clarify_gateway": mock_cg,
+            }):
+                result = stale_bound_method(mock_data)
+                # stale_bound_method scheduled a coroutine via _submit_on_loop;
+                # let it execute
+                await asyncio.sleep(0.05)
+
+            # The clarify should have been resolved (patched _handle_card_action_event
+            # called _handle_clarify_card_action which called resolve_gateway_clarify)
+            mock_cg.resolve_gateway_clarify.assert_called_once_with("stale_cid", "X")
+        finally:
+            _clarify_questions.pop("stale_cid", None)
+            _clarify_choices.pop("stale_cid", None)
+
+    @pytest.mark.asyncio
+    async def test_stale_bound_method_unknown_action_suppressed(self) -> None:
+        """Simulate: stale _on_card_action_trigger + patched _handle_card_action_event
+        + unknown action → /card suppressed (native _handle_card_action_event not called)."""
+        from hermes_lark_streaming.patching import _wrap_handle_card_action_event
+
+        native_called = {"yes": False}
+
+        class FakeAdapter:
+            def __init__(self):
+                self._loop = None
+                self._loop_accepts_callbacks = lambda loop: True
+                self._submit_on_loop = lambda loop, coro: asyncio.ensure_future(coro)
+
+            def _on_card_action_trigger(self, data):
+                event = getattr(data, "event", None)
+                action = getattr(event, "action", None)
+                action_value = getattr(action, "value", {}) or {}
+                # No hermes_action/hermes_update_prompt_action → falls through
+                self._submit_on_loop(self._loop, self._handle_card_action_event(data))
+                return "empty"
+
+            async def _handle_card_action_event(self, data):
+                native_called["yes"] = True
+                return "NATIVE /card GENERATED"
+
+        adapter = FakeAdapter()
+        stale_bound_method = adapter._on_card_action_trigger
+
+        # Patch _handle_card_action_event on the class
+        original_handle = FakeAdapter._handle_card_action_event
+        FakeAdapter._handle_card_action_event = _wrap_handle_card_action_event(original_handle)
+
+        mock_action = MagicMock()
+        mock_action.value = {"unknown_marker": "x"}
+        mock_action.tag = "select_static"
+
+        mock_event = MagicMock()
+        mock_event.action = mock_action
+
+        mock_data = MagicMock()
+        mock_data.event = mock_event
+
+        # SDK dispatches via stale bound method
+        stale_bound_method(mock_data)
+        await asyncio.sleep(0.05)
+
+        # Native _handle_card_action_event must NOT have been called —
+        # the patch suppressed the /card synthetic command
+        assert not native_called["yes"], (
+            "Native _handle_card_action_event was called — /card synthetic command "
+            "would be generated. The patch must suppress it."
+        )
 
 
 class TestClarifyCardRegistry:

@@ -1,3 +1,22 @@
+## v1.4.2 (2026-07-07)
+
+紧急修复 v1.4.1 未解决的 `/card` 问题 — 用户升级 v1.4.1 后卡片交互仍返回 "Unknown command /card"。经原始日志（agent.log 3.6MB + gateway.log 140KB）+ hermes core 源码 + lark_oapi SDK 源码三方对齐，定位 v1.4.1 patch 错了拦截层。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | v1.4.1 升级后卡片交互（select_static/input）仍返回 "Unknown command /card"，wrapper 从未执行（生产日志铁证：`_on_card_action_trigger patched ✓` 9 次，`"no known marker"` 0 次，原生 `Routing card action` 11 次） | **v1.4.1 patch 错了拦截层。** 飞书 SDK 在 `register_p2_card_action_trigger(self._on_card_action_trigger)`（`adapter.py:1639`）时保存 **bound method 引用**——`P2CardActionTriggerProcessor.__init__` 执行 `self.f = f`（`processor.py:14`），`do()` 调用 `self.f(data)`（`processor.py:19`）即存储的引用，**非动态查找**。之后替换 `FeishuAdapter._on_card_action_trigger` 类属性**不影响** SDK 已持有的 bound method（Python 机制：bound method 的 `__func__` 在创建时绑定，类属性替换不改变已创建 bound method 的 `__func__`）。v1.4.1 的 `_wrap_feishu_card_action_trigger` + 懒重打都打在类属性上 → SDK 永远调用注册时的旧 bound method → wrapper 从未执行 → clarify action 落入 hermes core 原生 `_handle_card_action_event` → 生成 `/card {tag} {json}` 合成命令 → Gateway 不认识 → "Unknown command /card" | **patch `_handle_card_action_event` 而非 `_on_card_action_trigger`**（`patching/adapter.py`）。hermes core `_on_card_action_trigger` 方法体调用 `_handle_card_action_event` 时用 `self._handle_card_action_event(data)`（`adapter.py:2615`，**动态查找**）。即使 SDK 持有 `_on_card_action_trigger` 的 stale bound method，该方法体仍通过 `self.` 动态查找当前类属性上的 `_handle_card_action_event`。新增 `_wrap_handle_card_action_event`：①`hermes_clarify_action` → 复用 `_handle_clarify_card_action`（授权检查 + resolve_gateway_clarify + schedule_confirm_card），丢弃返回的 CallBackCard（async 路径无 sync 响应），suppress /card；②其他无 marker action → suppress /card。注册到 `_apply_feishu_adapter_patches`，与 `_on_card_action_trigger` patch 并存（后者对 webhook 模式 / SDK 重新注册仍有效，提供 instant CallBackCard，两者互补）(`patching/adapter.py`, `patching/__init__.py`) |
+| 🧪 Test | 新增 7 个回归测试，含 2 个端到端 stale bound method 模拟 | v1.4.1 的 wrapper 从未执行是生产环境才暴露的 SDK 机制问题，单元测试需模拟该场景 | `TestWrapHandleCardActionEventV142`（5 个：wrapper 可调用、unknown action 抑制、empty action_value 抑制、clarify 处理+原生不调用、clarify 异常不放行）；`TestStaleBoundMethodSimulation`（2 个关键端到端模拟：①stale `_on_card_action_trigger` bound method + patched `_handle_card_action_event` + clarify action → clarify 被正确解析；②stale bound method + unknown action → 原生 `_handle_card_action_event` 不被调用 = /card 被抑制）(`tests/test_clarify_card.py`) |
+
+**审计方法**: 三方对齐求证，读原始日志未盲信分析文档。①用户上传原始 `agent.log`（3.6MB）+ `gateway.log`（140KB），grep 确认分析文档的日志计数：`_on_card_action_trigger patched ✓` 9 次、`"no known marker"` 0 次、`"clarify card: callback"` 0 次、`"lazy repatch"` 0 次、`"Routing card action"` 11 次、`"Unknown command /card"` 11 次——铁证 v1.4.1 wrapper 从未执行。日志含 v1.4.0（314 次）和 v1.4.1（45 次）版本字符串，确认用户已升级 v1.4.1 但问题依旧。②SSH 读 hermes core 源码（`/usr/local/lib/hermes-agent/plugins/platforms/feishu/adapter.py`）：`_on_card_action_trigger`（:2582）方法体 `self._submit_on_loop(loop, self._handle_card_action_event(data))`（:2615）——`self.` 动态查找。③SSH 读 lark_oapi SDK 源码：`processor.py` `P2CardActionTriggerProcessor.__init__` `self.f = f` + `do()` `return self.f(data)`——存储 bound method 引用非动态查找；`dispatcher_handler.py:218` `P2CardActionTriggerProcessor(f)` 注册时求值。根因闭环：SDK 注册时保存 `_on_card_action_trigger` bound method（`__func__` = 注册时的原函数），插件 2s 后 patch 类属性不影响已保存引用 → wrapper 从未执行。修复：patch `_handle_card_action_event`（`self.` 动态查找可达）。913 单元测试通过（906 + 7 新增），0 回归。
+
+**已知限制**:
+- clarify 卡片在 SDK stale bound method 路径下失去 instant CallBackCard（"已提交"态）sync 响应——用户看到卡片从"待选择"~1s 后跳到"已确认"（由 `_schedule_confirm_card` server-side `update_card` 完成）。`_on_card_action_trigger` wrapper 生效时（webhook 模式）仍提供 instant CallBackCard
+- `_on_card_action_trigger` patch（v1.4.1）保留——对 webhook 模式（`adapter.py:3495` `self._on_card_action_trigger(data)` 动态查找）和未来 SDK 重新注册场景仍有效，与 `_handle_card_action_event` patch 互补
+- 懒重打补丁（v1.4.1 `lazy_repatch_feishu_adapter`）保留——对 deferred loading 边缘场景（真身 class 未 patch）仍有效，但**不能**修复 SDK bound method 引用问题（bound method 在注册时创建，类属性替换不影响）
+- E2E 真飞书实机验证待用户配合（服务器 hermes v0.18.0 不复现 /card 问题，需 v0.17.0 环境实机盖章）。修复基于 SDK 源码 + hermes core 源码 + 生产日志三方对齐 + stale bound method 端到端模拟测试
+
+---
+
 ## v1.4.1 (2026-07-07)
 
 两个用户反馈 issue 修复 — 卡片交互返回 "Unknown command /card" + Phase 3 batch_update 300315 死循环。根因求证经 SSH 服务器日志 + hermes core 源码 + 插件代码三方对齐，未盲信 bug 报告根因分析。
