@@ -774,6 +774,134 @@ class TestDoUnifiedFlush:
 # is never a need to split across multiple cards.
 
 
+# ── v1.4.1: Phase 3 is_element_not_found_error 回归测试 ──
+
+
+class TestPhase3ElementNotFoundV141:
+    """v1.4.1 regression: Phase 3 batch_update 300315 "not find elementID" 处理。
+
+    Root cause (Issue 2): Phase 3 safety net 尝试删除已被 Phase 2 删除的
+    _LOADING_HINT_ELEMENT_ID → 飞书返回 300315 "not find elementID" →
+    Phase 3 except 块无 is_element_not_found_error 分支 → 落入通用 warning
+    → hint_removed 未同步 + existing_elements 未 discard → 下轮 safety net
+    再次添加 delete → 死循环 → partial_update (面板内容) 因 batch 原子失败
+    丢失 → 卡片卡在「正在加载上下文...」。
+
+    修复：Phase 3 except 块新增 is_element_not_found_error 分支，同步
+    hint_removed + discard existing_elements，保留 dirty 供下轮重试。
+    """
+
+    @pytest.mark.asyncio
+    async def test_phase3_element_not_found_syncs_hint_and_keeps_dirty(self) -> None:
+        """300315 on Phase 3 batch → sync hint_removed, keep panel_dirty for retry."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_141", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_141"
+        # Simulate: Phase 2 succeeded on Feishu side (hint deleted) but local
+        # tracking out of sync (hint_removed NOT in stages, hint still in
+        # existing_elements) — e.g. network error after Feishu processed batch.
+        session._creation_stages = {"answer", "panel"}  # hint_removed missing!
+        session.existing_elements = {
+            ANSWER_ELEMENT_ID,
+            UNIFIED_PANEL_ELEMENT_ID,
+            _LOADING_HINT_ELEMENT_ID,  # hint still tracked locally
+            _LOADING_ELEMENT_ID,
+        }
+        session.unified_state.on_reasoning_delta("think")
+        time.sleep(0.01)
+        session.unified_state.on_answer_delta("reply")
+        ctrl._sessions["msg_141"] = session
+
+        # Phase 3 batch_update returns 300315 "not find elementID" (hint already gone)
+        err = FeishuAPIError(
+            "cardkit_batch_update: code=300315, msg=ErrMsg: not find elementID : context_loading_hint;",
+            code=300315,
+        )
+        ctrl._client.cardkit_batch_update = AsyncMock(side_effect=err)
+        ctrl._client.cardkit_stream_element = AsyncMock()
+
+        await ctrl._do_unified_flush(session)
+
+        # v1.4.1 fix: hint_removed synced into _creation_stages
+        assert "hint_removed" in session._creation_stages, (
+            "Phase 3 is_element_not_found_error must sync hint_removed to break "
+            "the safety-net delete loop"
+        )
+        # v1.4.1 fix: hint discarded from existing_elements
+        assert _LOADING_HINT_ELEMENT_ID not in session.existing_elements, (
+            "Phase 3 is_element_not_found_error must discard hint from existing_elements"
+        )
+        # v1.4.1 fix: panel_dirty / tool_steps_dirty PRESERVED for next-flush retry
+        # (not cleared like schema_error, not lost like the old generic warning path)
+        assert session.unified_state.panel_dirty or session.unified_state.tool_steps_dirty, (
+            "Phase 3 is_element_not_found_error must preserve panel_dirty/tool_steps_dirty "
+            "so the partial_update retries on the next flush"
+        )
+
+    @pytest.mark.asyncio
+    async def test_phase3_element_not_found_second_flush_no_loop(self) -> None:
+        """After the 300315 sync, the next flush must NOT re-add the hint delete
+        (safety net skipped because hint_removed is now in stages) — loop broken."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_141b", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_141b"
+        session._creation_stages = {"answer", "panel"}
+        session.existing_elements = {
+            ANSWER_ELEMENT_ID,
+            UNIFIED_PANEL_ELEMENT_ID,
+            _LOADING_HINT_ELEMENT_ID,
+            _LOADING_ELEMENT_ID,
+        }
+        session.unified_state.on_reasoning_delta("think")
+        time.sleep(0.01)
+        session.unified_state.on_answer_delta("reply")
+        ctrl._sessions["msg_141b"] = session
+
+        call_count = {"batch": 0}
+
+        async def batch_then_ok(card_id: str, actions: list[dict], **kw: object) -> None:
+            call_count["batch"] += 1
+            if call_count["batch"] == 1:
+                # First flush: Phase 3 safety net deletes hint → 300315
+                raise FeishuAPIError(
+                    "cardkit_batch_update: code=300315, msg=ErrMsg: not find elementID : context_loading_hint;",
+                    code=300315,
+                )
+            # Second flush: succeed (no hint delete in actions because hint_removed synced)
+
+        ctrl._client.cardkit_batch_update = AsyncMock(side_effect=batch_then_ok)
+        ctrl._client.cardkit_stream_element = AsyncMock()
+
+        # First flush — triggers 300315, syncs hint_removed
+        await ctrl._do_unified_flush(session)
+        assert "hint_removed" in session._creation_stages
+
+        # Reset dirty to simulate new content arriving
+        session.unified_state.panel_dirty = True
+        session.unified_state.tool_steps_dirty = True
+
+        # Second flush — should NOT include a delete_elements for the hint
+        captured_actions: list[list[dict]] = []
+
+        async def capture(card_id: str, actions: list[dict], **kw: object) -> None:
+            captured_actions.append(actions)
+
+        ctrl._client.cardkit_batch_update = AsyncMock(side_effect=capture)
+        await ctrl._do_unified_flush(session)
+
+        # Verify no delete_elements targets the hint (loop broken)
+        for actions_batch in captured_actions:
+            for action in actions_batch:
+                if action.get("action") == "delete_elements":
+                    ids = action.get("params", {}).get("element_ids", [])
+                    assert _LOADING_HINT_ELEMENT_ID not in ids, (
+                        "Phase 3 safety net must NOT re-add hint delete after "
+                        "is_element_not_found_error sync — loop would recur"
+                    )
+
+
 # ── Reasoning finalization tests ──
 
 

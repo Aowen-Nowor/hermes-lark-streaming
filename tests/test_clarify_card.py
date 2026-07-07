@@ -579,6 +579,153 @@ class TestWrapFeishuCardActionTrigger:
         _clarify_answers.pop("test_cid_retry", None)
 
 
+class TestWrapFeishuCardActionTriggerV141:
+    """v1.4.1 regression: defensive suppression of unknown card actions.
+
+    Root cause (Issue 1): hermes core 原生 _on_card_action_trigger 对无
+    hermes_action / hermes_update_prompt_action 的卡片 action 路由到
+    _handle_card_action_event → 生成 "/card {tag}" 合成命令 → Gateway
+    "Unknown command /card" (插件无此命令)。本插件 clarify 卡片只携带
+    hermes_clarify_action，补丁已打时在此拦截；其余无 marker 的 action
+    v1.4.1 起返回空响应 (抑制 /card 生成)，仅 hermes_action /
+    hermes_update_prompt_action 放行给原生。
+    """
+
+    def test_unknown_action_suppressed_not_passed_to_native(self) -> None:
+        """v1.4.1: 无任何已知 marker 的 action 返回空响应，不调用原生方法。"""
+        from hermes_lark_streaming.patching import _wrap_feishu_card_action_trigger
+
+        original = MagicMock(return_value="should_not_be_called")
+        wrapped = _wrap_feishu_card_action_trigger(original)
+
+        mock_action = MagicMock()
+        mock_action.value = {"some_unknown_key": "x"}
+        mock_action.tag = "select_static"
+
+        mock_event = MagicMock()
+        mock_event.action = mock_action
+
+        mock_data = MagicMock()
+        mock_data.event = mock_event
+
+        result = wrapped(MagicMock(), mock_data)
+
+        # original (native _on_card_action_trigger) must NOT be called —
+        # that path generates the rejected /card synthetic command
+        original.assert_not_called()
+        # result is NOT the original's return value (suppression took place).
+        # _empty_card_action_response() may return None when
+        # P2CardActionTriggerResponse is unavailable in the test env — None
+        # also suppresses the native handler (SDK treats None as "no response").
+        assert result != "should_not_be_called"
+
+    def test_hermes_action_still_passes_through(self) -> None:
+        """v1.4.1: hermes_action (审批) 仍放行给原生。"""
+        from hermes_lark_streaming.patching import _wrap_feishu_card_action_trigger
+
+        original = MagicMock(return_value="approval_response")
+        wrapped = _wrap_feishu_card_action_trigger(original)
+
+        mock_event = MagicMock()
+        mock_event.action.value = {"hermes_action": "approve", "approval_id": "ap1"}
+
+        mock_data = MagicMock()
+        mock_data.event = mock_event
+
+        result = wrapped(MagicMock(), mock_data)
+
+        original.assert_called_once()
+        assert result == "approval_response"
+
+    def test_hermes_update_prompt_action_still_passes_through(self) -> None:
+        """v1.4.1: hermes_update_prompt_action (改提示词) 仍放行给原生。"""
+        from hermes_lark_streaming.patching import _wrap_feishu_card_action_trigger
+
+        original = MagicMock(return_value="update_prompt_response")
+        wrapped = _wrap_feishu_card_action_trigger(original)
+
+        mock_event = MagicMock()
+        mock_event.action.value = {"hermes_update_prompt_action": "yes"}
+
+        mock_data = MagicMock()
+        mock_data.event = mock_event
+
+        result = wrapped(MagicMock(), mock_data)
+
+        original.assert_called_once()
+        assert result == "update_prompt_response"
+
+    def test_empty_action_value_suppressed(self) -> None:
+        """v1.4.1: action_value 为空 dict 时抑制 (不放行)。"""
+        from hermes_lark_streaming.patching import _wrap_feishu_card_action_trigger
+
+        original = MagicMock(return_value="should_not_be_called")
+        wrapped = _wrap_feishu_card_action_trigger(original)
+
+        mock_action = MagicMock()
+        mock_action.value = {}
+        mock_action.tag = "button"
+
+        mock_event = MagicMock()
+        mock_event.action = mock_action
+
+        mock_data = MagicMock()
+        mock_data.event = mock_event
+
+        result = wrapped(MagicMock(), mock_data)
+
+        original.assert_not_called()
+        # suppression took place (result is not the original's return value;
+        # may be None if P2CardActionTriggerResponse unavailable in test env)
+        assert result != "should_not_be_called"
+
+    def test_clarify_action_still_intercepted(self) -> None:
+        """v1.4.1: hermes_clarify_action 仍由插件拦截 (回归保障)。"""
+        from hermes_lark_streaming.patching import (
+            _wrap_feishu_card_action_trigger,
+            _clarify_questions,
+            _clarify_choices,
+        )
+        _clarify_questions["v141_cid"] = "Q?"
+        _clarify_choices["v141_cid"] = ["A", "B"]
+        try:
+            original = MagicMock(return_value="should_not_be_called")
+            wrapped = _wrap_feishu_card_action_trigger(original)
+
+            mock_action = MagicMock()
+            mock_action.value = {"hermes_clarify_action": "select", "clarify_id": "v141_cid"}
+            mock_action.option = "0"
+
+            mock_event = MagicMock()
+            mock_event.action = mock_action
+            mock_event.operator = MagicMock()
+            mock_event.operator.open_id = "user_1"
+
+            mock_data = MagicMock()
+            mock_data.event = mock_event
+
+            mock_adapter = MagicMock()
+            mock_adapter._is_interactive_operator_authorized.return_value = True
+            mock_adapter._loop = None
+
+            mock_cg = MagicMock()
+            mock_cg.resolve_gateway_clarify = MagicMock()
+
+            with patch.dict("sys.modules", {
+                "tools": MagicMock(),
+                "tools.clarify_gateway": mock_cg,
+            }):
+                wrapped(mock_adapter, mock_data)
+
+            # original (native) must NOT be called — clarify is intercepted
+            original.assert_not_called()
+            # resolve should be called with the selected choice
+            mock_cg.resolve_gateway_clarify.assert_called_once_with("v141_cid", "A")
+        finally:
+            _clarify_questions.pop("v141_cid", None)
+            _clarify_choices.pop("v141_cid", None)
+
+
 class TestClarifyCardRegistry:
     """Test the _clarify_choices, _clarify_questions, _clarify_answers, _clarify_card_info module-level dicts."""
 
