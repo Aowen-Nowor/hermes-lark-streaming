@@ -15,6 +15,7 @@ from . import (
     _gateway_cards_lock,
     _logger,
     _get_config,
+    _patched_feishu_classes,
 )
 
 # ── FeishuAdapter interception layer (Phase 1: gateway message cards) ─
@@ -40,6 +41,13 @@ def _classify_gateway_message(content: str) -> str:
 def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
     """Intercept ``FeishuAdapter.send()`` — convert text to gateway cards."""
     async def _intercepted_send(self_feishu, chat_id, content, reply_to=None, metadata=None, **kwargs):
+        # On-demand repatch: if this adapter instance's class isn't patched yet
+        # (deferred loading edge case), patch it now. O(1) set lookup.
+        _cls = type(self_feishu)
+        if id(_cls) not in _patched_feishu_classes:
+            from . import _apply_feishu_adapter_patches
+            _apply_feishu_adapter_patches(_cls, is_repatch=True)
+
         # ── EphemeralReply passthrough (v1.3.1 fix) ──
         # NOT duplicate agent replies. They must NEVER be suppressed by the
         try:

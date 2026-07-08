@@ -128,7 +128,6 @@ feishu:
 | `print_step` | `4` | 1–10 | 打字机每次渲染字符数（需飞书7.23+） |
 | `panel_expanded` | `false` | bool | 完成态卡片面板是否展开 |
 | `streaming_panel_expanded` | `false` | bool | 流式态卡片面板是否展开 |
-| `header.enabled` | `false` | bool | v1.2.0：agent 卡片头部开关。开启后卡片顶部显示状态头部（蓝处理中→绿完成/红出错-停止）。开启后封卡走全量重建路径 |
 | `footer.show_label` | `false` | bool | 是否显示页脚字段标签 |
 | `footer.fields` | `[[status, elapsed, model, cost, compression_exhausted]]` | array | 页脚字段配置 |
 

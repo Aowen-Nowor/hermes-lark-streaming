@@ -367,7 +367,7 @@ class FeishuClient:
         raise FeishuAPIError("reply_card_by_id: response missing message_id")
 
     async def update_card(self, message_id: str, card: dict[str, Any]) -> None:
-        """PATCH 更新已发送的卡片（IM 降级通道）."""
+        """PATCH 更新已发送的卡片（IM PATCH 通道）."""
         request = (
             PatchMessageRequest.builder()
             .message_id(message_id)

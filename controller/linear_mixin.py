@@ -324,11 +324,8 @@ class UnifiedControllerMixin:
                         session._streaming_closed = True
                         return
                     if is_schema_error(e):
-                        # v1.3.4 fix (P1): 原实现 mark "answer" as created 会导致：
                         _logger.error(
-                            "unified flush phase 2 SCHEMA ERROR (permanent): %s — "
-                            "detail: %s — "
-                            "setting _phase2_failed, will full-rebuild at completion, card=%s",
+                            "unified flush phase 2 SCHEMA ERROR (permanent): %s — detail: %s card=%s",
                             e, e.extract_schema_detail(), session.card_id[:12],
                         )
                         state.panel_dirty = False
@@ -336,11 +333,8 @@ class UnifiedControllerMixin:
                         state.tool_steps_dirty = False
                         return
                     elif is_element_not_found_error(e):
-                        # v1.3.1 fix: insert_before 引用不存在的元素 (300315 + "not find elementID")
-                        # v1.3.4 fix (P1): 同 schema_error，不再 mark as created。
                         _logger.warning(
-                            "unified flush phase 2 element not found (non-fatal): %s — "
-                            "setting _phase2_failed, will full-rebuild at completion, card=%s",
+                            "unified flush phase 2 element not found (non-fatal): %s card=%s",
                             e, session.card_id[:12],
                         )
                         session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
@@ -1120,8 +1114,6 @@ class UnifiedControllerMixin:
         except asyncio.TimeoutError:
             _logger.warning("complete: card creation timed out: msg=%s", (session.message_id or "?")[:12])
 
-        # v1.1.3: IM 降级模式 card_id 为 None 是正常的（只有 card_msg_id）
-        # 旧代码在这里直接返回 False，导致 IM 降级卡片永远走不到封卡
         if not session.card_id:
             session.state = CREATION_FAILED
             session.enter_terminal(

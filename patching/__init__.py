@@ -36,11 +36,10 @@ __all__ = [
     '_apply_gateway_runner_patches',
     'apply_patches',
         '_apply_direct_agent_patch',
-    # v1.4.0: FeishuAdapter patch helpers (deferred loading fix)
+    # FeishuAdapter patch helpers
     '_apply_feishu_adapter_patches',
-        '_verify_feishu_patch_identity',
-    # v1.4.1: throttled lazy repatch (pre_gateway_dispatch)
-        # From gateway
+    '_verify_feishu_patch_identity',
+    # From gateway
     '_wrap_handle_message',
     '_wrap_handle_message_with_agent',
     '_wrap_run_agent',
