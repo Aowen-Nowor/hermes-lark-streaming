@@ -10,7 +10,7 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 1.4.2 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
+| 版本 | 1.5.0 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
 
 ---
 
@@ -72,8 +72,8 @@ Background: _run_background_task ── [Hook 1/2]
 | `├ client.py` | 飞书 API 客户端 | CardKit v2 + IM API，错误码分类 + 瞬态重试 + 300313 专用重试 (v1.1.0) |
 | `└ guard.py` | 消息不可用保护 | 删除/撤回检测，30分钟 TTL |
 | **flush/** | **节流调度子包** | |
-| `├ __init__.py` | 重导出门面 | `FlushController`, `CARDKIT_MS`, `PATCH_MS` |
-| `└ controller.py` | 节流调度器 | CardKit 80ms / IM PATCH 1.5s，互斥锁 + re-flush |
+| `├ __init__.py` | 重导出门面 | `FlushController`, `CARDKIT_MS` |
+| `└ controller.py` | 节流调度器 | CardKit 80ms 节流，互斥锁 + re-flush |
 | **config/** | **配置读取子包** | |
 | `├ __init__.py` | 重导出门面 | `Config`, `_get_hermes_config_path` |
 | `└ reader.py` | 配置读取 | `_plugin_sec()` 惰性加载 + `/aowen config reload` 手动刷新 |
@@ -174,10 +174,10 @@ COMPLETING 不在 `_TERMINAL` 集合中——`on_answer`/`on_thinking` 在 COMPL
 ## 6. 卡片 API 降级链
 
 ```
-CardKit v2 Streaming → CardKit v2 Create+Patch → IM Create+Patch → Hermes 纯文本
+CardKit v2 Streaming → CardKit v2 Create+Patch → Hermes 纯文本
 ```
 
-`FeishuClient` 首次成功后锁定通道。v1.1.0 后非线性路径已删除，CardKit v2 创建失败时直接降级到 IM 卡片（`build_im_fallback_card`）。
+v1.5.0 删除 IM 降级路径（生产从未触发）。CardKit v2 创建失败直接标记 CREATION_FAILED，hermes 回退纯文本回复。
 
 ---
 
@@ -238,8 +238,6 @@ hermes_lark_streaming:
   card_ttl_sec: 600
   max_tool_steps: 20               # 范围 1~100
   max_reasoning_rounds: 20         # 范围 1~100
-  header:
-    enabled: false                  # v1.2.0：agent 卡片头部（蓝处理中→绿完成/红出错-停止）。默认关。开启后封卡走全量重建
   footer:
     show_label: false
     fields: [[status, elapsed, model, cost, compression_exhausted]]
@@ -351,4 +349,4 @@ hermes gateway restart
 
 ---
 
-*Last updated: 2026-07-07 | Version: 1.4.2*
+*Last updated: 2026-07-08 | Version: 1.5.0*

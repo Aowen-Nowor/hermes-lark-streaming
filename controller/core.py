@@ -1,11 +1,4 @@
-"""StreamCardController — 流式卡片主控制器（单例）.
-
-与 openclaw-lark 对齐：
-- UnavailableGuard 消息不可用保护
-- 修复的 FlushController（wait_for_flush, card_message_ready）
-- TextState 回复边界检测 + reasoning 处理
-- 工具状态预回答更新
-"""
+"""StreamCardController — 流式卡片主控制器（单例）."""
 
 from __future__ import annotations
 
@@ -38,12 +31,10 @@ from ..state.linear import UnifiedLinearState
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-
 # v1.3.2: module-level constant (was previously re-defined on every on_interrupted call)
 _INTERRUPT_MAP_MAX = 200
 
 from ..state.session import CardSession  # noqa: F401 — re-exported for backward compatibility
-
 
 class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     """流式卡片控制器 — 管理多条消息的卡片生命周期."""
@@ -52,24 +43,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         self._cfg = Config()
         self._client: FeishuClient | None = None
         self._sessions: dict[str, CardSession] = {}
-        # v1.3.0 P1-01: _sessions is shared between the event-loop thread
-        # (on_message_started / on_completed / prune) and worker threads
-        # (callback wrappers in patching/callbacks.py → hooks → controller)
-        # and the Feishu webhook thread (clarify card action → get_controller).
-        # RLock allows re-entrancy (on_message_started calls on_interrupted
-        # which also accesses _sessions).
         self._sessions_lock = threading.RLock()
         self._interrupt_map: dict[str, str] = {}
         # v1.3.0: _interrupt_map is accessed from event-loop thread (on_interrupted
         # writes, on_completed pops) and worker threads (_cleanup iterates+deletes).
         self._interrupt_map_lock = threading.Lock()
         # v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
-        # _continuation_map: old_message_id -> new continuation_message_id.
-        # 当主代理在长工具调用（如 delegate_task）后继续输出 answer token，但原
-        # session 的流式已被飞书服务端关闭（_streaming_closed=True）时，插件为同一
-        # chat/anchor 创建一张新的流式卡片续写后续 token。此映射记录"原 message_id
-        # -> 续写 message_id"的对应关系，让后续 on_answer / on_completed 能透明地
-        # 路由到新 session。访问于：on_answer 读写、on_completed pop、_cleanup 清理。
         self._continuation_map: dict[str, str] = {}
         self._continuation_map_lock = threading.Lock()
         self._initialized = False
@@ -80,11 +59,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # GC from collecting them mid-execution (asyncio only holds weak refs).
         self._pending_tasks: set[asyncio.Task] = set()
 
-    # ── v1.3.0 P1-01: thread-safe _sessions access helpers ──
-    # All external and internal access to self._sessions should go through
-    # these helpers to guarantee the RLock is held.  Direct dict access is
-    # discouraged but kept for backward-compat in a few hot-path reads that
-    # are inherently single-threaded (event-loop only).
     def _sess_get(self, message_id: str) -> CardSession | None:
         """Thread-safe session lookup by message_id (or anchor_id)."""
         with self._sessions_lock:
@@ -101,11 +75,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return self._sessions.pop(key, None)
 
     def _sess_items_snapshot(self) -> list[tuple[str, CardSession]]:
-        """Thread-safe snapshot of all (key, session) pairs.
-
-        Returns a list copy so callers can iterate without holding the lock
-        (prevents RuntimeError: dictionary changed size during iteration).
-        """
+        """Thread-safe snapshot of all (key, session) pairs."""
         with self._sessions_lock:
             return list(self._sessions.items())
 
@@ -186,29 +156,9 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         return session
 
     # ── v1.4.0 fix (问题3 根因1): 会话续写重激活 ──────────────────
-    # 当主代理在长工具调用（尤其 delegate_task）后继续输出 answer token，
-    # 但原 session 的流式已被飞书服务端关闭（_streaming_closed=True）时，
-    # 不再尝试写入旧卡（必失败 300309）也不仅丢弃 token，而是为同一
-    # chat/anchor 开一张新的流式卡片，把后续 token 流到新卡上。
-    #
-    # 触发条件（_maybe_reactivate_for_continuation 内判定）：
-    #   - text 非空且非 None（真实 answer token，非 boundary 信号）
-    #   - 原存在 session（_sess_get 命中）
-    #   - 该 session 未在终态（is_terminal_phase=False）
-    #   - 但 _streaming_closed=True（流式已被服务端关闭）
-    #   - 且本 session 不是 _is_continuation（防止递归重激活）
-    #   - 且 _continuation_reactivation_count == 0（同一 session 最多重激活一次）
-    #
-    # 路由：成功重激活后，_continuation_map[old_msg] = new_msg；后续 on_answer
-    # 收到 old_msg 时先查映射并透明重定向到 new_msg。on_completed 同样查映射，
-    # 让完成流程在 continuation session 上执行（旧 session 在重激活时已通过
-    # _complete_session 异步收尾，旧卡片保留其最后状态不破坏）。
 
     def _resolve_continuation_id(self, message_id: str) -> str | None:
-        """查询 message_id 是否已被重激活到 continuation session.
-
-        返回 new_message_id（如有映射），否则 None。线程安全。
-        """
+        """查询 message_id 是否已被重激活到 continuation session."""
         with self._continuation_map_lock:
             return self._continuation_map.get(message_id)
 
@@ -225,22 +175,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     def _reactivate_session_for_continuation(
         self, stale_session: CardSession
     ) -> CardSession | None:
-        """为已 _streaming_closed 的 stale session 创建一张新的流式卡片以续写。
-
-        v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
-        背景：delegate_task / 长工具调用期间，原卡片的流式会话可能已被飞书
-        服务端自动关闭（TTL）或被插件 seal/close_streaming。等子代理返回、
-        主代理继续输出 answer token 时，原 session 的 _streaming_closed=True，
-        stream_element 调用必失败（300309）。此方法在同一 chat/anchor 下创建
-        一张全新的流式卡片（新 card_id、新 message_id 作 anchor），让后续
-        token 流到新卡片上，避免降级纯文本。
-
-        旧卡片保留不动（已 seal 或 server-closed 的状态不被破坏）。旧 session
-        被标记为 COMPLETING 并异步触发 _do_linear_complete_with_fallback 做最
-        后的封卡（写入已积累的 partial 内容 + footer，使旧卡视觉上完成）。
-
-        失败返回 None（调用方应回退到原 fallback 路径，即 gateway 累积文本）。
-        """
+        """为已 _streaming_closed 的 stale session 创建一张新的流式卡片以续写。"""
         chat_id = stale_session.chat_id
         # anchor_id 优先（用户原始消息 id），其次回退到 message_id
         anchor_id = stale_session.anchor_id or stale_session.message_id
@@ -280,17 +215,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 )
                 return None
 
-        # 创建新 session（复用 CardSession 构造，但跳过 on_message_started 的
-        # 并发 seal 逻辑——这里我们明确知道旧 session 已 _streaming_closed，
-        # 不需要 seal 旧 session，只需新建一个干净的 STREAMING session）。
         new_session = CardSession(new_message_id, chat_id, loop)
         # anchor_id 设为原 anchor_id（reply 时仍回复到用户原始消息，保持线程上下文）
         new_session.anchor_id = anchor_id if anchor_id != new_message_id else None
         new_session._is_continuation = True
         # v1.4.0 fix: 预先创建 unified_state + 标记 linear=True，避免 on_answer 在
-        # _do_create_linear_card 实际运行前到达时因 unified_state is None 而丢弃 token。
-        # _do_create_linear_card 内部已加守卫——仅当 unified_state is None 时才创建，
-        # 不会覆盖此处预置的实例（及其已累积的 delta）。
         new_session.linear = True
         new_session.unified_state = UnifiedLinearState()
         self._sess_put(new_message_id, new_session)
@@ -310,11 +239,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # 异步触发新卡片创建（_do_create_linear_card 内部 IDLE 守卫保证幂等）
         self._fire_and_forget(self._do_create_linear_card(new_session), loop)
 
-        # 异步收尾旧 session（写入已积累的 partial 内容 + footer）。
-        # 旧 session 仍在 STREAMING/COMPLETING 状态——这里转 COMPLETING 让
-        # _do_linear_complete 走 drain + preservative seal 路径。若旧卡服务端
-        # 已关闭流式，seal 会 fallback 到 cardkit_update（全量重建），把已积累
-        # 的 partial answer 写入旧卡，使旧卡视觉上"已完成"，用户能看出上下文。
         try:
             if not stale_session.is_terminal_phase and stale_session.state != COMPLETING:
                 stale_session.state = COMPLETING
@@ -323,26 +247,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     stale_session._loop,
                 )
         except Exception:
-            _logger.debug(
-                "HLS: stale session seal trigger failed old_msg=%s",
-                (stale_session.message_id or "?")[:12],
-                exc_info=True,
-            )
+            pass
 
         return new_session
 
     def _maybe_reactivate_for_continuation(self, message_id: str) -> str | None:
-        """检查并按需为 message_id 触发会话续写重激活。
-
-        返回值：
-        - 若已有 continuation 映射或本次成功重激活：返回 new_message_id
-          （调用方应将后续 on_answer 路由到该 id）
-        - 否则（无需重激活或重激活失败）：返回 None
-          （调用方按原 message_id 走正常路径或 fallback）
-
-        幂等：同一 message_id 第二次调用直接返回已存在的映射，不重复创建。
-        线程安全：通过 _continuation_map_lock + _sessions_lock 保护。
-        """
+        """检查并按需为 message_id 触发会话续写重激活。"""
         # 1. 已有映射 → 直接返回（幂等）
         existing = self._resolve_continuation_id(message_id)
         if existing is not None:
@@ -374,12 +284,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         return new_session.message_id
 
     def _fire_and_forget(self, coro: Coroutine[Any, Any, Any], loop: asyncio.AbstractEventLoop) -> None:
-        """Schedule a coroutine for background execution without awaiting.
-
-        v1.3.2 fix: hold strong reference to the created Task to prevent GC
-        from collecting it mid-execution. Also close the coroutine if
-        scheduling fails to avoid 'coroutine was never awaited' warnings.
-        """
+        """Schedule a coroutine for background execution without awaiting."""
         try:
             task = loop.create_task(coro)
             # Hold strong reference until task completes
@@ -402,14 +307,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         chat_id: str,
         anchor_id: str | None = None,
     ) -> None:
-        """消息处理开始 — 创建会话 + 发占位卡片.
-
-        v1.1.0 (Task 2.7): Concurrency limiting — when a new message arrives
-        in the same chat_id while an old card is still active (streaming/creating),
-        the old card is immediately sealed as "interrupted by new message"
-        before the new session is created. This prevents two active cards
-        in the same chat competing for API calls.
-        """
+        """消息处理开始 — 创建会话 + 发占位卡片."""
         if not self.enabled:
             return
         if not message_id:
@@ -420,16 +318,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         self._prune_stale_sessions()
 
-        # ── v1.1.0 Concurrency limiting (Task 2.7) ──
-        # Seal any active (non-terminal) session in the same chat_id
-        # before creating the new one. This prevents resource contention
-        # and ensures the user only sees one active card at a time.
-        # v1.3.0: use thread-safe snapshot to avoid RuntimeError on concurrent modification.
         # v1.3.6 fix: 用 seen set 跟踪已处理的 session 对象，防止同一 session
-        # 被 anchor_id key 和 message_id key 重复处理。原实现 on_interrupted
-        # 创建新 session 时 _sess_put(anchor_id, new_session) 覆盖了
-        # _sessions[anchor_id]，导致循环再次遇到 anchor_id key 时把刚创建的
-        # 新 session 当作 old_session abort 掉（真飞书模式 E2E 复现）。
         seen_sessions: set[int] = set()
         for existing_msg_id, existing_session in self._sess_items_snapshot():
             if existing_session.chat_id != chat_id:
@@ -466,15 +355,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return
 
         # v1.3.4 fix (P0): concurrency seal 可能已通过 on_interrupted 创建了
-        # 当前 message_id 的 session（并已触发 _do_create_linear_card）。
-        # 如果直接再创建会覆盖原 session，导致：
-        #   1. 两张卡片被创建（on_interrupted 一张 + 这里一张）
-        #   2. on_interrupted 创建的那张卡片成为孤儿（永远停在"正在加载上下文..."）
-        # 修复：如果 session 已存在（由 on_interrupted 创建），直接复用，仅补记 metrics。
         # v1.3.5 fix: on_interrupted 中 fire-and-forget 的 _do_create_linear_card
-        # 可能因旧 session 的 _wait_and_abort + _complete_session 级联任务链而延迟执行，
-        # 导致 _card_ready 永远等不到。在此兜底重试调度，_do_create_linear_card
-        # 内部有 state != IDLE 守卫，已运行的调用不会被重复执行。
         existing = self._sess_get(message_id)
         if existing is not None:
             _logger.info(
@@ -506,10 +387,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         except Exception:
             _logger.debug('metrics: record_card_created failed', exc_info=True)
 
-        # v1.1.0 (Task 1.1+1.2): The non-linear _do_create_card path was
-        # removed — linear is the only creation path now. When CardKit v2
-        # creation fails, _do_create_linear_card falls back directly to
-        # build_im_fallback_card (NOT to the legacy segmented v1 cards).
         self._fire_and_forget(self._do_create_linear_card(session), loop)
 
     def on_thinking(self, *, message_id: str, text: str) -> None:
@@ -540,27 +417,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return
 
         # v1.1.0 (Task 1.1+1.2): linear is the only path — session.linear
-        # and session.unified_state are always set after _do_create_linear_card.
-        _logger.debug(
-            "HLS: on_reasoning msg=%s text=%r current_reasoning_len=%d",
-            (message_id or "?")[:12],
-            text[:50] if text else "",
-            len(session.unified_state._current_reasoning) if session.unified_state else 0,
-        )
         # v1.1.1: 真飞书模式下卡片创建可能降级（unified_state=None），加保护
         if session.unified_state is None:
             _logger.warning("HLS: on_thinking but unified_state is None, skipping msg=%s", (message_id or "?")[:12])
             return
         session.unified_state.on_reasoning_delta(text)
-        # v1.1.0 (Task 1.3): The _native_reasoning_active flag was
-        # removed.  _linear_on_thinking now uses
-        # ``len(state._current_reasoning) > 0`` as the dedup guard,
-        # which is updated automatically by on_reasoning_delta above.
-        _logger.debug(
-            "HLS: on_reasoning delta applied msg=%s current_reasoning_len=%d",
-            (message_id or "?")[:12],
-            len(session.unified_state._current_reasoning),
-        )
         self._schedule_linear_flush(session)
 
     def on_tool_update(
@@ -594,9 +455,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 output="" if is_error else detail,
             )
 
-        # v1.1.0 (Task 1.1+1.2): linear is the only path — session.linear
-        # and session.unified_state are always set after _do_create_linear_card.
-        # v1.1.1: 真飞书模式下卡片创建可能降级（unified_state=None），加保护
         if session.unified_state is None:
             _logger.warning("HLS: on_tool_update but unified_state is None, skipping msg=%s", (message_id or "?")[:12])
             return
@@ -610,15 +468,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return
 
         # v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
-        # 主代理在长工具调用（尤其 delegate_task）后继续输出 answer token 时，
-        # 原卡片的流式可能已被飞书服务端关闭（_streaming_closed=True）。若直接
-        # 走 _get_active_session 会拿到原 session（仍在 STREAMING 态），后续
-        # stream_element 必失败（300309），最终降级纯文本。
-        #
-        # 此处先检查并按需触发会话续写重激活：把后续 token 透明路由到一张新开的
-        # continuation 卡片上。仅对"真实 answer token"（text 非空且非 None）触发，
-        # None 是 conversation_loop.py 在 tool 边界发的 stream_delta_callback(None)
-        # 信号——边界信号不触发重激活（由 hooks 层 if text 短路保证）。
         if text:
             new_id = self._maybe_reactivate_for_continuation(message_id)
             if new_id is not None:
@@ -644,15 +493,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # ── TTFB: 首字到达时间 ──
         if session._first_answer_time == 0.0:
             session._first_answer_time = time.monotonic()
-            _logger.debug(
-                "perf: first_answer msg=%s ttfb=%.0fms",
-                (message_id or "?")[:12],
-                (session._first_answer_time - session.created_at) * 1000,
-            )
 
-        # v1.1.0 (Task 1.1+1.2): linear is the only path — session.linear
-        # and session.unified_state are always set after _do_create_linear_card.
-        # v1.1.1: 真飞书模式下卡片创建可能降级（unified_state=None），加保护
         answer_text = strip_reasoning_tags(text)
         if answer_text:
             if session.unified_state is None:
@@ -662,12 +503,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             self._schedule_linear_flush(session)
 
     def on_aborted(self, *, message_id: str) -> None:
-        """用户 /stop 导致消息被中断.
-
-        COMPLETING 短路：如果 session 已在 COMPLETING 状态（on_completed
-        已触发，正在 drain 收尾），跳过 abort 逻辑，让 _do_linear_complete
-        自然走完。仅标记 _was_aborted 让封卡时显示"已停止"状态。
-        """
+        """用户 /stop 导致消息被中断."""
         if not self.enabled:
             return
         session = self._get_active_session(message_id)
@@ -676,8 +512,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         # ── Hotfix: skip abort if session is in COMPLETING state ──
         # Same race condition as on_interrupted: if the session is already
-        # in COMPLETING (on_completed has fired, drain is in progress),
-        # let _do_linear_complete finish naturally. Setting ABORTED here
         # would cancel the flush mid-drain, dropping the last answer chunk,
         # and cause a double-complete race.
         if session.state == COMPLETING:
@@ -712,28 +546,13 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         chat_id: str,
         anchor_id: str | None = None,
     ) -> None:
-        """用户发送新消息导致前一条消息被中断 — abort A + create B.
-
-        竞态保护：如果旧 session 正在 _do_linear_flush/_do_linear_split
-        中（flush_in_progress=True），先异步等待当前 flush 完成（带超时），
-        再标记 ABORTED 并封卡，避免并发操作 session.card_id 导致
-        旧卡被封两次或新卡变成孤儿。
-
-        COMPLETING 短路：如果旧 session 已在 COMPLETING 状态（on_completed
-        已触发，正在 drain 收尾），跳过 abort 逻辑，让 _do_linear_complete
-        自然走完。新 session 创建和 _interrupt_map 更新照常执行。
-        """
+        """用户发送新消息导致前一条消息被中断 — abort A + create B."""
         if not self.enabled:
             return
 
         old_session = self._get_active_session(old_message_id)
         if old_session is not None:
             # ── Hotfix: skip abort if session is in COMPLETING state ──
-            # COMPLETING 是 on_completed 触发的"正在收尾"中间态，再过几百毫秒
-            # 就会自然到 COMPLETED。在这个窗口里收到新消息的 on_interrupted
-            # 不应该把卡片覆盖成 ABORTED — 那会触发 fallback 路径重发短文本
-            # "已停止"提示，破坏用户体验。只跳过 abort，继续创建新 session
-            # 和更新 _interrupt_map（这些必须在任何情况下都执行）。
             if old_session.state == COMPLETING:
                 _logger.info(
                     "on_interrupted: skip abort for msg=%s (session in COMPLETING, "
@@ -744,10 +563,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 old_session._was_aborted = True
                 old_session.error_message = "Interrupted by new message"
 
-                # ── 竞态保护：等待当前 flush 完成 ──
-                # 如果 session 正在 _do_linear_split 中（已封旧卡、正在创建新卡），
-                # 需要等 split 完成后再标记 ABORTED，否则并发操作 session.card_id
-                # 可能导致：旧卡被封两次 / 新卡变成孤儿 / sequence conflict。
                 if old_session.flush._flush_in_progress:
                     loop = self._get_loop()
                     if loop is not None:
@@ -758,15 +573,8 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                                     timeout=3.0,
                                 )
                             except (asyncio.TimeoutError, Exception):
-                                _logger.debug(
-                                    "on_interrupted: flush wait timed out, proceeding with abort: msg=%s",
-                                    old_message_id[:12],
-                                )
+                                pass
                             # v1.3.2 fix (B3-01): re-check COMPLETING after the
-                            # await — the session may have transitioned to COMPLETING
-                            # during the wait. If so, skip the abort and let
-                            # _do_linear_complete finish naturally (same logic as
-                            # the synchronous path above).
                             if old_session.state == COMPLETING:
                                 _logger.info(
                                     "on_interrupted: skip abort for msg=%s (session transitioned to COMPLETING during flush wait)",
@@ -850,28 +658,15 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         estimated_cost_usd: float = 0.0,
         cost_status: str = "unknown",
     ) -> bool:
-        """消息处理完成 — 构建终端卡片.
-
-        状态机守卫：hermes 可能双调 on_completed（_process_message_background
-        的 finally + pop_post_delivery_callback），竞态窗口内两次调用会触发
-        300317 sequence 冲突。通过 COMPLETING 状态在 await 之前同步转移，
-        防止双调竞态；300317 错误在 complete 方法中视为幂等成功。
-        """
+        """消息处理完成 — 构建终端卡片."""
         if not self.enabled:
             return False
 
-        # ── message_id 空值守卫 ──
-        # 部分飞书事件（如系统消息、reaction 等）可能不携带 message_id，
-        # 导致 message_id=None，后续 message_id[:12] 会触发 TypeError。
         if not message_id:
             _logger.warning("on_completed: missing message_id, skipping")
             return False
 
         # v1.4.0 fix (问题3 根因1): 如果已为该 message_id 重激活过 continuation
-        # session（说明原 session 在 delegate_task 等长工具调用期间被飞书服务端
-        # 关闭流式，已异步触发收尾），on_completed 应转向 continuation session
-        # 完成，让最终封卡 + footer 落在新卡片上。原 session 的封卡流程已在
-        # _reactivate_session_for_continuation 中异步触发，不在此重复处理。
         cont_id = self._pop_continuation_id(message_id)
         if cont_id is not None:
             _logger.info(
@@ -881,10 +676,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             )
             message_id = cont_id
 
-        # ── 状态机幂等守卫 ──
-        # 先做直接查找（绕过 _TERMINAL 过滤），检查是否已在完成中/已完成。
-        # COMPLETING: 完成流程已启动，另一条路径的 on_completed 正在执行
-        # COMPLETED: 完成流程已结束
         direct_session = self._sess_get(message_id)
         if direct_session is not None and direct_session.state in (COMPLETING, COMPLETED):
             _logger.info(
@@ -926,28 +717,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return False
 
         # v1.3.0 P1-06: normal-path completion log downgraded to DEBUG (fires
-        # once per session on every successful completion — log noise reduction).
         # The yield-to-gateway log above stays INFO (edge case, useful for debugging).
-        _logger.debug(
-            "on_completed: msg=%s has_card=%s state=%s use_cardkit=%s",
-            (message_id or "?")[:12],
-            bool(session.card_msg_id),
-            session.state,
-            session.use_cardkit,
-        )
 
         if answer:
             session.text.on_deliver(answer)
-            # ── Linear mode answer completeness check ──
-            # The `answer` parameter from on_completed contains the full
-            # response text. We compare it with unified_state.answer_text
-            # (which was built incrementally from streaming callbacks) and
-            # ensure the card shows the COMPLETE answer:
-            #   1. If no answer was streamed -> use the full on_completed answer
-            #   2. If the on_completed answer is LONGER than what was streamed
-            #      -> append the missing portion (streaming may have missed content
-            #      due to callback timing, missing stream_delta_callback, etc.)
-            #   3. If the streamed answer is already complete -> no action needed
             if (
                 session.linear
                 and session.unified_state is not None
@@ -975,8 +748,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                                 _existing_len, len(_diff), (message_id or "?")[:12],
                             )
                     elif _clean_len > _existing_len and clean_answer[:_existing_len] != _existing:
-                        # on_completed answer is longer but doesn't start with streamed text
-                        # This can happen when the model rewrites or when streaming captured
                         # only a prefix. Replace with the more complete version.
                         _logger.warning(
                             "on_completed: linear answer MISMATCH existing_len=%d clean_len=%d msg=%s "
@@ -992,9 +763,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if error_message:
             session.error_message = error_message
 
-        # ── 中断标记 ──
-        # 当 monkey_patch 检测到 interrupted/partial 时传入 aborted=True，
-        # 保存到 _was_aborted 以便完成方法在 COMPLETING 状态下仍能获取该标记。
         if aborted:
             session._was_aborted = True
 
@@ -1015,11 +783,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             **({"cost_status": cost_status} if cost_status and cost_status != "unknown" else {}),
         }
 
-        # ── 状态转移: → COMPLETING ──
-        # 在 _complete_session 的 await 之前同步设置，防止 hermes 双调竞态。
-        # COMPLETING 不在 _TERMINAL 中：on_answer/on_thinking 等回调在
-        # COMPLETING 期间仍可更新 unified_state（确保迟到的内容不被丢弃），
-        # 但 _schedule_linear_flush 会拒绝调度新 flush（drain 负责排空）。
         session.state = COMPLETING
 
         self._complete_session(session)
@@ -1032,10 +795,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         content: str,
         loop: asyncio.AbstractEventLoop,
     ) -> bool:
-        """Cron 推送 — 包装为静态卡片发送，成功返回 True.
-
-        异步版本：直接 await 协程，避免 run_coroutine_threadsafe 在事件循环线程中死锁。
-        """
+        """Cron 推送 — 包装为静态卡片发送，成功返回 True."""
         if not self.enabled or not content or not chat_id:
             return False
         try:
@@ -1053,11 +813,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         content: str,
         loop: asyncio.AbstractEventLoop,
     ) -> bool:
-        """Cron 推送（同步兼容接口）— 从非事件循环线程调用时使用.
-
-        如果在事件循环线程内调用此方法会导致死锁（最多阻塞 30 秒后超时），
-        请改用 on_cron_deliver_async。
-        """
+        """Cron 推送（同步兼容接口）— 从非事件循环线程调用时使用."""
         if not self.enabled or not content or not chat_id:
             return False
         future = asyncio.run_coroutine_threadsafe(
@@ -1119,9 +875,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return
         anchor = getattr(session, "anchor_id", None)
         if anchor:
-            # v1.3.0: atomically check-and-delete the anchor key if it still
-            # points to the same session object (prevents deleting a new
-            # session that reused the anchor key).
             with self._sessions_lock:
                 if self._sessions.get(anchor) is session:
                     del self._sessions[anchor]
@@ -1130,8 +883,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             for k in stale_keys:
                 del self._interrupt_map[k]
         # v1.4.0 fix: 清理 _continuation_map 中以本 message_id 为 old 或 new 的条目。
-        # old 端：原 session 已清理，对应映射也应清除；new 端：continuation session
-        # 已清理，反向映射也应清除（防止后续 on_completed 误重定向到已不存在的 id）。
         with self._continuation_map_lock:
             self._continuation_map.pop(message_id, None)
             stale_cont_keys = [k for k, v in self._continuation_map.items() if v == message_id]
@@ -1140,12 +891,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         session.flush.mark_completed()
 
     def _release_session_data(self, session: CardSession) -> None:
-        """完成后释放重数据，仅保留最小元数据供 TTL 追踪.
-
-        在 complete 流程完成后调用，释放 segments、text、tool_use
-        等占用的内存。session 仍保留 message_id、
-        state、created_at 等元数据直到 _cleanup 清除。
-        """
+        """完成后释放重数据，仅保留最小元数据供 TTL 追踪."""
         session.unified_state = None
         if session.text is not None:
             session.text = TextState()  # type: ignore[assignment]
@@ -1153,22 +899,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         session.footer = {}
 
     def _complete_session(self, session: CardSession) -> None:
-        """根据 session 线性/非线性选择完成路径.
-
-        v1.1.0 (Task 1.1+1.2): The non-linear ``_do_complete`` path was
-        removed. Linear is now the only completion path.
-
-        Note: We intentionally do NOT call session.flush.mark_completed() here.
-        That call cancels any pending flush timer, which would drop the
-        last chunk of answer text that hasn't been flushed yet.  Instead,
-        the completion method (_do_linear_complete) handles
-        mark_completed() itself after draining remaining dirty data.
-        """
+        """根据 session 线性/非线性选择完成路径."""
         if session.linear and session.unified_state:
             self._fire_and_forget(self._do_linear_complete_with_fallback(session), session._loop)
         else:
-            # Safety net: a non-linear session should never reach here
-            # after Task 1.1+1.2, but if it does, route to the linear
             # path so the card still completes (rather than deadlocking).
             _logger.warning(
                 "_complete_session: non-linear session dispatched to linear "
@@ -1178,13 +912,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             self._fire_and_forget(self._do_linear_complete_with_fallback(session), session._loop)
 
     async def _do_linear_complete_with_fallback(self, session: CardSession) -> None:
-        """线性模式完成，卡片不可用时回退为文本回复.
-
-        v1.3.1 fix: Save answer_text and error_message BEFORE calling
-        _do_linear_complete, because _do_linear_complete calls
-        _release_session_data on failure which clears session.text.
-        Without this, _send_text_fallback would see an empty display_text.
-        """
+        """线性模式完成，卡片不可用时回退为文本回复."""
         # Snapshot fallback text before _do_linear_complete potentially releases it
         _fallback_text = ""
         if session.error_message:
@@ -1207,16 +935,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             await self._send_text_fallback(session, fallback_text=_fallback_text)
 
     async def _send_text_fallback(self, session: CardSession, *, fallback_text: str = "") -> None:
-        """卡片不可用时，通过飞书 API 发送文本回复作为兜底.
-
-        当卡片创建失败或完成流程异常时，网关文本回复已被 card_sent=True 抑制。
-        此方法确保用户至少能看到回复内容，避免"什么都看不到"的情况。
-
-        v1.3.1 fix: Added fallback_text parameter. When _do_linear_complete
-        fails and calls _release_session_data, session.text is cleared.
-        The caller (_do_linear_complete_with_fallback) snapshots the text
-        BEFORE the release and passes it here.
-        """
+        """卡片不可用时，通过飞书 API 发送文本回复作为兜底."""
         if not self._client:
             return
         try:
@@ -1238,22 +957,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 len(content),
             )
         except Exception:
-            _logger.debug(
-                "text fallback failed: msg=%s",
-                (session.message_id or "?")[:12],
-                exc_info=True,
-            )
+            pass
 
     def _prune_stale_sessions(self) -> None:
-        """v1.1.1: 只清理已终态的过期 session，保护活跃 session.
-
-        之前不检查 state，STREAMING 状态的 session 超过 TTL 也会被清理，
-        导致 AI 回调找不到 session、卡片永远卡在"流式中"。
-
-        现在：
-        - 已终态（COMPLETED/CREATION_FAILED/ABORTED/TERMINATED）+ 超 TTL → 清理
-        - 活跃（STREAMING/COMPLETING/CREATING）+ 超 TTL → 只打日志，不清理
-        """
+        """v1.1.1: 只清理已终态的过期 session，保护活跃 session."""
         now = time.time()
         # v1.3.0 P1-05: show longer msg_id in prune logs for easier log correlation.
         # v1.3.0 P1-01: use thread-safe snapshot to avoid RuntimeError.
@@ -1277,9 +984,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         except Exception:
             _logger.warning("background task failed", exc_info=True)
 
-
 _controller: StreamCardController | None = None
-
 
 def get_controller() -> StreamCardController:
     global _controller

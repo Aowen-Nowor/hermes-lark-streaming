@@ -50,10 +50,8 @@ _T: dict[str, tuple[str, str]] = {
     "round_n": ("Round {}", "第 {} 轮"),
 }
 
-
 def _i18n(en: str, zh: str) -> dict[str, str]:
     return {"zh_cn": zh, "en_us": en}
-
 
 def _t(key: str) -> dict[str, str]:
     """简写: _t("processing") → _i18n(*_T["processing"])。"""

@@ -1,11 +1,4 @@
-"""通用节流调度器 — FlushController.
-
-与 openclaw-lark 对齐：
-- 异常后正确设置 last_update_time
-- wait_for_flush 支持
-- card_message_ready gate
-- 线程安全：schedule_update 可从 worker 线程调用
-"""
+"""与 openclaw-lark 对齐："""
 
 from __future__ import annotations
 
@@ -16,23 +9,12 @@ from collections.abc import Awaitable, Callable
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-
 CARDKIT_MS = 0.080  # CardKit 流式 API 的刷新间隔（80ms：≥官方默认 print_frequency_ms 70ms，留余量给 API 往返）
-PATCH_MS = 1.500  # IM patch 降级通道的刷新间隔
 LONG_GAP_MS = 1.000  # 超过此间隔 → 认为是长时间空闲
 BATCH_AFTER_GAP_MS = 0.100  # 长时间空闲后等待这个时间再 flush
 
-
 class FlushController:
-    """带互斥锁 + 延迟刷新的通用节流调度器.
-
-    不包含飞书业务逻辑，只负责决定何时执行回调.
-
-    **线程安全**: ``schedule_update`` 可从任意线程（worker thread 或
-    event loop thread）安全调用。内部通过 ``call_soon_threadsafe``
-    确保节流逻辑和回调调度始终在事件循环线程上执行，避免
-    ``call_soon``/``call_later`` 跨线程调用无法唤醒事件循环的问题。
-    """
+    """不包含飞书业务逻辑，只负责决定何时执行回调."""
 
     def __init__(self, throttle_ms: float = CARDKIT_MS) -> None:
         self._throttle_ms = throttle_ms
@@ -43,7 +25,6 @@ class FlushController:
         self._completed = False
         self._card_message_ready = False
         self._flush_resolvers: list[asyncio.Future[None]] = []
-        # v1.3.4 fix (P2): 持有 flush Task 强引用，防止 GC 在任务完成前回收
         # （Python 文档："Save a reference to the result of this function"）
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
         try:
@@ -55,13 +36,7 @@ class FlushController:
                 self._loop = None  # Will be lazily resolved via _get_loop()
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
-        """Lazily resolve the event loop if not set during __init__.
-
-        In Python 3.10+ (especially 3.11.15), both get_running_loop()
-        and get_event_loop() may raise RuntimeError when no event
-        loop exists — e.g. during unit tests or synchronous construction.
-        This method defers loop resolution until the loop is actually needed.
-        """
+        """In Python 3.10+ (especially 3.11.15), both get_running_loop()"""
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
         return self._loop
@@ -79,32 +54,16 @@ class FlushController:
         return self._last_update_time
 
     def schedule_update(self, do_flush: Callable[[], Awaitable[None]]) -> None:
-        """请求一次节流后的卡片刷新.
-
-        do_flush: async callable，执行实际 API 调用.
-
-        **线程安全**: 可从 worker thread 或 event loop thread 调用。
-        使用 ``call_soon_threadsafe`` 确保事件循环被唤醒。
-        """
+        """do_flush: async callable，执行实际 API 调用."""
         if self._completed or not self._card_message_ready:
             return
-        # ── 线程安全：通过 call_soon_threadsafe 调度到事件循环线程 ──
-        # 直接使用 call_soon / call_later 在 worker thread 中调用时，
-        # 回调虽然加入了 _ready 队列，但不会触发 _write_to_self() 唤醒
-        # 事件循环，导致回调永远不会被及时处理——直到有其他事件
-        # （如定时器、I/O）自然唤醒循环。
-        # 这正是 "跑马灯无文字，等很久才出文字" 的根因。
         try:
             self._get_loop().call_soon_threadsafe(self._schedule_update_on_loop, do_flush)
         except RuntimeError:
             pass  # Event loop already closed
 
     def _schedule_update_on_loop(self, do_flush: Callable[[], Awaitable[None]]) -> None:
-        """在事件循环线程上执行节流逻辑.
-
-        由 ``schedule_update`` 通过 ``call_soon_threadsafe`` 调度，
-        保证 ``call_later`` / ``call_soon`` 均在事件循环线程上执行。
-        """
+        """由 ``schedule_update`` 通过 ``call_soon_threadsafe`` 调度，"""
         if self._completed or not self._card_message_ready:
             return
         now = time.monotonic()
@@ -168,7 +127,6 @@ class FlushController:
 
     def _do_flush_task(self, do_flush: Callable[[], Awaitable[None]]) -> None:
         self._pending_timer = None
-        # v1.3.4 fix (P2): 持有 Task 强引用防止 GC 回收
         self._get_loop().call_soon(self._create_flush_task, do_flush)
 
     def _create_flush_task(self, do_flush: Callable[[], Awaitable[None]]) -> None:
@@ -200,7 +158,6 @@ class FlushController:
         # 如果 flush 期间又有新数据 → 立即重刷
         if self._needs_reflush and not self._completed:
             self._needs_reflush = False
-            # v1.3.4 fix (P2): 持有 Task 强引用防止 GC 回收
             self._get_loop().call_soon(self._create_flush_task, do_flush)
 
     def _cancel_timer(self) -> None:

@@ -1,9 +1,4 @@
-"""Feishu/Lark API client sub-package.
-
-Re-exports key names for convenient access:
-    from hermes_lark_streaming.feishu import FeishuClient, FeishuClientConfig, FeishuAPIError
-    from hermes_lark_streaming.feishu import UnavailableGuard, MSG_NOT_FOUND
-"""
+"""Re-exports key names for convenient access:"""
 
 from .client import (  # noqa: F401
     FeishuClient,

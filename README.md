@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Project-Vibe%20Coding-ff69b4" alt="Vibe Coding">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-1.4.2-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.5.0-ff9800.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -132,8 +132,6 @@ hermes_lark_streaming:
   card_ttl_sec: 600               # Card alive detection timeout (seconds)
   max_tool_steps: 20               # Max tool steps shown in panel (default 20, range 1–100)
   max_reasoning_rounds: 20         # Max reasoning rounds shown in panel (default 20, range 1–100)
-  header:
-    enabled: false                  # Card header (blue Processing → green Completed / red Error-Stopped). Default off. See below
 
   footer:
     show_label: false              # Show field labels
@@ -153,22 +151,6 @@ hermes_lark_streaming:
       #   history_offset — Conversation history offset; larger = longer history, sudden decrease = context compression
       # Each inner list is one row in the footer; fields only shown when they have values
 ```
-
-### Card Header (`header.enabled`)
-
-When `header.enabled: true`, the plugin displays a status header at the top of agent reply cards:
-
-- **Streaming**: blue header, "Processing..."
-- **Completed**: green header, "Completed"
-- **Error**: red header, "Error"
-- **Stopped** (interrupted): red header, "Stopped"
-
-Default is `false` (off) — cards have no header, matching v1.1.x behavior.
-
-> **Note**: Due to a Feishu CardKit API limitation, the settings/batch_update interfaces **cannot update the card-level header** during streaming or incremental seal. Only a full card rebuild (`cardkit_update`) can change the header color. Therefore, **when `header.enabled` is on, the seal path switches to full card rebuild** (instead of the default incremental seal) so the header color transitions correctly (blue → green/red). When off, the default incremental seal is used (better performance).
-
-> **Scope**: `header.enabled` only affects agent streaming/completed cards. Cron push cards and gateway-internal message cards are unaffected. `/aowen` command cards always have their own banner-style header (part of the v1.1.0 design language) and are not controlled by this option.
-
 
 ### Reasoning Panel Display
 
@@ -194,7 +176,6 @@ Feishu Card 2.0 has a **hard limit of 200 elements/components** per card. Exceed
 | Fold hint (when triggered) | 1 | 1 `markdown` element |
 | Answer text | 1–3 | `markdown`; long text may be split |
 | Footer | 2 | `hr` + `markdown` |
-| Card header (when enabled) | ~3 | `plain_text` + `standard_icon` |
 | Error panel (when present) | ~4 | `collapsible_panel` + inner elements |
 
 **Example calculation**: 20 reasoning rounds + 20 tool steps = 20×4 + 20×7 + fixed overhead ≈ 223 (exceeds 200)

@@ -1,7 +1,7 @@
 # hermes-lark-streaming 安装指南
 
 > 高信息密度参考文档，专为 Agent 自动解析设计
-> 最后更新: 2026-07-07 (v1.4.2)
+> 最后更新: 2026-07-08 (v1.5.0)
 
 ## 快速概览
 
@@ -128,7 +128,6 @@ feishu:
 | `print_step` | `4` | 1–10 | 打字机每次渲染字符数（需飞书7.23+） |
 | `panel_expanded` | `false` | bool | 完成态卡片面板是否展开 |
 | `streaming_panel_expanded` | `false` | bool | 流式态卡片面板是否展开 |
-| `header.enabled` | `false` | bool | v1.2.0：agent 卡片头部开关。开启后卡片顶部显示状态头部（蓝处理中→绿完成/红出错-停止）。开启后封卡走全量重建路径 |
 | `footer.show_label` | `false` | bool | 是否显示页脚字段标签 |
 | `footer.fields` | `[[status, elapsed, model, cost, compression_exhausted]]` | array | 页脚字段配置 |
 
@@ -149,8 +148,6 @@ hermes_lark_streaming:
   flush_interval_ms: 200
   print_strategy: delay
   print_step: 4
-  header:
-    enabled: false              # v1.2.1：卡片头部（默认关）
   footer:
     show_label: false
     fields:

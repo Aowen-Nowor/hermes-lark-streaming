@@ -38,7 +38,6 @@ __all__ = [
     "optimize_markdown_style",
 ]
 
-
 def _find_tables_outside_code_blocks(text: str) -> list[tuple[int, int, str]]:
     """查找代码块外的 markdown 表格，返回 [(start, end, raw), ...]."""
     code_ranges: list[tuple[int, int]] = []
@@ -54,7 +53,6 @@ def _find_tables_outside_code_blocks(text: str) -> list[tuple[int, int, str]]:
             results.append((m.start(), m.end(), m.group(0)))
     return results
 
-
 def _downgrade_tables(text: str, limit: int = _MAX_CARD_TABLES) -> str:
     """超限表格降级为代码块（保留内容可见但飞书不渲染为表格元素）."""
     # Early return: no tables possible without pipe characters
@@ -69,7 +67,6 @@ def _downgrade_tables(text: str, limit: int = _MAX_CARD_TABLES) -> str:
         result = result[:start] + replacement + result[end:]
     return result
 
-
 def _strip_invalid_image_keys(text: str) -> str:
     """移除非 img_ 前缀的图片引用."""
     if "![" not in text:
@@ -80,46 +77,8 @@ def _strip_invalid_image_keys(text: str) -> str:
 
     return _RE_IMAGE_REF.sub(_replace, text)
 
-
 def escape_markdown_asterisks(text: str) -> str:
-    """保护合法 Markdown 强调结构，转义所有剩余 *。
-
-    飞书 Markdown 解析器比 CommonMark 更激进——会把 2*4000+4*3000
-    中的 *4000+4* 配对为斜体，导致乘号消失、数字拼合。
-
-    解决思路：不是猜"哪个 * 是乘号"，而是反过来——先保护合法
-    Markdown 结构（粗体、斜体、代码），再转义一切剩余 *。
-    这样逻辑是 100% 严密的，不需要概率判断。
-
-    判断"合法斜体"的关键规则：
-      开头 * 前面是 行首/空白/标点/CJK字符 → 合法斜体
-      开头 * 前面是 ASCII字母/数字/下划线   → 不合法，必须转义
-
-    逻辑基础：
-      CJK 字符是自然语言 → 后面跟 * 只能是排版（斜体）
-      ASCII 字母/数字是形式语言 → 后面跟 * 只能是运算符
-      两者区别是语言的本质差异，不是概率。
-
-    算法：
-    1. 提取代码块/行内代码 → 保护（代码内 * 是字面量）
-    2. 提取粗体 **...** → 保护（粗体永远是排版意图）
-    3. 提取合法斜体 *...* → 保护（开头*不在ASCII字母/数字/下划线后）
-    4. 转义所有剩余 *（这些不可能是合法 Markdown，飞书会误配对）
-    5. 还原保护区域
-
-    v1.3.0 fix: defensive cleanup of null bytes. The placeholder pattern
-    ``\\x00P{i}P\\x00`` uses null bytes as delimiters. If the INPUT text
-    already contains null bytes (e.g. the AI reproduced the pattern from
-    source code, or an encoding glitch introduced them), the restoration
-    regex could match AI-generated placeholders and raise IndexError, or
-    the ``if _protected`` guard could skip restoration leaving our own
-    placeholders leaked. Fix: strip null bytes from input AND output.
-    """
-    # v1.3.0 fix: strip any pre-existing null bytes from the input.
-    # Null bytes are never legitimate in markdown text — they are either
-    # encoding artifacts or leaked placeholders from a previous call.
-    # Stripping them here prevents the restoration regex from matching
-    # spurious placeholder patterns and raising IndexError.
+    """飞书 Markdown 解析器比 CommonMark 更激进——会把 2*4000+4*3000"""
     if '\x00' in text:
         text = text.replace('\x00', '')
 
@@ -139,49 +98,23 @@ def escape_markdown_asterisks(text: str) -> str:
     # Step 2: 保护粗体 **...** 和 ***...***
     text = _RE_BOLD.sub(_save, text)
 
-    # Step 3: 保护合法斜体 *...*
-    # 开头 * 合法条件：前面不是 ASCII 字母/数字/下划线
-    # 这样 CJK 字符后的 * 会被保护（中文斜体的唯一写法），
-    # 而 ASCII 字母/数字后的 * 不会被保护（是运算符）。
     text = _RE_VALID_ITALIC.sub(_save, text)
 
     # Step 4: 转义剩余 *（飞书可能误配对的）
-    # * 后面跟非空白、非 * 的字符时，飞书会尝试配对，必须转义。
-    # * 后面跟空格或行尾时，飞书不会配对，安全不转义（如列表 * 项目）。
     text = _RE_UNPAIRED_ASTERISK.sub(r'\\*', text)
 
-    # Step 5: 还原保护区域
-    # v1.3.5 fix: 逆向遍历（高索引→低索引）以确保嵌套占位符正确恢复。
-    # 当粗体包裹行内代码时，外层（粗体）索引高于内层（行内代码）。
-    # re.sub 从左到右匹配并跳过替换文本中的内容，导致内层占位符泄漏。
-    # 改用 str.replace 逆向遍历：先恢复外层（含内层占位符），
-    # 后恢复内层——str.replace 扫描全串，不会跳过替换内容中的匹配。
     if _protected:
         for i in range(len(_protected) - 1, -1, -1):
             text = text.replace(f'\x00P{i}P\x00', _protected[i])
 
-    # v1.3.0 fix: final safety net — strip any remaining null bytes.
-    # This catches: (a) spurious placeholder patterns we didn't create,
-    # (b) any null bytes that survived the restoration, (c) encoding artifacts.
     # Null bytes render as boxes (□) in Feishu and must never reach the API.
     if '\x00' in text:
         text = text.replace('\x00', '')
 
     return text
 
-
 def optimize_markdown_style(text: str) -> str:
-    """优化流式 Markdown 以适配飞书 CardKit 渲染.
-
-    1. 提取代码块用占位符保护
-    2. 标题降级: H1 -> H4, H2-H6 -> H5
-    3. 还原代码块
-    4. 压缩多余空行
-    5. 剥离无效图片 key（非 img_xxx 格式）
-    """
-    # Early return: short texts without markdown structure don't need
-    # complex regex processing.  Skip only when no headings, code blocks,
-    # images, or excessive blank lines are present.
+    """1. 提取代码块用占位符保护"""
     if len(text) < 100 and not _RE_SHORT_MD_CHECK.search(text):
         return text
     try:
@@ -217,7 +150,6 @@ def optimize_markdown_style(text: str) -> str:
     except Exception:
         _logger.debug("optimize_markdown_style failed", exc_info=True)
         return text
-
 
 def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
     """将超长文本按段落/换行拆分为多个不超过 limit 字符的块."""

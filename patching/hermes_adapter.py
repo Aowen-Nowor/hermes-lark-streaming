@@ -1,11 +1,4 @@
-"""Hermes compatibility adapter — isolates all Hermes internal interface access.
-
-This is the ONLY file that should import from Hermes internals.
-When Hermes upgrades, only this file needs to be updated.
-
-Version detection (Task 3.3) allows the adapter to select the correct
-import strategy for different Hermes versions.
-"""
+"""Hermes compatibility adapter — isolates all Hermes internal interface access."""
 
 from __future__ import annotations
 import importlib
@@ -17,17 +10,8 @@ from typing import Any, Optional
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-
 class HermesCompat:
-    """Encapsulates all Hermes internal module access.
-    
-    Usage:
-        compat = HermesCompat()
-        if compat.gateway_runner_class:
-            # patch GatewayRunner methods
-        if compat.feishu_adapter_class:
-            # patch FeishuAdapter methods
-    """
+    """Encapsulates all Hermes internal module access."""
     
     def __init__(self):
         self._detect_version()
@@ -97,25 +81,7 @@ class HermesCompat:
         self._resolve_conversation_loop()
     
     def _resolve_feishu_adapter(self) -> Any | None:
-        """Resolve FeishuAdapter class through the gateway's namespace.
-        
-        CRITICAL: The gateway loads feishu adapter via hermes_plugins namespace
-        (importlib creates a separate module object). Patching gateway.platforms.feishu
-        won't affect the gateway's instance. We MUST find the class through the
-        same namespace the gateway uses.
-        
-        Verified on Hermes v0.17.0 (2026-06-24):
-          - gateway.platforms.feishu → FAILED (No module named)
-          - hermes_plugins.feishu_platform.adapter → OK (gateway runtime creates this)
-          - plugins.platforms.feishu.adapter → OK (source path, always available)
-        The gateway's adapter instance is created from hermes_plugins.feishu_platform.adapter,
-        so we must patch THAT class, not a different import path.
-        
-        v1.4.0: 抽取为独立方法，便于 resolve_feishu_adapter_class_fresh() 复用以
-        在 deferred loading 完成后重新解析真身 class（hermes v0.17.0+ bundled
-        platform deferred loading 修复，详见 patching/__init__.py 的
-        _schedule_direct_patch 注释）。
-        """
+        """Resolve FeishuAdapter class through the gateway's namespace."""
         # 顺序很关键：真身（hermes_plugins.feishu_platform.adapter）优先，确保
         # 如果 deferred loader 已触发，我们能拿到 gateway 实际使用的 class object。
         _feishu_import_paths = [
@@ -131,32 +97,14 @@ class HermesCompat:
                     _logger.debug("HLS: FeishuAdapter resolved via %s", _mod_path)
                     return cls
             except (ImportError, AttributeError):
-                # v1.4.0: 真身尚未加载（hermes v0.17.0+ bundled platform
-                # deferred loading），fallback 到替身；将在 _schedule_direct_patch
-                # 延迟重打阶段拿到真身后重新 patch（详见 patching/__init__.py）
                 if _mod_path == "hermes_plugins.feishu_platform.adapter":
-                    _logger.debug(
-                        "HLS: %s not yet loaded (deferred loading), "
-                        "trying fallback paths; will re-patch in deferred stage",
-                        _mod_path,
-                    )
+                    pass
                 continue
         _logger.debug("HLS: FeishuAdapter not available via any import path")
         return None
     
     def resolve_feishu_adapter_class_fresh(self) -> Any | None:
-        """Re-resolve FeishuAdapter class without reusing cached state.
-        
-        v1.4.0: 新增方法，供 _schedule_direct_patch 延迟重打阶段调用。
-        每次 invoke 都重新跑 _resolve_feishu_adapter 解析逻辑（不复用
-        self.feishu_adapter_class 缓存），返回当前 sys.modules 里能拿到的
-        最新 class。
-        
-        用途：hermes v0.17.0+ bundled platform deferred loading 场景下，
-        apply_patches() 启动早期只能拿到替身（plugins.platforms.feishu.adapter），
-        2s/8s 后 deferred loader 触发真身（hermes_plugins.feishu_platform.adapter）
-        加载进 sys.modules，此时调用本方法可拿到真身 class 重新 patch。
-        """
+        """Re-resolve FeishuAdapter class without reusing cached state."""
         return self._resolve_feishu_adapter()
     
     def _resolve_conversation_loop(self) -> None:
