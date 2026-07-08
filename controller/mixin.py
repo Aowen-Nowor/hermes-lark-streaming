@@ -1,16 +1,4 @@
-"""异步卡片 API 编排 — 创建、更新、完成卡片的重试/降级逻辑.
-
-v1.1.0 (Task 1.1+1.2): The non-linear ControllerMixin methods
-(``_do_create_card``, ``_do_update_card``, ``_do_tool_use_status_update``,
-``_do_reasoning_update``, ``_do_complete``, ``_do_complete_inner``) were
-removed. The plugin now uses the linear path exclusively — when CardKit
-v2 creation fails, it falls back directly to ``build_im_fallback_card``
-(handled inside ``_do_create_linear_card``), NOT to the legacy
-"segmented CardKit v1 cards" path.
-
-This module now contains only the shared gateway / cron delivery
-helpers used by both legacy code paths and the linear path.
-"""
+"""异步卡片 API 编排 — 创建、更新、完成卡片的重试/降级逻辑."""
 
 from __future__ import annotations
 
@@ -29,9 +17,6 @@ from ..state.phase import (
     _TERMINAL,
 )
 
-# Re-export as module-level names for backward compatibility.
-# Existing code that does ``from .mixin import IDLE`` continues
-# to work.  New code should import from ``..state.phase`` directly.
 IDLE = CardPhase.IDLE
 CREATING = CardPhase.CREATING
 STREAMING = CardPhase.STREAMING
@@ -61,15 +46,8 @@ __all__ = [
     "_TERMINAL",
 ]
 
-
 class ControllerMixin:
-    """异步卡片 API 操作 — 由 StreamCardController 继承.
-
-    v1.1.0: All non-linear card-creation / update / complete methods
-    were removed (Task 1.1+1.2). What remains here are the shared
-    gateway and cron delivery helpers that are independent of the
-    streaming-card lifecycle.
-    """
+    """异步卡片 API 操作 — 由 StreamCardController 继承."""
 
     _client: FeishuClient | None
     _cfg: Config
@@ -91,14 +69,7 @@ class ControllerMixin:
         *,
         category: str = "",
     ) -> tuple[str | None, str | None]:
-        """Send a gateway-internal message as a card.
-
-        Returns ``(card_msg_id, card_id)`` on success, or ``(None, None)``
-        on failure (caller should fall back to the original adapter.send).
-
-        ``card_id`` is the CardKit container ID (for streaming updates),
-        ``card_msg_id`` is the Feishu message ID (for edit_message routing).
-        """
+        """Send a gateway-internal message as a card."""
         try:
             await self._ensure_init()
             assert self._client is not None
@@ -130,15 +101,7 @@ class ControllerMixin:
         content: str,
         category: str = "",
     ) -> bool:
-        """Update a gateway card's content (called from edit_message interception).
-
-        Returns True on success, False on failure (caller should fall back
-        to the original edit_message).
-
-        Strategy:
-        - If card_id is available (CardKit container), use cardkit_update.
-        - Otherwise, use update_card (IM PATCH mode) with a rebuilt card.
-        """
+        """Update a gateway card's content (called from edit_message interception)."""
         try:
             await self._ensure_init()
             assert self._client is not None
@@ -163,12 +126,6 @@ class ControllerMixin:
                 )
                 return True
         except Exception:
-            _logger.debug(
-                "gateway card update failed: card_msg_id=%s card_id=%s",
-                card_msg_id[:12],
-                (card_id or "?")[:12],
-                exc_info=True,
-            )
             return False
 
     async def _do_gateway_card_status(
@@ -180,17 +137,7 @@ class ControllerMixin:
         emoji: str,
         category: str = "",
     ) -> bool:
-        """Update a gateway card's status indicator (from reaction interception).
-
-        Returns True on success, False on failure.
-
-        When Hermes adds/removes a reaction (👀, 👍, etc.) on a gateway
-        card message, we update the card to show/clear a status indicator
-        instead of the emoji reaction.
-
-        The status is shown as a subtle text line at the top of the card,
-        replacing the category icon header when a status is active.
-        """
+        """Update a gateway card's status indicator (from reaction interception)."""
         try:
             await self._ensure_init()
             assert self._client is not None
@@ -212,9 +159,4 @@ class ControllerMixin:
             )
             return True
         except Exception:
-            _logger.debug(
-                "gateway card status update failed: card_msg_id=%s",
-                card_msg_id[:12],
-                exc_info=True,
-            )
             return False

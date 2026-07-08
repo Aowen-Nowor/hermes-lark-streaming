@@ -1,7 +1,5 @@
 """CardKit v2.0 — Primitive element builders: panels, footers, helpers."""
 
-
-
 from __future__ import annotations
 
 import re
@@ -14,9 +12,7 @@ from .md import (
     optimize_markdown_style,
 )
 
-
 __all__ = [
-    # Element ID constants
     'STREAMING_ELEMENT_ID',
     'ANSWER_ELEMENT_ID',
     'UNIFIED_PANEL_ELEMENT_ID',
@@ -24,7 +20,6 @@ __all__ = [
     '_LOADING_HINT_ELEMENT_ID',
     '_LOADING_IMG_KEY',
     '_IMG_MD_PATTERN',
-    # Element builders
     '_extract_images_from_markdown',
     '_collapsible_panel',
     '_streaming_element',
@@ -40,59 +35,26 @@ __all__ = [
     '_longest_backtick_run',
     '_escape_md',
     '_build_error_panel',
-    '_build_header',
     '_build_background_review_panel',
     '_build_footer_elements',
     'build_preservative_seal_actions',
     '_render_footer_field',
     '_compact',
     '_format_elapsed',
-    # Unified panel builders
     '_build_unified_panel_placeholder',
     'build_unified_panel',
     'build_panel_header',
     'build_panel_children',
-    # Element counting
     '_count_tag_objects',
 ]
-
-# 匹配 markdown 图片语法: ![alt](url)
-_HEADER_STATES: dict[str, dict[str, str]] = {
-    "streaming": {"template": "blue", "i18n_key": "processing_prefix"},
-    "completed": {"template": "green", "i18n_key": "status_completed"},
-    "error": {"template": "red", "i18n_key": "status_error"},
-    "stopped": {"template": "red", "i18n_key": "status_stopped"},
-}
-
-
-def _build_header(status: str) -> dict[str, Any]:
-    """Build card-level header — streaming blue / completed green / stopped red."""
-    cfg = _HEADER_STATES.get(status, _HEADER_STATES["completed"])
-    en_text, zh_text = _T[cfg["i18n_key"]]
-    return {
-        "title": {
-            "tag": "plain_text",
-            "content": en_text,
-            "i18n_content": _i18n(en_text, zh_text),
-        },
-        "template": cfg["template"],
-    }
-
 
 _IMG_MD_PATTERN = re.compile(r"!\[([^\]]*)\]\((img_[^)\s]+)\)")
 _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 _RE_BACKTICK_RUN = re.compile(r"`+")
 _RE_MD_SPECIAL = re.compile(r"([`*_{}\[\]<>])")
 
-
 def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
-    """从 markdown 文本中提取已解析的飞书图片，返回 (清理后的文本, img元素列表).
-
-    将 ``![alt](img_v3_xxx)`` 格式的图片从文本中提取为独立的
-    Card 2.0 ``tag: "img"`` 元素，图片从文本中移除以避免重复显示。
-
-    仅处理 ``img_`` 前缀的 URL（已上传到飞书的图片 key）。
-    """
+    """提取飞书图片为独立 Card 2.0 img 元素，返回 (清理后的文本, img元素列表)."""
     images: list[dict] = []
 
     def _replace(m: re.Match) -> str:
@@ -109,16 +71,11 @@ def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
         return ""
 
     cleaned = _IMG_MD_PATTERN.sub(_replace, text)
-    # 清理图片移除后可能留下的空行
     cleaned = _RE_MULTI_NEWLINE.sub("\n\n", cleaned).strip()
     return cleaned, images
 
 if TYPE_CHECKING:
     from ..state.linear import ReasoningRound
-
-# ---------------------------------------------------------------------------
-# Element ID constants
-# ---------------------------------------------------------------------------
 
 STREAMING_ELEMENT_ID = "streaming_content"
 ANSWER_ELEMENT_ID = "answer_content"
@@ -127,14 +84,8 @@ _LOADING_ELEMENT_ID = "loading_icon"
 _LOADING_HINT_ELEMENT_ID = "context_loading_hint"
 _LOADING_IMG_KEY = "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
 
-
 def _count_tag_objects(obj: Any) -> int:
-    """Recursively count all JSON objects with a ``tag`` key in a card element tree.
-
-    Feishu Card 2.0 counts every nested tag object toward its 200-element
-    limit — including ``standard_icon`` inside a ``div``, ``plain_text``
-    inside a ``collapsible_panel`` header, etc.
-    """
+    """Recursively count JSON objects with tag key. Feishu Card 2.0 caps at 200 elements."""
     count = 0
     if isinstance(obj, dict):
         if "tag" in obj:
@@ -145,7 +96,6 @@ def _count_tag_objects(obj: Any) -> int:
         for item in obj:
             count += _count_tag_objects(item)
     return count
-
 
 def _collapsible_panel(
     *,
@@ -178,7 +128,6 @@ def _collapsible_panel(
         "elements": elements,
     }
 
-
 def _streaming_element(content: str = "", *, element_id: str = STREAMING_ELEMENT_ID) -> dict:
     return {
         "tag": "markdown",
@@ -189,14 +138,8 @@ def _streaming_element(content: str = "", *, element_id: str = STREAMING_ELEMENT
         "element_id": element_id,
     }
 
-
 def _loading_element() -> dict:
-    """Loading spinner element — uses div with icon for schema safety.
-
-    CardKit v2.0 ``div`` elements natively support the ``icon`` property,
-    while ``markdown`` elements' icon support varies across API versions.
-    Using ``div`` guarantees the spinner renders without 300315 errors.
-    """
+    """Loading spinner element (div with icon — div natively supports icon, markdown varies)."""
     return {
         "tag": "div",
         "icon": {
@@ -210,7 +153,6 @@ def _loading_element() -> dict:
         },
         "element_id": _LOADING_ELEMENT_ID,
     }
-
 
 def _loading_hint_element() -> dict:
     """上下文加载占位元素 — 首卡创建后插入，首字即显时删除."""
@@ -229,17 +171,8 @@ def _loading_hint_element() -> dict:
         "element_id": _LOADING_HINT_ELEMENT_ID,
     }
 
-
-# ---------------------------------------------------------------------------
-# Unified panel builders
-# ---------------------------------------------------------------------------
-
 def _build_unified_panel_placeholder(*, expanded: bool = False) -> dict:
-    """Build empty unified panel placeholder for initial streaming card.
-
-    This creates a collapsible panel with no content — ready for
-    streaming updates via ``partial_update_element``.
-    """
+    """Build empty unified panel placeholder for initial streaming card."""
     en_title, zh_title = _T["agent_process"]
     panel = _collapsible_panel(
         expanded=expanded,
@@ -255,43 +188,8 @@ def _build_unified_panel_placeholder(*, expanded: bool = False) -> dict:
     panel["element_id"] = UNIFIED_PANEL_ELEMENT_ID
     return panel
 
-
-def build_panel_header(
-    *,
-    reasoning_rounds: list,  # list of ReasoningRound objects
-    current_reasoning_text: str = "",  # in-progress reasoning
-    tool_steps: list[dict],
-    tool_elapsed_ms: float = 0,
-    show_reasoning: bool = True,
-) -> dict:
-    """Build the header dict for the unified panel.
-
-    Computes the panel title from the current state (round count, tool
-    count, elapsed time) and wraps it in the full header structure
-    expected by Feishu's ``collapsible_panel`` schema:
-
-        {"title": <plain_text>, "vertical_align": "center",
-         "icon": <standard_icon>, "icon_position": "right",
-         "icon_expanded_angle": -180}
-
-    The returned dict can be passed directly to Feishu's
-    ``partial_update_element`` API as ``partial_element.header``.
-
-    Parameters
-    ----------
-    reasoning_rounds : list[ReasoningRound]
-        Finalised reasoning rounds (each has ``.index``, ``.text``, ``.elapsed_ms``).
-    current_reasoning_text : str
-        In-progress reasoning text that has not yet been finalised into a round.
-    tool_steps : list[dict]
-        Tool step dicts (length is used for the title count).
-    tool_elapsed_ms : float
-        Total elapsed time for tool execution in milliseconds.
-    show_reasoning : bool
-        Whether to render reasoning content.  When ``False`` the title omits
-        the rounds count.
-    """
-    # ── Title computation (uses ORIGINAL, untrimmed counts) ──
+def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, show_reasoning: bool = True) -> dict:
+    """Build header dict for unified panel. Title computed from state (rounds/tools/elapsed)."""
     en_title, zh_title = _T["agent_process"]
     en_parts: list[str] = [en_title]
     zh_parts: list[str] = [zh_title]
@@ -311,7 +209,6 @@ def build_panel_header(
         en_parts.append(en_tools.format(len(tool_steps)))
         zh_parts.append(zh_tools.format(len(tool_steps)))
 
-    # Total elapsed = reasoning elapsed + tool elapsed
     reasoning_elapsed_ms = sum(r.elapsed_ms for r in reasoning_rounds)
     total_elapsed_ms = reasoning_elapsed_ms + tool_elapsed_ms
     if total_elapsed_ms > 0 and (has_reasoning or tool_steps):
@@ -330,8 +227,7 @@ def build_panel_header(
         "text_size": "notation",
     }
 
-    # Full header structure (matches what _collapsible_panel puts under
-    # the "header" key, with icon_position="right" → icon gets color="grey").
+    # Header structure (matches _collapsible_panel; icon_position=right → grey).
     icon_el = {
         "tag": "standard_icon",
         "token": "down-small-ccm_outlined",
@@ -346,71 +242,18 @@ def build_panel_header(
         "icon_expanded_angle": -180,
     }
 
-
 _REASONING_DISPLAY_LIMIT = 2000  # 单条推理文本最大显示字数
 
-
 def _truncate_reasoning(text: str) -> str:
-    """截断过长推理文本，防止飞书渲染卡顿.
-
-    所有推理文本渲染路径都应调用此函数，确保截断逻辑一致。
-    保证返回值总长度不超过 _REASONING_DISPLAY_LIMIT。
-    """
+    """截断过长推理文本至 _REASONING_DISPLAY_LIMIT."""
     if len(text) <= _REASONING_DISPLAY_LIMIT:
         return text
     suffix = "\n\n... (已截断，共 {} 字)".format(len(text))
     return text[:_REASONING_DISPLAY_LIMIT - len(suffix)] + suffix
 
-
-def build_panel_children(
-    *,
-    reasoning_rounds: list,  # list of ReasoningRound objects
-    current_reasoning_text: str = "",  # in-progress reasoning
-    tool_steps: list[dict],
-    show_reasoning: bool = True,
-    panel_events: list[tuple[str, int]] | None = None,
-    max_tool_steps: int = 20,
-    max_reasoning_rounds: int = 20,
-) -> list[dict]:
-    """Build the list of child elements for the unified panel body.
-
-    Renders reasoning rounds and tool steps in chronological order (when
-    ``panel_events`` is provided) or sequentially (fallback).  Applies
-    element-limit trimming when there are too many rounds/tools.
-
-    The returned list can be passed directly to Feishu's
-    ``partial_update_element`` API as ``partial_element.elements``.
-
-    Parameters
-    ----------
-    reasoning_rounds : list[ReasoningRound]
-        Finalised reasoning rounds.  Will be trimmed to the last
-        ``max_reasoning_rounds`` items if longer.
-    current_reasoning_text : str
-        In-progress reasoning text that has not yet been finalised into a round.
-    tool_steps : list[dict]
-        Tool step dicts consumed by :func:`_build_tool_step_elements`.
-        Will be trimmed to the last ``max_tool_steps`` items if longer.
-    show_reasoning : bool
-        Whether to render reasoning content.  When ``False`` reasoning
-        blocks are hidden (but tools are still rendered).
-    panel_events : list[tuple[str, int]] | None
-        Chronological timeline from :attr:`UnifiedLinearState.panel_events`.
-        When provided, reasoning and tool elements are interleaved in the
-        order they actually occurred, instead of grouping all reasoning
-        before all tools.
-    max_tool_steps : int
-        Maximum number of tool steps to render (older steps are trimmed).
-    max_reasoning_rounds : int
-        Maximum number of reasoning rounds to render (older rounds are trimmed).
-    """
-    # ── Element limit trimming ──
-    # Feishu Card 2.0 has a hard limit of 200 elements/components.
-    # When the card has too many tool steps or reasoning rounds,
-    # the preservative seal or full rebuild fails with code 300305
-    # ("element exceeds the limit"), causing a text fallback that
-    # duplicates content already visible on the card.
-    # We trim early items and show a collapse hint instead.
+def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], show_reasoning: bool = True, panel_events: list[tuple[str, int]] | None = None, max_tool_steps: int = 20, max_reasoning_rounds: int = 20) -> list[dict]:
+    """Build child elements for unified panel body. Renders chronologically (panel_events)
+    or sequentially (fallback). Trims to max_* limits (Feishu 200-element cap)."""
     trimmed_rounds = 0
     trimmed_tools = 0
 
@@ -422,13 +265,10 @@ def build_panel_children(
         trimmed_tools = len(tool_steps) - max_tool_steps
         tool_steps = tool_steps[-max_tool_steps:]
 
-    # Recount after trimming
     num_rounds = len(reasoning_rounds) + (1 if current_reasoning_text else 0)
 
-    # Filter panel_events to match trimmed items
+    # Filter panel_events to match trimmed items (offset mapping).
     if panel_events and (trimmed_rounds > 0 or trimmed_tools > 0):
-        # panel_events reference original indices; after trimming, we keep only
-        # the last N items, so original index i maps to trimmed index i - offset.
         round_offset = trimmed_rounds
         tool_offset = trimmed_tools
         filtered_events: list[tuple[str, int]] = []
@@ -441,7 +281,6 @@ def build_panel_children(
                     filtered_events.append((kind, idx - tool_offset))
         panel_events = filtered_events if filtered_events else None
 
-    # ── Internal elements ──
     children: list[dict] = []
 
     if trimmed_rounds > 0 or trimmed_tools > 0:
@@ -458,7 +297,6 @@ def build_panel_children(
         })
 
     if panel_events:
-        # ── Chronological rendering: interleave reasoning and tools ──
         rendered_tools: set[int] = set()
         for kind, idx in panel_events:
             if kind == "reasoning" and show_reasoning and idx < len(reasoning_rounds):
@@ -482,7 +320,7 @@ def build_panel_children(
                     children.extend(_build_tool_step_elements(step))
                     rendered_tools.add(idx)
 
-        # In-progress reasoning (not yet finalised into panel_events)
+        # In-progress reasoning.
         if current_reasoning_text and show_reasoning:
             in_progress_idx = num_rounds  # 1-based
             children.append(_build_reasoning_round_title(
@@ -499,18 +337,17 @@ def build_panel_children(
                     },
                 })
 
-        # Remaining tool steps not in panel_events (safety fallback)
+        # Remaining tool steps not in panel_events.
         for i, step in enumerate(tool_steps):
             if i not in rendered_tools:
                 children.extend(_build_tool_step_elements(step))
 
     else:
-        # ── Fallback: no timeline available, render sequentially ──
+        # No timeline, render sequentially.
         has_reasoning = show_reasoning and (
             reasoning_rounds or current_reasoning_text
         )
         if has_reasoning:
-            # Reasoning rounds
             for round_ in reasoning_rounds:
                 children.append(_build_reasoning_round_title(
                     round_.index, round_.elapsed_ms, finalized=True,
@@ -526,7 +363,7 @@ def build_panel_children(
                         },
                     })
 
-            # In-progress reasoning
+            # In-progress reasoning.
             if current_reasoning_text:
                 in_progress_idx = num_rounds
                 children.append(_build_reasoning_round_title(
@@ -543,71 +380,17 @@ def build_panel_children(
                         },
                     })
 
-        # Tool steps
+        # Tool steps.
         for step in tool_steps:
             children.extend(_build_tool_step_elements(step))
 
-    # Fallback: empty content
     if not children:
         children.append({"tag": "markdown", "content": " "})
 
     return children
 
-
-def build_unified_panel(
-    *,
-    reasoning_rounds: list,  # list of ReasoningRound objects
-    current_reasoning_text: str = "",  # in-progress reasoning
-    tool_steps: list[dict],
-    tool_elapsed_ms: float = 0,
-    show_reasoning: bool = True,
-    expanded: bool = False,
-    element_id: str | None = None,
-    panel_events: list[tuple[str, int]] | None = None,
-    max_tool_steps: int = 20,
-    max_reasoning_rounds: int = 20,
-) -> dict:
-    """Build the full unified panel content for streaming updates and complete cards.
-
-    Combines reasoning rounds and tool steps into a single collapsible panel.
-    The panel title dynamically reflects the current state (round count, tool
-    count, elapsed time).
-
-    This is a thin assembler over :func:`build_panel_header` and
-    :func:`build_panel_children`; callers that only need to update the
-    panel's children (e.g. during streaming partial_update_element) can
-    call :func:`build_panel_children` directly to skip header rebuild.
-
-    .. note::
-       v1.2.0: ``build_panel_header`` / ``build_panel_children`` 的单独
-       调用入口当前**仅由本函数内部使用**，生产代码尚未单独调用它们
-       （即"只重建 children 跳过 header"的性能优化预留未启用）。保留
-       入口供未来在 flush 性能成为瓶颈时实现该优化。
-
-    Parameters
-    ----------
-    reasoning_rounds : list[ReasoningRound]
-        Finalised reasoning rounds (each has ``.index``, ``.text``, ``.elapsed_ms``).
-    current_reasoning_text : str
-        In-progress reasoning text that has not yet been finalised into a round.
-    tool_steps : list[dict]
-        Tool step dicts consumed by :func:`_build_tool_step_elements`.
-    tool_elapsed_ms : float
-        Total elapsed time for tool execution in milliseconds.
-    show_reasoning : bool
-        Whether to render reasoning content.  When ``False`` the title omits
-        the rounds count and reasoning blocks are hidden.
-    expanded : bool
-        Whether the panel starts expanded.
-    element_id : str | None
-        Override for the panel element_id.  Defaults to
-        :data:`UNIFIED_PANEL_ELEMENT_ID`.
-    panel_events : list[tuple[str, int]] | None
-        Chronological timeline from :attr:`UnifiedLinearState.panel_events`.
-        When provided, reasoning and tool elements are interleaved in the
-        order they actually occurred, instead of grouping all reasoning
-        before all tools.
-    """
+def build_unified_panel(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, show_reasoning: bool = True, expanded: bool = False, element_id: str | None = None, panel_events: list[tuple[str, int]] | None = None, max_tool_steps: int = 20, max_reasoning_rounds: int = 20) -> dict:
+    """Build full unified panel. Thin assembler over build_panel_header/children."""
     header = build_panel_header(
         reasoning_rounds=reasoning_rounds,
         current_reasoning_text=current_reasoning_text,
@@ -636,7 +419,6 @@ def build_unified_panel(
     panel["element_id"] = element_id or UNIFIED_PANEL_ELEMENT_ID
     return panel
 
-
 def _build_tool_step_elements(step: dict) -> list[dict]:
     elements: list[dict] = [_build_tool_step_title(step)]
     detail = _build_tool_step_detail(step)
@@ -647,12 +429,10 @@ def _build_tool_step_elements(step: dict) -> list[dict]:
         elements.append(output)
     return elements
 
-
 def _build_tool_step_title(step: dict) -> dict:
     status = step.get("status", "running")
     status_info = _tool_status_info(status)
     title = step.get("title", step.get("name", "tool"))
-    # 仅用颜色区分状态，不显示状态文字；标题加粗整体上色
     content = f"<font color='{status_info['color']}'>**{_escape_md(title)}**</font>"
     return {
         "tag": "div",
@@ -668,20 +448,8 @@ def _build_tool_step_title(step: dict) -> dict:
         },
     }
 
-
-def _build_reasoning_round_title(
-    round_index: int,
-    elapsed_ms: float,
-    finalized: bool,
-    failed: bool = False,
-) -> dict:
-    """构建推理轮次标题 div — 图标 robot-add_outlined + 颜色加粗文字.
-
-    颜色规则：
-      - 进行中（未结束）: orange-300
-      - 已完成（已结束）: green
-      - 失败: red
-    """
+def _build_reasoning_round_title(round_index: int, elapsed_ms: float, finalized: bool, failed: bool = False) -> dict:
+    """构建推理轮次标题 div. Colors: 进行中 orange-300, 已完成 green, 失败 red."""
     if failed:
         color = "red"
     elif finalized:
@@ -689,7 +457,6 @@ def _build_reasoning_round_title(
     else:
         color = "orange-300"
 
-    # 文本格式：「第 N 轮 · Xs」或「第 N 轮」
     en_label, zh_label = _T["round_n"]
     text = zh_label.format(round_index)  # 用中文格式
     elapsed = _format_elapsed(elapsed_ms) if elapsed_ms > 0 else ""
@@ -712,7 +479,6 @@ def _build_reasoning_round_title(
         },
     }
 
-
 def _build_tool_step_detail(step: dict) -> dict | None:
     detail = step.get("detail", "").strip()
     if not detail:
@@ -727,7 +493,6 @@ def _build_tool_step_detail(step: dict) -> dict | None:
             "text_size": "notation",
         },
     }
-
 
 def _build_tool_step_output(step: dict) -> dict | None:
     error_block = step.get("error_block")
@@ -760,7 +525,6 @@ def _build_tool_step_output(step: dict) -> dict | None:
         },
     }
 
-
 def _tool_status_info(status: str) -> dict[str, str]:
     return {
         "running": {"label": "", "color": "orange-300"},
@@ -768,65 +532,38 @@ def _tool_status_info(status: str) -> dict[str, str]:
         "error": {"label": "", "color": "red"},
     }.get(status, {"label": "", "color": "grey"})
 
-
 def _format_code_block(content: str, language: str) -> str:
     normalized = content.replace("\r\n", "\n").strip()
     fence = "`" * max(3, _longest_backtick_run(normalized) + 1)
     return f"{fence}{language}\n{normalized}\n{fence}"
 
-
 def _longest_backtick_run(value: str) -> int:
     matches = _RE_BACKTICK_RUN.findall(value)
     return max((len(m) for m in matches), default=0)
 
-
 def _escape_md(value: str) -> str:
     return _RE_MD_SPECIAL.sub(r"\\\1", value.replace("\\", "\\\\"))
 
-
-def _build_error_panel(
-    error_message: str,
-    *,
-    is_aborted: bool = False,
-    expanded: bool = True,
-    card_trace_id: str = "",
-) -> dict:
-    """Build a collapsible error/interrupt panel — visually consistent with
-    reasoning and tool panels.
-
-    v1.1.0: Error messages are now user-friendly. Technical details are
-    placed in the collapsible panel body, while the panel title shows
-    a concise friendly message. If card_trace_id is provided, it's
-    included for log correlation.
-
-    - Error (API failure, tool crash): red border, expanded by default
-    - Interrupt (/stop or new message): orange border, expanded by default
-    """
+def _build_error_panel(error_message: str, *, is_aborted: bool = False, expanded: bool = True, card_trace_id: str = "") -> dict:
+    """Build collapsible error/interrupt panel. Error: red border. Interrupt: orange."""
     if is_aborted:
         en_label, zh_label = _T["interrupt_panel"]
         border_color = "orange"
-        # Interrupt is already user-friendly (e.g. "⚡ 已停止")
         body_content = error_message
-        body_i18n = None  # 中断消息无需 i18n（error_message 来自上层，已是用户语言）
+        body_i18n = None  # 中断消息无需 i18n
     else:
         en_label, zh_label = _T["error_panel"]
         border_color = "red"
-        # v1.1.0: Build user-friendly error body
-        # Friendly hint + technical details in collapsible section
         friendly_en = "AI encountered an error while replying. Please try again."
         friendly_zh = "AI 回复时出现错误，请重试。"
         if card_trace_id:
             friendly_en += f"\n\nDebug ID: `{card_trace_id}`"
             friendly_zh += f"\n\n调试 ID: `{card_trace_id}`"
-            # v1.2.0: 引导用户通过 issue 模板反馈（附调试 ID 帮开发者定位）
             friendly_en += "\n\nIf this keeps happening, report the Debug ID to the developer."
             friendly_zh += "\n\n如果反复出错，请把调试 ID 反馈给开发者。"
 
         tech_detail = error_message.strip() if error_message else ""
         if tech_detail:
-            # v1.2.0: 去掉 <details> HTML 标签（飞书 markdown 不支持 HTML 标签，
-            # 会显示成乱码）。外层 collapsible_panel 已提供折叠能力，
-            # 技术详情用分隔线 + 标题区分即可。
             body_content = f"{friendly_zh}\n\n---\n**技术详情**\n```\n{tech_detail}\n```"
             body_content_en = f"{friendly_en}\n\n---\n**Technical Details**\n```\n{tech_detail}\n```"
             body_i18n = _i18n(body_content_en, body_content)
@@ -834,8 +571,6 @@ def _build_error_panel(
             body_content = friendly_zh
             body_i18n = _i18n(friendly_en, friendly_zh)
 
-    # v1.3.4 fix (P1): markdown 元素添加 i18n_content，英文 locale 用户
-    # 看到英文错误消息而非中文（原实现 friendly_en 是死代码从未使用）。
     markdown_el: dict[str, Any] = {
         "tag": "markdown",
         "content": body_content,
@@ -856,18 +591,11 @@ def _build_error_panel(
         elements=[markdown_el],
         vertical_spacing="8px",
     )
-    # Override border color to red/orange for visual emphasis
     panel["border"]["color"] = border_color
     return panel
 
-
-def _build_background_review_panel(
-    messages: list[str],
-    *,
-    expanded: bool = True,
-    element_id: str | None = None,
-) -> dict[str, Any]:
-    """构建后台审查进度面板（可折叠）."""
+def _build_background_review_panel(messages: list[str], *, expanded: bool = True, element_id: str | None = None) -> dict[str, Any]:
+    """构建后台审查进度面板."""
     en_title, zh_title = _T["bg_review_panel"]
     children: list[dict] = []
     for msg in messages:
@@ -891,7 +619,6 @@ def _build_background_review_panel(
     if element_id:
         panel["element_id"] = element_id
     return panel
-
 
 def _build_footer_elements(
     footer_data: dict | None,
@@ -938,49 +665,15 @@ def _build_footer_elements(
         },
     ]
 
-
-def build_preservative_seal_actions(
-    *,
-    partial: bool = False,
-    footer_data: dict | None = None,
-    is_error: bool = False,
-    is_aborted: bool = False,
-    error_message: str = "",
-    footer_fields: list[list[str]] | None = None,
-    footer_show_label: bool = False,
-    existing_elements: set[str] | None = None,
-    card_trace_id: str = "",
-) -> list[dict]:
-    """构建保留式封卡的 batch_update actions.
-
-    生成增量操作：删除 loading icon + 添加 partial indicator 或 footer。
-    不重建整卡，避免 1→N+2M 的元素爆炸。
-
-    操作顺序：
-    1. insert_before loading_icon: 添加 error panel（如有）
-    2. insert_before loading_icon: 添加 partial indicator 或 footer
-    3. delete_element: 删除 loading_hint（如存在）
-    4. delete_element: 删除 loading_icon
-
-    所有 add_elements 都用 insert_before loading_icon 定位，
-    然后删除 loading_icon，最终效果是新增元素出现在卡片底部。
-
-    Parameters
-    ----------
-    existing_elements : set[str] | None
-        If provided, only include ``delete_elements`` actions for element IDs
-        that are actually present in this set.  This avoids 400 errors when
-        trying to delete elements that were never created.  When ``None``
-        (the default), all deletions are included — preserving backward
-        compatibility.
-    """
+def build_preservative_seal_actions(*, partial: bool = False, footer_data: dict | None = None, is_error: bool = False, is_aborted: bool = False, error_message: str = "", footer_fields: list[list[str]] | None = None, footer_show_label: bool = False, existing_elements: set[str] | None = None, card_trace_id: str = "") -> list[dict]:
+    """构建保留式封卡 batch_update actions. Inserts error panel + footer via insert_before
+    loading_icon, then deletes loading_hint + loading_icon. existing_elements filters deletes."""
     actions: list[dict] = []
 
-    # Helper: check if an element exists (when tracking is enabled)
     def _elem_exists(eid: str) -> bool:
         return existing_elements is None or eid in existing_elements
 
-    # ── Error/interrupt panel (if any) ──
+    # Error/interrupt panel.
     if error_message:
         actions.append({
             "action": "add_elements",
@@ -994,10 +687,7 @@ def build_preservative_seal_actions(
             },
         })
 
-    # ── Background review panel (if any) ──
-    # v1.3.4 fix (P1): bg_review_messages 之前只在 build_unified_complete_card
-    # （全量重建路径）渲染，preservative seal 路径遗漏。默认配置（header_enabled=False）
-    # 走 preservative seal，导致 background review 功能完全失效。
+    # Background review panel.
     bg_review_messages = footer_data.get("bg_review_messages") if footer_data else None
     if bg_review_messages:
         actions.append({
@@ -1012,7 +702,7 @@ def build_preservative_seal_actions(
             },
         })
 
-    # ── Partial indicator or footer ──
+    # Partial indicator or footer.
     if partial:
         en_text, zh_text = _T["partial_continues"]
         partial_elements = [
@@ -1049,9 +739,7 @@ def build_preservative_seal_actions(
                 },
             })
 
-    # ── Delete context loading hint (if still present) ──
-    # 占位提示在首字即显时通常已被删除，但如果卡片在 answer
-    # 到来前就被封（如超限拆卡），占位提示可能仍在，需要兜底删除。
+    # Delete loading hint (may remain if sealed before answer arrived).
     if _elem_exists(_LOADING_HINT_ELEMENT_ID):
         actions.append({
             "action": "delete_elements",
@@ -1060,7 +748,7 @@ def build_preservative_seal_actions(
             },
         })
 
-    # ── Delete loading icon ──
+    # Delete loading icon.
     if _elem_exists(_LOADING_ELEMENT_ID):
         actions.append({
             "action": "delete_elements",
@@ -1070,7 +758,6 @@ def build_preservative_seal_actions(
         })
 
     return actions
-
 
 def _render_footer_field(
     name: str,
@@ -1163,7 +850,6 @@ def _render_footer_field(
         if cost_status == "included":
             return _T["cost_included"]
         if cost_status in ("actual", "estimated") and cost_usd:
-            # Format: $0.023 for small values, $1.50 for larger
             if cost_usd < 0.01:
                 val = f"${cost_usd:.4f}"
             elif cost_usd < 1:
@@ -1179,7 +865,6 @@ def _render_footer_field(
 
     return None, None
 
-
 def _compact(n: int) -> str:
     if n >= 1_000_000:
         m = n / 1_000_000
@@ -1187,7 +872,6 @@ def _compact(n: int) -> str:
     if n >= 1_000:
         return f"{n / 1_000:.1f}K"
     return str(n)
-
 
 def _format_elapsed(ms: float) -> str:
     seconds = ms / 1000

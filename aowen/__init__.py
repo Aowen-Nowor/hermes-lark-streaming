@@ -1,32 +1,4 @@
-"""Monitoring metrics + /aowen command system.
-
-v1.1.0: Monitoring via /aowen commands in Feishu.
-Users send "/aowen <command>" and the plugin replies with a card
-directly (bypassing Hermes AI via pre_gateway_dispatch hook).
-
-Commands:
-  /aowen help           — show available commands
-  /aowen status         — plugin status + config (in collapsible panel)
-  /aowen monitor        — metrics dashboard
-  /aowen monitor reset  — reset metrics counters
-  /aowen config reload  — reload config.yaml without restart
-  /aowen                — same as /aowen help
-
-v1.1.0 card redesign:
-  - Visual hierarchy: banner (icon+title) → key metrics (columns) →
-    details (iconified divs) → secondary (collapsible) → footer note.
-  - Color semantics: green=success, orange=warning, red=error,
-    blue=info, grey=neutral. Header template matches card purpose.
-  - Responsive: column_set with flex_mode="stretch" everywhere
-    (mobile stacks columns vertically, desktop shows side-by-side).
-  - v2-safe tags only: div, lark_md, plain_text, hr, column_set,
-    column, collapsible_panel, standard_icon, markdown.
-  - No button/form_container/interactive_container (per user requirement).
-  - build_interrupt_hint_card() + _wrap_handle_message patch: when an
-    agent is running and user sends /aowen, reply with an orange hint
-    card (borrows Hermes native "Agent is running — wait or /stop first"
-    UX) instead of letting the command fall through to the LLM.
-"""
+"""Commands: help, status, monitor, monitor reset, config reload. Bypasses Hermes AI"""
 
 from __future__ import annotations
 
@@ -37,17 +9,10 @@ from typing import Any
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-# ── Metrics collector (global singleton, thread-safe) ──
-#
-# Hermes runs asyncio but Feishu API calls execute in real OS threads
-# (via asyncio.to_thread).  Concurrent increments on the same dict
-# key can lose counts without a lock — e.g. two threads both read
-# 0, each writes 1, result is 1 instead of 2.  A single threading.Lock
-# around every mutation/read is cheap (a few μs) and prevents this.
-
+# Pitfall: Feishu API calls run in real OS threads; concurrent increments
 _metrics_lock = threading.Lock()
 
-# v1.3.2 fix (B3-03): hold strong references to fire-and-forget tasks
+# Hold strong refs to fire-and-forget tasks (prevent mid-execution GC).
 _aowen_pending_tasks: set = set()
 
 _metrics: dict[str, Any] = {
@@ -60,13 +25,11 @@ _metrics: dict[str, Any] = {
     "stream_element_calls": 0,
     "stream_element_failures": 0,
     "batch_update_calls": 0,
-    "full_rebuilds": 0,
     "active_sessions": 0,
     "started_at": time.time(),
 }
 
 _error_codes: dict[int, int] = {}  # error_code → count
-
 
 def record_card_created() -> None:
     with _metrics_lock:
@@ -99,10 +62,6 @@ def record_api_error(code: int, operation: str = "") -> None:
         if operation == "cardkit_stream_element":
             _metrics["stream_element_failures"] += 1
 
-def record_full_rebuild() -> None:
-    with _metrics_lock:
-        _metrics["full_rebuilds"] += 1
-
 def set_active_sessions(count: int) -> None:
     with _metrics_lock:
         _metrics["active_sessions"] = count
@@ -118,7 +77,6 @@ def get_metrics() -> dict[str, Any]:
             "error_codes": dict(_error_codes),
         }
 
-
 def _format_uptime(seconds: float) -> str:
     """Format uptime as human-readable string."""
     if seconds < 60:
@@ -128,7 +86,6 @@ def _format_uptime(seconds: float) -> str:
         return f"{minutes}m {int(seconds % 60)}s"
     hours = int(minutes // 60)
     return f"{hours}h {minutes % 60}m"
-
 
 def _get_version() -> str:
     """Get plugin version from plugin.yaml."""
@@ -143,24 +100,7 @@ def _get_version() -> str:
         pass
     return "unknown"
 
-
-# ── Card design helpers (v2 components, no interactive buttons) ──
-#
-# Design language (v1.1.0 redesign):
-#   - Headers: plain_text, no emoji (per existing requirement)
-#   - Visual hierarchy via standard_icon + lark_md font colors:
-#       green = success/ready, orange = warning/blocked,
-#       red = error/failed, blue = info, grey = neutral
-#   - Responsive: column_set with flex_mode="stretch" everywhere
-#     (mobile stacks columns vertically, desktop shows side-by-side)
-#   - Information layering: banner → key metrics → details → collapsible → footer
-#   - v2-safe tags only: div, lark_md, plain_text, hr, column_set,
-#     column, collapsible_panel, standard_icon, markdown
-#   - No button/form_container/interactive_container (per user requirement)
-
-# Confirmed standard_icon tokens (used elsewhere in the codebase):
-#   info_outlined, resolve_filled, time_outlined, lock_outlined,
-#   robot-add_outlined, down-small-ccm_outlined
+# Color: green=success, orange=warning, red=error, blue=info, grey=neutral.
 _ICON_TOKENS: dict[str, str] = {
     "info": "info_outlined",
     "success": "resolve_filled",
@@ -170,31 +110,19 @@ _ICON_TOKENS: dict[str, str] = {
     "collapse": "down-small-ccm_outlined",
 }
 
-# v2 font color names (verified working in existing code)
+# v2 font color names.
 _COLOR_MAP: dict[str, str | None] = {
     "default": None,
     "grey": "grey",
     "blue": "blue",
     "green": "green",
-    "orange": "orange-300",  # v2 uses orange-300 for softer orange
+    "orange": "orange-300",
     "red": "red",
     "turquoise": "turquoise",
 }
 
-
-def _icon_div(
-    icon_key: str,
-    content: str,
-    *,
-    icon_color: str = "grey",
-    text_size: str = "normal",
-    text_color: str | None = None,
-    icon_size: str = "16px 16px",
-) -> dict:
-    """Build a div with standard_icon + lark_md text — the workhorse element.
-
-    icon_key is one of: info, success, warning, locked, agent, collapse.
-    """
+def _icon_div(icon_key: str, content: str, *, icon_color: str = "grey", text_size: str = "normal", text_color: str | None = None, icon_size: str = "16px 16px") -> dict:
+    """Build div with standard_icon + lark_md text."""
     token = _ICON_TOKENS.get(icon_key, "info_outlined")
     text: dict = {"tag": "lark_md", "content": content, "text_size": text_size}
     if text_color:
@@ -210,20 +138,8 @@ def _icon_div(
         "text": text,
     }
 
-
-def _metric_block(
-    label: str,
-    value: Any,
-    *,
-    icon_key: str = "info",
-    color: str = "default",
-) -> dict:
-    """Build a metric block: icon + label (grey small) + value (bold colored).
-
-    Designed to sit inside a column. Two-line layout:
-      Line 1: grey small label
-      Line 2: bold value, colored by status
-    """
+def _metric_block(label: str, value: Any, *, icon_key: str = "info", color: str = "default") -> dict:
+    """Build metric block: icon + grey label + bold colored value."""
     font_color = _COLOR_MAP.get(color)
     if font_color:
         value_md = f"<font color='{font_color}'>**{value}**</font>"
@@ -244,9 +160,8 @@ def _metric_block(
         },
     }
 
-
 def _two_col(left: dict, right: dict) -> dict:
-    """Build a 2-column responsive row (stacks vertically on mobile)."""
+    """Build 2-column responsive row (stacks on mobile)."""
     return {
         "tag": "column_set",
         "flex_mode": "stretch",
@@ -256,9 +171,8 @@ def _two_col(left: dict, right: dict) -> dict:
         ],
     }
 
-
 def _three_col(c1: dict, c2: dict, c3: dict) -> dict:
-    """Build a 3-column responsive row (stacks vertically on mobile)."""
+    """Build 3-column responsive row (stacks on mobile)."""
     return {
         "tag": "column_set",
         "flex_mode": "stretch",
@@ -269,9 +183,8 @@ def _three_col(c1: dict, c2: dict, c3: dict) -> dict:
         ],
     }
 
-
 def _section_title(text: str, *, color: str = "grey") -> dict:
-    """Build a section title — bold colored small text."""
+    """Build section title — bold colored small text."""
     return {
         "tag": "div",
         "text": {
@@ -282,15 +195,8 @@ def _section_title(text: str, *, color: str = "grey") -> dict:
         },
     }
 
-
-def _fold(
-    title: str,
-    elements: list[dict],
-    *,
-    expanded: bool = False,
-    border_color: str = "grey",
-) -> dict:
-    """Build a collapsible panel with consistent styling."""
+def _fold(title: str, elements: list[dict], *, expanded: bool = False, border_color: str = "grey") -> dict:
+    """Build collapsible panel."""
     return {
         "tag": "collapsible_panel",
         "expanded": expanded,
@@ -317,9 +223,8 @@ def _fold(
         "elements": elements,
     }
 
-
 def _footer_note(content: str) -> dict:
-    """Build a footer note — small grey text (typically after an hr)."""
+    """Build footer note — small grey text."""
     return {
         "tag": "div",
         "text": {
@@ -330,18 +235,10 @@ def _footer_note(content: str) -> dict:
         },
     }
 
-
 # ── Card builders ──
 
-
 def build_help_card() -> dict[str, Any]:
-    """Build help card — commands grouped by category, iconified rows.
-
-    v1.1.0 redesign: commands split into "query" (read-only) and "action"
-    (state-changing) groups; each command is an iconified div for visual
-    scanning. Single-column list is more readable on both PC and mobile
-    than the previous 1:2 column_set layout.
-    """
+    """Build help card — query (read-only) and action (state-changing) commands."""
     version = _get_version()
 
     query_cmds = [
@@ -355,7 +252,6 @@ def build_help_card() -> dict[str, Any]:
     ]
 
     elements: list[dict] = [
-        # Top banner
         _icon_div("info", f"**hermes-lark-streaming** v{version}",
                   icon_color="blue", icon_size="20px 20px"),
         {
@@ -368,7 +264,6 @@ def build_help_card() -> dict[str, Any]:
             },
         },
         {"tag": "hr"},
-        # Query commands
         _section_title("查询类命令（只读，安全）", color="blue"),
     ]
 
@@ -395,15 +290,8 @@ def build_help_card() -> dict[str, Any]:
         "body": {"elements": elements},
     }
 
-
 def build_status_card() -> dict[str, Any]:
-    """Build status card — top metrics row + patch status + collapsible config.
-
-    v1.1.0 redesign: 3-column key metrics with icons; patch status as
-    iconified divs (green check / orange warning / red error); config
-    grouped by category inside a collapsible panel with sub-sections
-    (streaming control / card behavior / limits / credentials).
-    """
+    """Build status card — 3 metrics, patch status, collapsible config."""
     try:
         from ..controller import get_controller
         from ..patching import _patch_status
@@ -473,7 +361,6 @@ def build_status_card() -> dict[str, Any]:
             f"`panel_expanded`: `{cfg.panel_expanded}`",
             f"`streaming_panel_expanded`: `{cfg.streaming_panel_expanded}`",
             f"`show_reasoning`: `{cfg.show_reasoning}`",
-            f"`header_enabled`: `{cfg.header_enabled}`",
         ]
         limit_cfg = [
             f"`max_tool_steps`: `{cfg.max_tool_steps}`",
@@ -526,27 +413,16 @@ def build_status_card() -> dict[str, Any]:
             ]},
         }
 
-
 def build_monitor_card() -> dict[str, Any]:
-    """Build monitor card — metrics dashboard with grouped sections.
-
-    v1.1.0 redesign: top summary row (version/uptime/sessions); card
-    lifecycle section (created/completed/failed/aborted); API section
-    (calls/errors/stream/batch/rebuilds); error code distribution with
-    iconified rows showing count + percentage. Responsive column_set
-    throughout — 2 columns on desktop, stacked on mobile.
-    """
+    """Build monitor card — top summary, lifecycle, API calls, error codes."""
     m = get_metrics()
     version = _get_version()
 
-    # Determine status colors
     api_err_color = "error" if m["api_errors"] > 0 else "default"
     stream_fail_color = "error" if m["stream_element_failures"] > 0 else "default"
-    rebuild_color = "warning" if m["full_rebuilds"] > 0 else "default"
     failed_color = "error" if m["cards_failed"] > 0 else "default"
 
     elements: list[dict] = [
-        # ── Top summary: 3 cols ──
         _three_col(
             _metric_block("版本", f"v{version}", icon_key="info", color="blue"),
             _metric_block("运行时间", m["uptime_human"], icon_key="warning", color="default"),
@@ -554,7 +430,6 @@ def build_monitor_card() -> dict[str, Any]:
                           color="orange" if m["active_sessions"] > 0 else "default"),
         ),
         {"tag": "hr"},
-        # ── Card lifecycle section ──
         _section_title("卡片生命周期", color="blue"),
         _two_col(
             _metric_block("创建", m["cards_created"], icon_key="info", color="default"),
@@ -565,7 +440,6 @@ def build_monitor_card() -> dict[str, Any]:
             _metric_block("已停止", m["cards_aborted"], icon_key="warning", color="default"),
         ),
         {"tag": "hr"},
-        # ── API calls section ──
         _section_title("API 调用", color="blue"),
         _two_col(
             _metric_block("总调用", m["api_calls"], icon_key="info", color="default"),
@@ -577,11 +451,10 @@ def build_monitor_card() -> dict[str, Any]:
         ),
         _two_col(
             _metric_block("批量更新", m["batch_update_calls"], icon_key="info", color="default"),
-            _metric_block("全卡重建", m["full_rebuilds"], icon_key="warning", color=rebuild_color),
+            _metric_block("活跃会话", m["active_sessions"], icon_key="agent", color="orange" if m["active_sessions"] > 0 else "default"),
         ),
     ]
 
-    # ── Error code distribution (only if there are errors) ──
     if m["error_codes"]:
         err_elements: list[dict] = [_section_title("错误码分布", color="orange")]
         total_err = sum(m["error_codes"].values()) or 1
@@ -608,10 +481,8 @@ def build_monitor_card() -> dict[str, Any]:
         "body": {"elements": elements},
     }
 
-
-
 def build_reset_card() -> dict[str, Any]:
-    """Build reset confirmation card — success banner + next-step hint."""
+    """Build reset confirmation card."""
     return {
         "schema": "2.0",
         "config": {"update_multi": True},
@@ -629,9 +500,8 @@ def build_reset_card() -> dict[str, Any]:
         },
     }
 
-
 def _build_unknown_command_card(subcommand: str) -> dict:
-    """Build unknown command card — friendly hint with help pointer."""
+    """Build unknown command card."""
     return {
         "schema": "2.0",
         "config": {"update_multi": True},
@@ -649,19 +519,8 @@ def _build_unknown_command_card(subcommand: str) -> dict:
         },
     }
 
-
 def build_interrupt_hint_card() -> dict[str, Any]:
-    """Build interrupt hint card — shown when /aowen is sent during active LLM run.
-
-    v1.1.0: Borrows Hermes native UX ("Agent is running — wait or /stop first").
-    Wired into _wrap_handle_message (patching/gateway.py): when an agent is
-    running for this session and the user sends a /aowen command, this card
-    is sent instead of letting the command fall through to the LLM.
-
-    UX: orange header (warning), clear iconified message, actionable hint.
-    The card tells the user the command was ignored (not sent to AI),
-    and what to do next (wait for completion or /stop first).
-    """
+    """Build hint card shown when /aowen sent during active agent run."""
     return {
         "schema": "2.0",
         "config": {"update_multi": True},
@@ -688,13 +547,8 @@ def build_interrupt_hint_card() -> dict[str, Any]:
         },
     }
 
-
 def _handle_config_reload() -> dict:
-    """Handle /aowen config reload — reload config and return result card.
-
-    Success: green header + success banner + timestamp footer.
-    Failure: red header + error banner + collapsible technical details.
-    """
+    """Handle /aowen config reload."""
     try:
         from ..config import Config
         cfg = Config()
@@ -718,7 +572,6 @@ def _handle_config_reload() -> dict:
         }
     except Exception as e:
         _logger.error("HLS: config reload failed", exc_info=True)
-        # Friendly message + technical details in collapsible panel
         err_text = str(e)[:500]
         return {
             "schema": "2.0",
@@ -740,50 +593,15 @@ def _handle_config_reload() -> dict:
             },
         }
 
-
-# ── pre_gateway_dispatch hook handler ──
-
-# /aowen 是插件的命令前缀，所有 /aowen 开头的命令都由此插件处理
-# 不经过 Hermes agent，直接返回卡片
-#
-# 命令体系：
-#   /aowen              — 同 help
-#   /aowen help         — 显示命令列表
-#   /aowen status       — 插件状态 + 配置（折叠面板）
-#   /aowen monitor      — 监控面板
-#   /aowen monitor reset — 重置统计
-#   /aowen config reload — 重新加载配置
-#
-# 注意：当 AI 正在回复中（agent 运行中）时，pre_gateway_dispatch hook
-# 不会被触发——Hermes 网关走"agent 运行中"快速路径。此时 /aowen 命令
-# 由 patching/gateway.py 的 _wrap_handle_message 拦截，发送
-# build_interrupt_hint_card() 提示卡（借鉴 Hermes 原生 /model 中断 UX）。
-
-
 def handle_pre_gateway_dispatch(event: Any, gateway: Any = None, **kwargs) -> dict | None:
-    """Handle /aowen commands — intercept and reply with cards."""
-    # v1.4.1: 懒重打 FeishuAdapter 补丁 (节流 60s)。
-    # _schedule_direct_patch 的 2s/10s 固定调度在某些 hermes v0.17.0 环境下
-    # 早于真身 (hermes_plugins.feishu_platform.adapter) 实际加载完成，导致
-    # 真身从未被 patch → clarify 卡片 action 落入 hermes core 原生
-    # _handle_card_action_event → 生成 /card 合成命令 → Gateway "Unknown
-    # command /card" (插件无此命令)。每条消息进入 gateway 前节流检查一次，
-    # 覆盖固定调度漏掉的延迟加载窗口。force=False 时内部 60s 节流，开销极低。
-    try:
-        from ..patching import lazy_repatch_feishu_adapter
-        lazy_repatch_feishu_adapter()
-    except Exception:
-        _logger.debug("HLS: lazy repatch call failed", exc_info=True)
-
+    """Handle /aowen commands."""
     try:
         text = getattr(event, "text", "") or ""
         text_stripped = text.strip()
 
-        # Only handle commands starting with /aowen (case-insensitive)
         if not text_stripped.lower().startswith("/aowen"):
             return None
 
-        # Only handle on Feishu platform
         source = getattr(event, "source", None)
         platform = getattr(getattr(source, "platform", None), "value", "")
         if platform != "feishu":
@@ -794,20 +612,13 @@ def handle_pre_gateway_dispatch(event: Any, gateway: Any = None, **kwargs) -> di
             _logger.warning("HLS: /aowen command but no chat_id")
             return None
 
-        # Parse subcommand: /aowen <subcommand> [args]
-        # /aowen              → help
-        # /aowen help         → help
-        # /aowen status       → status
-        # /aowen monitor      → monitor
-        # /aowen monitor reset → monitor reset
-        # /aowen config reload → config reload
-        parts = text_stripped.split(None, 2)  # ["/aowen", "sub", "arg"]
+        # Parse subcommand: /aowen <sub> [arg]
+        parts = text_stripped.split(None, 2)
         subcommand = parts[1].strip().lower() if len(parts) > 1 else "help"
         sub_arg = parts[2].strip().lower() if len(parts) > 2 else ""
 
         _logger.info("HLS: /aowen %s %s command detected, chat=%s", subcommand, sub_arg, chat_id[:12])
 
-        # Route to subcommand handler
         if subcommand == "help" or subcommand == "":
             _send_card_async(chat_id, build_help_card(), "help")
             return _skip("/aowen help handled")
@@ -817,35 +628,27 @@ def handle_pre_gateway_dispatch(event: Any, gateway: Any = None, **kwargs) -> di
             return _skip("/aowen status handled")
 
         elif subcommand == "config" and sub_arg == "reload":
-            # /aowen config reload
             card = _handle_config_reload()
             _send_card_async(chat_id, card, "config_reload")
             return _skip("/aowen config reload handled")
 
         elif subcommand == "monitor":
             if sub_arg == "reset":
-                # /aowen monitor reset
                 _do_reset()
                 _send_card_async(chat_id, build_reset_card(), "reset")
                 return _skip("/aowen monitor reset handled")
             else:
-                # /aowen monitor
                 _send_card_async(chat_id, build_monitor_card(), "monitor")
                 return _skip("/aowen monitor handled")
 
         else:
-            # Unknown command
             _send_card_async(chat_id, _build_unknown_command_card(subcommand), "unknown")
             return _skip(f"/aowen {subcommand} unknown")
 
     except Exception:
-        # v1.3.4 fix (P0): /aowen 已识别但 handler 抛异常时，必须返回 skip
-        # 阻止消息进入 agent。否则 /aowen foo 会被 LLM 当作用户 prompt 处理，
-        # 用户体验混乱（命令没响应却收到 AI 回复）。
-        # 同时升级到 exception 级别日志（原来 DEBUG 在生产不可见）。
+        # Pitfall: must return skip to block dispatch, else /aowen foo reaches LLM.
         _logger.exception("HLS: /aowen handler error — suppressing agent dispatch")
         return _skip("/aowen handler error suppressed")
-
 
 def _do_reset() -> None:
     """Reset metrics counters."""
@@ -865,7 +668,6 @@ def _do_reset() -> None:
             "stream_element_calls": 0,
             "stream_element_failures": 0,
             "batch_update_calls": 0,
-            "full_rebuilds": 0,
             "active_sessions": _metrics["active_sessions"],
             "started_at": time.time(),
         }
@@ -873,16 +675,8 @@ def _do_reset() -> None:
 
     _logger.info("HLS: metrics reset (was: created=%d, errors=%d)", old_created, old_errors)
 
-
 def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
-    """Send a card to chat asynchronously (fire-and-forget).
-
-    v1.3.1 fix: If the FeishuClient hasn't been initialized yet (e.g.
-    no AI message has been sent and pre-warm didn't run), try to
-    initialize it before giving up. /aowen commands use FeishuClient
-    (independent API client), NOT FeishuAdapter — so they should work
-    even when FeishuAdapter patching fails.
-    """
+    """Send card fire-and-forget via FeishuClient. Lazy-inits if not yet ready."""
     import asyncio
     from ..controller import get_controller
 
@@ -891,10 +685,7 @@ def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
         _logger.warning("HLS: /aowen %s but controller not enabled", cmd_name)
         return
 
-    # v1.3.2 fix (B3-02): use get_running_loop() instead of the deprecated
-    # get_event_loop(). In Python 3.14, get_event_loop() will raise
-    # RuntimeError when no loop is running, making the old code rely on
-    # the except clause — get_running_loop() is the correct, explicit API.
+    # Pitfall: get_event_loop() raises RuntimeError in Python 3.14 when no loop running.
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -917,16 +708,13 @@ def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
         except Exception:
             _logger.error("HLS: failed to send %s card", cmd_name, exc_info=True)
 
-    # v1.3.2 fix (B3-03): hold strong reference to the task to prevent GC
-    # from collecting it mid-execution.
+    # Hold strong ref to prevent mid-execution GC.
     task = loop.create_task(_init_and_send())
     _aowen_pending_tasks.add(task)
     task.add_done_callback(_aowen_pending_tasks.discard)
 
-
 def _skip(reason: str) -> dict:
     return {"action": "skip", "reason": reason}
-
 
 __all__ = [
     "record_card_created",
@@ -935,7 +723,6 @@ __all__ = [
     "record_card_aborted",
     "record_api_call",
     "record_api_error",
-    "record_full_rebuild",
     "set_active_sessions",
     "get_metrics",
     "build_monitor_card",

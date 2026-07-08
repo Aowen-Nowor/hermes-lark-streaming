@@ -62,7 +62,6 @@ async def runner(_module_runner):
 
     v1.3.6: 清理前一个测试残留的 session，避免 concurrency seal 误触发。
     mock_server 也 reset（mock 模式清理调用记录）。
-    重置配置（如 header_enabled）避免前一个测试的配置残留。
     """
     # 清理前一个测试的残留状态
     try:
@@ -72,11 +71,6 @@ async def runner(_module_runner):
     _module_runner.mock_server.reset()
     _module_runner._sessions.clear()
     _module_runner._real_card_states.clear()
-    # 重置配置到默认值（避免 enable_header 等残留）
-    try:
-        _module_runner.controller._cfg.header_enabled = False
-    except Exception:
-        pass
     yield _module_runner
 
 

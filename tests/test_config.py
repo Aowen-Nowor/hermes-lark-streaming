@@ -376,7 +376,7 @@ class TestConfigSingleton:
 
         之前 Config() 每次新建实例，reload 只清新实例缓存，
         controller 持有的旧实例缓存不清 → 改配置 + reload 后
-        header_enabled 等走 _plugin_sec() 的属性不生效。
+        走 _plugin_sec() 的属性（如 enabled）不生效。
         单例后所有 Config() 共享实例，reload 全局生效。
         """
         import yaml
@@ -386,17 +386,17 @@ class TestConfigSingleton:
 
         config_path = Path(str(tmp_path)) / "config.yaml"
         config_path.write_text(yaml.dump({
-            "hermes_lark_streaming": {"enabled": True, "header": {"enabled": False}},
+            "hermes_lark_streaming": {"enabled": False},
         }))
 
         with patch("hermes_lark_streaming.config.reader._get_hermes_config_path", return_value=config_path):
             # controller 持有的实例（模拟 StreamCardController.__init__）
             ctrl_cfg = Config()
-            assert ctrl_cfg.header_enabled is False
+            assert ctrl_cfg.enabled is False
 
         # 改配置文件
         config_path.write_text(yaml.dump({
-            "hermes_lark_streaming": {"enabled": True, "header": {"enabled": True}},
+            "hermes_lark_streaming": {"enabled": True},
         }))
 
         # 模拟 /aowen config reload（aowen 新建 Config 调 reload）
@@ -405,7 +405,7 @@ class TestConfigSingleton:
             reload_cfg.reload()
 
             # controller 持有的实例现在应读到新值
-            assert ctrl_cfg.header_enabled is True, \
+            assert ctrl_cfg.enabled is True, \
                 "reload 后 controller 持有实例的缓存应被清除，读到新配置"
 
 

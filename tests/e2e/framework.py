@@ -135,7 +135,6 @@ class E2ETestRunner:
         cfg.show_reasoning = True
         cfg.panel_expanded = False
         cfg.streaming_panel_expanded = False
-        cfg.header_enabled = False
         cfg.max_tool_steps = 20
         cfg.max_reasoning_rounds = 20
         cfg.footer_fields = [["status", "elapsed", "model", "cost"]]
@@ -355,10 +354,6 @@ class E2ETestRunner:
 
         client.cardkit_create = _wrapped_create
         client.cardkit_update = _wrapped_update
-
-    def enable_header(self) -> None:
-        """v1.2.0: 测试中开启 header_enabled（setup 后调用）."""
-        self._controller._cfg.header_enabled = True
 
     def get_create_card_json(self) -> dict[str, Any] | None:
         """v1.2.0: 获取 cardkit_create 传入的 card JSON.

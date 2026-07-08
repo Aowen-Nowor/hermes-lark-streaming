@@ -1,13 +1,4 @@
-"""GatewayRunner method wrappers and cron delivery interception.
-
-Split from monkey_patch.py — contains:
-  - _wrap_handle_message()
-  - _wrap_handle_message_with_agent()
-  - _wrap_run_agent()
-  - _wrap_run_conversation()
-  - _wrap_run_background_task()
-  - _wrap_cron_deliver()
-"""
+"""GatewayRunner method wrappers and cron delivery interception."""
 
 from __future__ import annotations
 
@@ -25,22 +16,10 @@ from . import (
     _logger,
 )
 
-
 # ── GatewayRunner method wrappers ──────────────────────────────────
 
-
 def _wrap_handle_message(orig: Callable) -> Callable:
-    """Inject NORMALIZE hook at the top of GatewayRunner._handle_message.
-
-    v1.1.0: Also intercept /aowen commands when an agent is running.
-    When ``self._running_agents`` has an entry for this session, Hermes
-    would normally take the "agent running" fast path — known slash
-    commands return a hint text, but unknown commands (like /aowen) fall
-    through to the default interrupt path and get sent to the LLM as
-    plain text. We detect /aowen in that fast path and reply with
-    build_interrupt_hint_card() instead, borrowing Hermes native
-    "Agent is running — wait or /stop first" UX.
-    """
+    """Inject NORMALIZE hook at the top of GatewayRunner._handle_message."""
 
     @functools.wraps(orig)
     async def wrapper(self, event, *args, **kwargs):
@@ -57,11 +36,6 @@ def _wrap_handle_message(orig: Callable) -> Callable:
         except Exception:
             _logger.warning("HLS: suppressed exception", exc_info=True)
 
-        # ── v1.1.0: /aowen interrupt hint ──
-        # When an agent is running for this session, /aowen commands
-        # would fall through to the LLM (pre_gateway_dispatch hook is
-        # not fired on the "agent running" fast path). Intercept here
-        # and reply with an orange hint card instead.
         try:
             _text = (getattr(event, "text", "") or "").strip()
             if _text.lower().startswith("/aowen"):
@@ -84,9 +58,6 @@ def _wrap_handle_message(orig: Callable) -> Callable:
                                 str(_quick_key)[:12],
                             )
                             _send_card_async(_chat_id, build_interrupt_hint_card(), "interrupt_hint")
-                            # Return empty string to signal "handled, no further dispatch"
-                            # — mirrors Hermes native slash-command hint path
-                            # which returns a string reply and stops processing.
                             return ""
         except Exception:
             _logger.debug("HLS: /aowen interrupt hint check failed", exc_info=True)
@@ -94,7 +65,6 @@ def _wrap_handle_message(orig: Callable) -> Callable:
         return await orig(self, event, *args, **kwargs)
 
     return wrapper
-
 
 def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
     """Inject START hook at entry and ABORT/INTERRUPT detection on return."""
@@ -120,9 +90,6 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
             )
         except Exception:
             _logger.warning("HLS: suppressed exception", exc_info=True)
-        # Seed message context for downstream hooks
-        # Use a dedicated dict per message to prevent context leakage
-        # between concurrent/overlapping messages.
         msg_context = {
             "message_id": mid,
             "chat_id": chat_id,
@@ -134,7 +101,6 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
         _msg_ctx.set(msg_context)
 
         # v1.3.4 fix (P1): 确保 orig() 抛异常时 _msg_ctx / _started_msg_ids
-        # 被清理。原实现 cleanup 在函数末尾，orig() 异常会跳过 cleanup，
         # 导致 _msg_ctx 保留 stale event_message_id，下一条消息的
         # FeishuAdapter.send() 被静默抑制（"卡片不出现" bug）。
         def _hls_cleanup_ctx() -> None:
@@ -149,17 +115,10 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
             _hls_cleanup_ctx()
             raise
 
-        # ── Use the per-message context dict instead of _msg_ctx ──
-        # When a new message interrupts the old one, _msg_ctx may already
         # point to the new message's context. We must use the original
-        # per-message dict captured at entry to correctly detect
-        # card_sent and interrupt states.
         ctx = msg_context
 
-        # ── CARD ALREADY SENT → suppress Hermes reply ──
-        # Runtime wrapping cannot modify gateway internals like the old
         # AST injection, so we return None to simulate "stale agent result",
-        # causing Hermes to skip the text reply.
         if result is not None:
             if ctx and ctx.get("card_sent"):
                 _logger.info(
@@ -168,9 +127,6 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                 )
                 _hls_cleanup_ctx()
                 return None
-            # Also check if a card session exists (even in terminal state).
-            # This catches cases where card_sent wasn't propagated correctly
-            # (e.g., interrupt scenarios with complex context chains).
             try:
                 from ..controller import get_controller
                 _ctrl = get_controller()
@@ -188,25 +144,11 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                             return None
             except Exception:
                 _logger.warning("HLS: suppressed exception", exc_info=True)
-        # ── ABORT / INTERRUPT detection ──
-        # When card was already sent, _handle_message_with_agent returns
         # None (the "Discarding stale agent result" path or the
-        # already_sent=True path).  Use the per-message context (not
-        # _msg_ctx) because the global context may have been overwritten
-        # by a newer message.
         if result is None:
             if ctx and ctx.get("card_sent"):
-                # Card was sent successfully via on_message_completed.
-                # Only fire interrupt if a *genuinely newer* message started
-                # after this one AND is still active (has a card session in
-                # a non-terminal state).
-                #
                 # Bug fix: Hermes returns None when already_sent=True (our
-                # _wrap_run_agent COMPLETE hook sets this), which is NOT an
                 # interrupt. Without the session-active check, stale message
-                # IDs left in _started_msg_ids from previous turns cause
-                # false interrupt detection, showing "Interrupted by new message"
-                # on cards that completed normally.
                 with _started_msg_ids_lock:
                     others = _started_msg_ids - {mid}
                 _real_interrupt = False
@@ -253,12 +195,6 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                 except Exception:
                     _logger.warning("HLS: suppressed exception", exc_info=True)
         elif ctx and ctx.get("card_sent"):
-            # result is not None and card_sent=True — card was completed
-            # by _wrap_run_agent's COMPLETE hook. Check if the card session
-            # is still in a non-terminal state (e.g. card_sent was set by
-            # the adapter interception path, not by actual completion).
-            # This catches /stop scenarios where the card is stuck in
-            # loading/marquee state.
             try:
                 from ..controller import get_controller
                 _ctrl = get_controller()
@@ -287,7 +223,6 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
     return wrapper
 
-
 def _wrap_run_agent(orig: Callable) -> Callable:
     """Inject COMPLETE hook after agent runs; propagate event_message_id."""
 
@@ -306,37 +241,15 @@ def _wrap_run_agent(orig: Callable) -> Callable:
         channel_prompt=None,
         **kwargs,
     ):
-        # Store event_message_id so callback wrappers can consume it
-        # When Hermes recursively calls _run_agent for an interrupt follow-up
-        # (_interrupt_depth > 0), the event_message_id changes to the new
         # message's ID. We must create a fresh context for the recursive call
-        # instead of mutating the parent message's context dict, because:
-        # 1. The parent's COMPLETE hook (after orig() returns) still needs
-        #    the original message_id and card_sent state.
-        # 2. The recursive call's COMPLETE hook needs the new message_id.
         _saved_parent_ctx = None  # Will hold parent context for restoration
         _original_msg_context_ref = None  # Reference to the original msg_context dict
         ctx = _msg_ctx.get()
         if ctx is not None and event_message_id:
             if _interrupt_depth > 0 and ctx.get("event_message_id") != event_message_id:
-                # Recursive interrupt follow-up: save parent context, create new context
-                #
                 # BUG FIX (v0.15.4): We must keep a reference to the original
-                # msg_context dict (from _wrap_handle_message_with_agent) so
-                # that when we set card_sent=True on the parent context, the
-                # _wrap_handle_message_with_agent wrapper can also see it.
-                # Without this, _saved_parent_ctx is a *copy* of the original
-                # dict, and the original msg_context.card_sent stays False,
-                # causing Hermes to send a duplicate plain text reply.
                 _original_msg_context_ref = ctx.get("_original_msg_context_ref") or ctx
                 _saved_parent_ctx = dict(ctx)  # Save a copy for restoration after orig()
-                _logger.debug(
-                    "run_agent: recursive interrupt follow-up, creating new context "
-                    "for msg=%s (parent msg=%s, depth=%d)",
-                    event_message_id[:12] if event_message_id else "?",
-                    (ctx.get("message_id") or "?")[:12],
-                    _interrupt_depth,
-                )
                 ctx = {
                     "message_id": event_message_id,
                     "chat_id": ctx.get("chat_id", ""),
@@ -352,16 +265,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 _msg_ctx.set(ctx)
                 _thread_local_ctx.data = dict(ctx)
 
-                # ── Fire INTERRUPT hook for the parent message immediately ──
-                # This ensures the old card is marked as ABORTED before the
-                # child starts processing, so the old card shows "Interrupted"
-                # state instead of staying in streaming/marquee animation.
-                #
                 # anchor_id fix: use event_message_id as the new card's
-                # anchor (the new message's reply anchor), NOT the parent
-                # message's anchor_id.  Hermes passes the pending_event's
-                # reply_anchor as event_message_id in the recursive call,
-                # so this is the correct anchor for the new card.
                 try:
                     from .hooks import on_message_interrupted
                     on_message_interrupted(
@@ -389,8 +293,6 @@ def _wrap_run_agent(orig: Callable) -> Callable:
             _thread_local_ctx.data = dict(ctx)
 
         # v1.3.4 fix (P1): 确保 orig() 抛异常时 _saved_parent_ctx 被恢复。
-        # 原实现 restore 在函数末尾，orig() 异常会跳过 restore，导致
-        # _msg_ctx 保留 child 的 context，parent 的 COMPLETE hook 读到
         # 错误的 message_id（"wrong card gets completion" bug）。
         try:
             result = await orig(
@@ -413,27 +315,12 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 _thread_local_ctx.data = dict(_saved_parent_ctx)
             raise
 
-        # ── COMPLETE hook ──
-        # After orig() returns, we need to fire the COMPLETE hooks for
-        # the appropriate message(s).
-        #
-        # When _saved_parent_ctx is not None, we're in a recursive
-        # interrupt follow-up: the inner _run_agent(B) has just returned.
         # We must fire B's COMPLETE hook first (with B's result), then
-        # fire A's ABORTED COMPLETE (parent was interrupted).
-        #
         # Previous bug: only A's ABORTED COMPLETE was fired, leaving
-        # B's card stuck in STREAMING state forever, causing:
-        # - B's card shows "已停止" (no completion update)
-        # - Duplicate gateway card when Hermes sends B's result via
-        #   adapter.send() (not intercepted because context was cleared)
         # - B's card quotes A's text (stale session content)
         ctx = _msg_ctx.get()
         if _saved_parent_ctx is not None:
-            # ── Step 1: Fire B's (child) COMPLETE hook normally ──
-            # B's context is still in _msg_ctx at this point.
-            # We use B's result (the inner _run_agent's return value)
-            # to complete B's card properly.
+            # Step 1: Fire B's (child) COMPLETE hook normally
             if ctx is not None:
                 try:
                     from .hooks import on_message_completed
@@ -501,17 +388,9 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 except Exception:
                     _logger.debug("run_agent: child COMPLETE hook failed", exc_info=True)
 
-            # ── Step 2: Fire A's (parent) ABORTED COMPLETE ──
-            # The parent message was interrupted by the child (B).
-            # Fire its COMPLETE as ABORTED so A's card shows "已停止".
             try:
+                # Step 2: Fire A's (parent) ABORTED COMPLETE
                 from .hooks import on_message_completed
-                _logger.debug(
-                    "run_agent: parent COMPLETE hook firing as interrupted "
-                    "for msg=%s (child msg=%s completed normally)",
-                    (_saved_parent_ctx.get("message_id") or "?")[:12],
-                    (ctx.get("message_id") or "?")[:12] if ctx else "?",
-                )
                 on_message_completed(
                     message_id=_saved_parent_ctx["message_id"],
                     answer="",
@@ -521,15 +400,8 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 )
                 _saved_parent_ctx["card_sent"] = True
                 # BUG FIX (v0.15.4): Also set card_sent on the original
-                # msg_context dict so that _wrap_handle_message_with_agent
-                # can suppress the duplicate plain text reply.
                 if _original_msg_context_ref is not None:
                     _original_msg_context_ref["card_sent"] = True
-                    _logger.debug(
-                        "run_agent: propagated card_sent=True to original "
-                        "msg_context for msg=%s",
-                        (_saved_parent_ctx.get("message_id") or "?")[:12],
-                    )
                 # Also mark already_sent so Hermes's gateway doesn't send text reply
                 if isinstance(result, dict):
                     result["already_sent"] = True
@@ -539,21 +411,10 @@ def _wrap_run_agent(orig: Callable) -> Callable:
             try:
                 from .hooks import on_message_completed
 
-                # 自计时：计算从消息开始到 agent 运行完成的耗时
-                # 原因：_response_time 是 _handle_message_with_agent 的局部变量，
-                # 不在 _run_agent 的返回值 agent_result 中，
-                # 所以 result.get("_response_time", 0) 永远返回 0。
                 _elapsed = time.monotonic() - ctx.get("_msg_start_time", time.monotonic())
 
-                # ── 检查是否被中断（/stop 或新消息打断） ──
-                # Hermes 的 /stop 不会让 _run_agent 返回 None，而是返回
-                # interrupted=True / partial=True 的 result。
-                # 此时应该显示"已停止"而非"已完成"。
                 is_interrupted = result.get("interrupted", False) or result.get("partial", False)
 
-                # ── 诊断日志：记录 finish_reason / error 等关键信息 ──
-                # content_filter 等异常 finish_reason 会导致 AI 返回空回复，
-                # 记录这些信息便于排查模型 API 侧的内容安全过滤问题。
                 _finish_reason = result.get("finish_reason", "")
                 _error_msg = result.get("error") or result.get("interrupt_message", "")
                 if _finish_reason and _finish_reason != "stop":
@@ -573,10 +434,6 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                         (ctx["message_id"] or "?")[:12],
                     )
 
-                # ── Extract cache tokens from agent reference ──
-                # _maybe_wrap_callbacks stores _agent_ref in ctx when wrapping
-                # callbacks.  We read cache_read_tokens / cache_write_tokens
-                # from the agent object for the footer's cache hit rate display.
                 _agent_ref = ctx.get("_agent_ref")
                 cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
                 cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
@@ -613,12 +470,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     ctx["card_sent"] = True
             except Exception:
                 _logger.warning("HLS: suppressed exception", exc_info=True)
-        # ── Restore parent context after recursive interrupt follow-up ──
-        # When we created a new context for the recursive call (above),
         # _msg_ctx now points to the child message's context. We must
-        # restore the parent's context so that the parent _wrap_run_agent's
-        # COMPLETE hook (which fires after this wrapper returns) can
-        # correctly read the parent message's context.
         if _saved_parent_ctx is not None:
             _msg_ctx.set(_saved_parent_ctx)
             _thread_local_ctx.data = dict(_saved_parent_ctx)
@@ -627,20 +479,12 @@ def _wrap_run_agent(orig: Callable) -> Callable:
 
     return wrapper
 
-
 def _wrap_run_conversation(orig: Callable) -> Callable:
-    """Wrap all 6 streaming callbacks right before run_conversation executes.
-
-    v1.3.0: inject_time removed — Hermes v0.17.0+ has built-in
-    gateway.message_timestamps.enabled for time injection.
-    """
+    """Wrap all 6 streaming callbacks right before run_conversation executes."""
     # Lazy import to avoid circular dependency at module load time
     from .callbacks import _maybe_wrap_callbacks  # noqa: F811
 
-    # v1.3.0 perf: compute signature check ONCE at wrap time (the signature
-    # never changes at runtime). Was ~10-50μs wasted per message.
     # v1.3.4 fix (P1): inspect.signature 可能对 C 扩展函数/wrapped callable
-    # 抛 ValueError/TypeError，导致 apply_patches 崩溃、插件加载失败。
     import inspect
     try:
         _has_persist_ts = "persist_user_timestamp" in inspect.signature(orig).parameters
@@ -681,26 +525,10 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
 
     return wrapper
 
-
 # ── Background task wrapper ───────────────────────────────────────
 
-
 def _wrap_run_background_task(orig: Callable) -> Callable:
-    """Inject START/COMPLETE hooks for ``/background`` tasks so they get streaming cards.
-
-    Background tasks run in a fire-and-forget asyncio task.  There is no
-    Feishu ``message_id`` (the user's ``/background`` command message_id is
-    already used by the main session).  We use the ``task_id``
-    (e.g. ``bg_HHMMSS_xxxxxx``) as the message_id for the card session.
-
-    The card is created as a **new message** (not a reply), since there is no
-    original message to reply to in the background context.
-
-    To prevent the original ``_run_background_task`` from also sending a plain
-    text "✅ Background task complete" message (which would duplicate our card),
-    we temporarily replace the Feishu adapter's ``send`` method with our own
-    that suppresses the delivery when our card was already sent.
-    """
+    """Inject START/COMPLETE hooks for ``/background`` tasks so they get streaming cards."""
 
     @functools.wraps(orig)
     async def wrapper(self, prompt, source, task_id, **kwargs):
@@ -746,10 +574,6 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                 """Suppress plain text delivery when our card was sent."""
                 ctx = _msg_ctx.get()
                 if ctx and ctx.get("card_sent"):
-                    _logger.debug(
-                        "background task: suppressing adapter.send (card already sent), chat=%s",
-                        chat_id[:12] if chat_id else "?",
-                    )
                     try:
                         from gateway.platforms.base import SendResult
                         return SendResult(success=True)
@@ -758,15 +582,10 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                 return await original_send(chat_id, content, **send_kwargs)
 
             adapter.send = _intercepting_send
-            # Use counter instead of boolean flag — if two background tasks
             # run concurrently on the same adapter, the first to finish must
-            # not reset the flag while the second is still running.
             adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 0) + 1
 
         # v1.3.4 fix (P1): orig() + COMPLETE hook 都在 try 块内，finally
-        # 同时恢复 adapter.send 和清理 _msg_ctx。原实现 _msg_ctx 清理在
-        # try/finally 之外，orig() 抛异常时 _msg_ctx 保留 background task
-        # 的 context，导致后续 FeishuAdapter.send() 被错误路由。
         try:
             result = await orig(self, prompt, source, task_id, **kwargs)
 
@@ -832,29 +651,10 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
 
     return wrapper
 
-
 # ── Cron delivery wrapper ──────────────────────────────────────────
 
-
 def _wrap_cron_deliver(orig: Callable) -> Callable:
-    """Intercept cron ``_deliver_result`` and redirect Feishu deliveries to CardKit cards.
-
-    The original ``cron.scheduler._deliver_result`` is a **module-level function**
-    (not a class method) with signature::
-
-        def _deliver_result(job: dict, content: str, adapters=None, loop=None)
-
-    It iterates over delivery targets from ``_resolve_delivery_targets(job)``,
-    and for each Feishu target calls ``runtime_adapter.send(chat_id, text, …)``.
-
-    Our wrapper temporarily replaces the Feishu adapter's ``send`` method with a
-    card-sending version.  This way:
-    - All the original's logic (thread_id, metadata, error handling) still works.
-    - Feishu text messages are replaced with CardKit cards.
-    - If card delivery fails, it falls back to the original plain-text send.
-    - No duplicate messages (card replaces text, not supplements it).
-    - Thread-safe: the original ``send`` is restored in a ``finally`` block.
-    """
+    """Intercept cron ``_deliver_result`` and redirect Feishu deliveries to CardKit cards."""
 
     @functools.wraps(orig)
     def wrapper(job, content, adapters=None, loop=None, **kwargs):
@@ -890,26 +690,7 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
         original_send = feishu_adapter.send
 
         async def _card_sending_send(chat_id, content, **send_kwargs):
-            """Redirect Feishu adapter.send to CardKit card delivery.
-
-            This async function replaces the Feishu adapter's ``send`` method.
-            Hermes calls ``safe_schedule_threadsafe(adapter.send(...), loop)``
-            from ``_deliver_result``, which schedules this coroutine on the
-            gateway's event loop.  Since we are *already* running on the event
-            loop, we can simply ``await`` the card delivery — no
-            ``run_coroutine_threadsafe`` / ``asyncio.run`` needed.
-
-            v1.3.1 fix: parameter names aligned to FeishuAdapter.send signature
-            (chat_id, content) — Hermes calls with keyword arguments
-            ``self.send(chat_id=..., content=...)``, so mismatched names cause
-            TypeError.
-
-            Previous versions used ``run_coroutine_threadsafe`` +
-            ``future.result(timeout=30)`` when the loop was running, which
-            caused a **deadlock**: the loop was blocked waiting for a coroutine
-            it could never schedule because it was blocked.  The 30-second
-            timeout expired and the delivery fell back to plain text.
-            """
+            """Redirect Feishu adapter.send to CardKit card delivery."""
             try:
                 from ..controller import get_controller
                 ctrl = get_controller()
@@ -924,9 +705,6 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
                     if not cleaned.strip():
                         cleaned = content
 
-                    # We are running on the event loop (scheduled via
-                    # safe_schedule_threadsafe by _deliver_result), so we
-                    # can await the card delivery directly.
                     await ctrl._do_cron_deliver(chat_id, cleaned.strip())
 
                     _logger.info(
@@ -942,11 +720,7 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
                     except (ImportError, AttributeError):
                         return None
             except Exception:
-                _logger.debug(
-                    "hermes-lark-streaming v%s: cron card delivery failed, falling back to plain text",
-                    __version__,
-                    exc_info=True,
-                )
+                pass
 
             # Fallback: send plain text via the original adapter
             return await original_send(chat_id, content, **send_kwargs)
@@ -962,4 +736,3 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
             feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 0) - 1
 
     return wrapper
-

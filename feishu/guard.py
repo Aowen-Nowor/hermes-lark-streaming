@@ -1,7 +1,4 @@
-"""消息不可用保护 — 检测消息被删除/撤回后停止更新.
-
-与 openclaw-lark UnavailableGuard 对齐.
-"""
+"""与 openclaw-lark UnavailableGuard 对齐."""
 
 from __future__ import annotations
 
@@ -16,23 +13,17 @@ from .client import MSG_NOT_FOUND
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-
 _TERMINAL_MESSAGE_CODES = {
     231003,  # message deleted
     MSG_NOT_FOUND,
     230011,  # message recalled
 }
 
-
 _unavailable_cache: dict[str, dict[str, Any]] = {}
 _unavailable_cache_lock = threading.Lock()
 _UNENHANCED_CACHE_TTL_SEC = 30 * 60  # 30 分钟 TTL
 # v1.3.0 perf: prune only when cache exceeds this threshold, instead of on
-# every is_unavailable() call (which runs per-token in the streaming hot path).
-# At 1 prune per 50+ entries, the amortized cost is negligible vs. scanning
-# the full cache on every token.
 _PRUNE_THRESHOLD = 50
-
 
 def _prune_cache() -> None:
     """清理过期缓存条目."""
@@ -40,7 +31,6 @@ def _prune_cache() -> None:
     expired = [k for k, v in _unavailable_cache.items() if now - v.get("at", 0) > _UNENHANCED_CACHE_TTL_SEC]
     for k in expired:
         _unavailable_cache.pop(k, None)
-
 
 def mark_unavailable(message_id: str, code: int, operation: str = "") -> None:
     """标记消息为不可用."""
@@ -51,19 +41,14 @@ def mark_unavailable(message_id: str, code: int, operation: str = "") -> None:
             "at": time.time(),
         }
 
-
 def is_unavailable(message_id: str | None) -> bool:
     """检查消息是否已知不可用."""
     if not message_id:
         return False
     with _unavailable_cache_lock:
-        # v1.3.0 perf: only prune when cache is large enough to warrant the
-        # scan. Small caches (typical: <10 entries) are scanned trivially by
-        # the `in` check, so pruning is deferred until the threshold is hit.
         if len(_unavailable_cache) > _PRUNE_THRESHOLD:
             _prune_cache()
         return message_id in _unavailable_cache
-
 
 def _get_cached_code(message_id: str | None) -> int | None:
     """线程安全地从缓存读取错误码（修复 code=0 被 or 吞掉的 bug）."""
@@ -73,9 +58,7 @@ def _get_cached_code(message_id: str | None) -> int | None:
         entry = _unavailable_cache.get(message_id)
         return entry.get("code") if entry else None
 
-
 _RE_API_CODE = re.compile(r"code[=:]\s*(\d+)")
-
 
 def extract_api_code(err: Exception | None) -> int | None:
     """从异常中提取 API 错误码."""
@@ -94,17 +77,12 @@ def extract_api_code(err: Exception | None) -> int | None:
                 return int(match.group(1))
     return None
 
-
 def is_terminal_api_code(code: int | None) -> bool:
     """判断错误码是否为消息终端码."""
     return code is not None and code in _TERMINAL_MESSAGE_CODES
 
-
 class UnavailableGuard:
-    """保护对已不存在消息的更新操作.
-
-    检测消息被删除/撤回后终止 pipeline.
-    """
+    """检测消息被删除/撤回后终止 pipeline."""
 
     def __init__(
         self,
@@ -128,10 +106,7 @@ class UnavailableGuard:
         return False
 
     def terminate(self, source: str, err: Exception | None = None) -> bool:
-        """尝试终止 pipeline.
-
-        返回 True 表示已终止（或早已终止）.
-        """
+        """返回 True 表示已终止（或早已终止）."""
         if self._terminated:
             return True
 

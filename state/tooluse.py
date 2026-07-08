@@ -29,7 +29,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-
 @dataclass
 class ToolStep:
     name: str
@@ -42,12 +41,10 @@ class ToolStep:
     started_at: float | None = None
     elapsed_ms: float = 0.0
 
-
 @dataclass
 class ToolSession:
     steps: list[ToolStep] = field(default_factory=list)
     started_at: float | None = None
-
 
 _SENSITIVE_NAME_RE = re.compile(
     r"token|secret|password|api[_-]?key|authorization|cookie|credential"
@@ -63,7 +60,6 @@ _AUTH_HEADER_RE = re.compile(
 _SECRET_FLAG_RE = re.compile(
     r'((?:^|[\s"\'`])(--?[A-Za-z0-9][A-Za-z0-9-]*)(=|\s+)("(?:[^"]*)"|\'(?:[^\']*)\'|[^\s"\'`]+))'
 )
-
 
 def redact_inline_secrets(value: str) -> str:
     """脱敏 key=secret、Authorization header、--flag secret 模式."""
@@ -85,7 +81,6 @@ def redact_inline_secrets(value: str) -> str:
         _AUTH_HEADER_RE.sub(r"\1[redacted]", _INLINE_ASSIGNMENT_RE.sub(_redact_assign, value)),
     )
 
-
 def _sanitize_detail(text: str, sanitizer: str | None) -> str:
     """根据 sanitizer 类型清洗 detail 文本."""
     if not text or not sanitizer:
@@ -106,7 +101,6 @@ def _sanitize_detail(text: str, sanitizer: str | None) -> str:
         return cleaned.strip("'\"")
     return cleaned
 
-
 def _redact_paths(text: str) -> str:
     """命令中路径只保留 basename."""
     return re.sub(
@@ -115,12 +109,10 @@ def _redact_paths(text: str) -> str:
         text,
     )
 
-
 def _basename_only(text: str) -> str:
     if not text:
         return text
     return os.path.basename(text.replace("\\", "/").rstrip("/"))
-
 
 _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
     {"aliases": ["skill"], "icon": "app-default_outlined", "title": "Load skill", "sanitizer": None},
@@ -170,7 +162,6 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
     {"aliases": ["summarize", "analyze", "prepare"], "icon": "report_outlined", "title": "Analyze"},
 ]
 
-
 def _resolve_tool_descriptor(name: str | None) -> dict[str, Any] | None:
     if not name:
         return None
@@ -181,17 +172,14 @@ def _resolve_tool_descriptor(name: str | None) -> dict[str, Any] | None:
                 return desc
     return None
 
-
 def _humanize_tool_name(name: str) -> str:
     cleaned = name.replace("-", " ").replace("_", " ").strip()
     if not cleaned:
         return "Tool"
     return cleaned[0].upper() + cleaned[1:]
 
-
 def _format_duration_label(ms: float) -> str:
     return f"{ms:.0f} ms" if ms < 1000 else f"{(ms / 1000):.1f} s"
-
 
 def _build_display_block(
     value: Any,
@@ -224,17 +212,12 @@ def _build_display_block(
     normalized = str(value).strip()
     return _fenced_block("text", normalized) if normalized else None
 
-
 def _fenced_block(language: str, content: str) -> dict[str, Any]:
     fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", content)), default=0) + 1)
     return {"language": language, "content": content, "fenced": f"{fence}{language}\n{content}\n{fence}"}
 
-
 class ToolUseTracker:
-    """追踪当前消息中的工具调用步骤.
-
-    按 session 隔离，每个会话独立生命周期.
-    """
+    """按 session 隔离，每个会话独立生命周期."""
 
     def __init__(self, max_steps: int = 128) -> None:
         self._session: ToolSession | None = None

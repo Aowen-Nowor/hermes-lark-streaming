@@ -11,7 +11,6 @@ _REASONING_TAG_RE = re.compile(r"<\s*(/?)\s*" + _REASONING_TAG + r"\s*>", re.IGN
 _REASONING_OPEN_RE = re.compile(r"<\s*" + _REASONING_TAG + r"\s*>", re.IGNORECASE)
 _REASONING_CLOSE_RE = re.compile(r"<\s*/\s*" + _REASONING_TAG + r"\s*>", re.IGNORECASE)
 
-
 def split_reasoning_text(text: str | None) -> dict[str, str | None]:
     if not isinstance(text, str) or not text.strip():
         return {}
@@ -26,7 +25,6 @@ def split_reasoning_text(text: str | None) -> dict[str, str | None]:
         "reasoning_text": tagged or None,
         "answer_text": stripped or None,
     }
-
 
 def extract_thinking_content(text: str) -> str:
     if not text:
@@ -44,13 +42,7 @@ def extract_thinking_content(text: str) -> str:
         result += text[last_index:]
     return result.strip()
 
-
 def strip_reasoning_tags(text: str) -> str:
-    # v1.3.0 perf: the previous implementation had two extra re.sub() calls
-    # after the open/close tag removal.  Those subs tried to match
-    # ``<think>...</think>`` blocks (tags + content) — but after the open/
-    # close removal above, NO tags remain, so the patterns could never match.
-    # They were dead code running on every answer token (hot path). Removed.
     result = _REASONING_OPEN_RE.sub(
         lambda _: "",
         _REASONING_CLOSE_RE.sub("", text),
@@ -59,7 +51,6 @@ def strip_reasoning_tags(text: str) -> str:
         result = ""
     return result
 
-
 def _clean_reasoning_prefix(text: str) -> str:
     cleaned = re.sub(r"^Reasoning:\s*", "", text, flags=re.IGNORECASE)
     cleaned = "\n".join(
@@ -67,16 +58,8 @@ def _clean_reasoning_prefix(text: str) -> str:
     )
     return cleaned.strip()
 
-
 class TextState:
-    """追踪流式文本的增量累积状态.
-
-    v1.3.0 P1-04: removed ``is_dirty()`` / ``mark_flushed()`` / ``last_flushed``
-    — dead code. The dirty-tracking mechanism was replaced by UnifiedLinearState's
-    own dirty flags (``answer_dirty`` / ``panel_dirty`` / ``tool_steps_dirty``)
-    in v1.1.0. ``on_partial`` is retained as the conceptual API for partial
-    text accumulation (used by ``display_text`` via ``accumulated``).
-    """
+    """— dead code. The dirty-tracking mechanism was replaced by UnifiedLinearState's"""
 
     def __init__(self) -> None:
         self.completed_text = ""
