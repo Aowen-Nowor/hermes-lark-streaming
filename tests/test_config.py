@@ -6,6 +6,8 @@ import os
 import time
 from pathlib import Path
 from typing import Any
+
+import pytest
 from unittest.mock import MagicMock, patch
 
 from hermes_lark_streaming.config import Config, _get_hermes_config_path
@@ -431,3 +433,27 @@ class TestPrintStep:
     def test_no_section(self) -> None:
         cfg = _make_config({})
         assert cfg.print_step == 4
+
+
+# ── v1.5.0: config backward compat (stale header.enabled) ──
+
+
+class TestConfigBackwardCompatV150:
+    """v1.5.0: header.enabled deleted from config. Stale value in config.yaml
+    must be safely ignored (not crash)."""
+
+    def test_stale_header_enabled_ignored(self, tmp_path: object) -> None:
+        """Config with stale header.enabled should not crash on access."""
+        cfg = _make_config({
+            "hermes_lark_streaming": {
+                "enabled": True,
+                "linear": True,
+                "header": {"enabled": True},  # stale, should be ignored
+            }
+        })
+        # Accessing deleted header_enabled should raise AttributeError (safe)
+        with pytest.raises(AttributeError):
+            _ = cfg.header_enabled
+        # But enabled/linear should work fine
+        assert cfg.enabled is True
+        assert cfg.linear is True

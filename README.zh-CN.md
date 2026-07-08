@@ -132,8 +132,6 @@ hermes_lark_streaming:
   card_ttl_sec: 600               # 卡片存活检测超时（秒）
   max_tool_steps: 20               # 统一面板最多显示的工具步骤数（默认20，范围1~100）
   max_reasoning_rounds: 20         # 统一面板最多显示的推理轮次数（默认20，范围1~100）
-  header:
-    enabled: false                  # 卡片头部（蓝色处理中 → 绿色已完成 / 红色出错-已停止）。默认关闭。详见下方说明
 
   footer:
     show_label: false              # 是否显示字段标签

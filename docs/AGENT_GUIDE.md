@@ -148,8 +148,6 @@ hermes_lark_streaming:
   flush_interval_ms: 200
   print_strategy: delay
   print_step: 4
-  header:
-    enabled: false              # v1.2.1：卡片头部（默认关）
   footer:
     show_label: false
     fields:

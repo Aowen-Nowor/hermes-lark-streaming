@@ -116,7 +116,6 @@ class UnifiedControllerMixin:
         if session.unified_state is None:
             session.unified_state = UnifiedLinearState()
 
-        t0 = _time.monotonic()
         try:
             await self._ensure_init()
             assert self._client is not None
@@ -507,7 +506,6 @@ class UnifiedControllerMixin:
             content = escape_markdown_asterisks(state.answer_text or " ")
             session.sequence += 1
             try:
-                t_se = _time.monotonic()
                 await self._client.cardkit_stream_element(
                     session.card_id, ANSWER_ELEMENT_ID, content, sequence=session.sequence,
                 )

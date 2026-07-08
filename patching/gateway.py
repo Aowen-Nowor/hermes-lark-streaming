@@ -663,7 +663,6 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
             return orig(job, content, adapters=adapters, loop=loop, **kwargs)
 
         feishu_adapter = None
-        feishu_platform_key = None
 
         try:
             from gateway.config import Platform
@@ -672,7 +671,6 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
                 pn = p.value.lower() if hasattr(p, "value") else str(p).lower()
                 if pn in ("feishu", "lark"):
                     feishu_adapter = adapters[p]
-                    feishu_platform_key = p
                     break
         except (ImportError, AttributeError):
             pass

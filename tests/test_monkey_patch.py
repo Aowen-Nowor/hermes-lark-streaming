@@ -491,3 +491,89 @@ class TestInterceptedEditChatId:
         assert "chat_id" in params, f"chat_id not in params: {params}"
         assert "message_id" in params
         assert "content" in params
+
+
+# ── v1.5.0: on-demand repatch in _wrap_feishu_adapter_send ──
+
+
+class TestOnDemandRepatchV150:
+    """v1.5.0: on-demand repatch check in _wrap_feishu_adapter_send.
+
+    Replaces 3 deferred-loading timer schedules. Checks id(type(self)) in
+    _patched_feishu_classes on every send(); if not, patches the class now.
+    """
+
+    def test_patched_feishu_classes_set_exists(self) -> None:
+        from hermes_lark_streaming.patching import _patched_feishu_classes
+        assert isinstance(_patched_feishu_classes, set)
+
+    @pytest.mark.asyncio
+    async def test_send_triggers_repatch_for_unpatched_class(self) -> None:
+        """When adapter instance's class is NOT in _patched_feishu_classes,
+        send() should trigger _apply_feishu_adapter_patches for that class."""
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching.adapter import _wrap_feishu_adapter_send
+
+        # Create a fake adapter class (not in _patched_feishu_classes)
+        class FakeAdapter:
+            async def send(self, chat_id, content, reply_to=None, metadata=None, **kwargs):
+                return "sent"
+
+        fake_adapter = FakeAdapter()
+        wrapped_send = _wrap_feishu_adapter_send(FakeAdapter.send)
+
+        # Patch _apply_feishu_adapter_patches to track calls
+        repatch_called = {"yes": False, "cls": None}
+        orig_apply = P._apply_feishu_adapter_patches
+
+        def fake_apply(cls, *, is_repatch=False):
+            repatch_called["yes"] = True
+            repatch_called["cls"] = cls
+            P._patched_feishu_classes.add(id(cls))
+            return True
+
+        P._apply_feishu_adapter_patches = fake_apply
+        try:
+            # Ensure FakeAdapter NOT in patched set
+            P._patched_feishu_classes.discard(id(FakeAdapter))
+
+            # Call wrapped send — should trigger repatch
+            result = await wrapped_send(fake_adapter, "chat1", "hello")
+
+            assert repatch_called["yes"], "on-demand repatch should trigger for unpatched class"
+            assert repatch_called["cls"] is FakeAdapter
+        finally:
+            P._apply_feishu_adapter_patches = orig_apply
+            P._patched_feishu_classes.discard(id(FakeAdapter))
+
+    @pytest.mark.asyncio
+    async def test_send_skips_repatch_for_patched_class(self) -> None:
+        """When adapter instance's class IS in _patched_feishu_classes,
+        send() should NOT trigger repatch (O(1) skip)."""
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching.adapter import _wrap_feishu_adapter_send
+
+        class FakeAdapter2:
+            async def send(self, chat_id, content, reply_to=None, metadata=None, **kwargs):
+                return "sent"
+
+        fake_adapter = FakeAdapter2()
+        wrapped_send = _wrap_feishu_adapter_send(FakeAdapter2.send)
+
+        # Mark FakeAdapter2 as already patched
+        P._patched_feishu_classes.add(id(FakeAdapter2))
+
+        repatch_called = {"yes": False}
+        orig_apply = P._apply_feishu_adapter_patches
+
+        def fake_apply(cls, *, is_repatch=False):
+            repatch_called["yes"] = True
+            return True
+
+        P._apply_feishu_adapter_patches = fake_apply
+        try:
+            result = await wrapped_send(fake_adapter, "chat1", "hello")
+            assert not repatch_called["yes"], "repatch should NOT trigger for already-patched class"
+        finally:
+            P._apply_feishu_adapter_patches = orig_apply
+            P._patched_feishu_classes.discard(id(FakeAdapter2))

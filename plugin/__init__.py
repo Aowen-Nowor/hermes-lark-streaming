@@ -35,9 +35,6 @@ _DEFAULT_STREAMING_CONFIG: dict[str, Any] = {
     "card_ttl_sec": 600,
     "max_tool_steps": 20,
     "max_reasoning_rounds": 20,
-    "header": {
-        "enabled": False,
-    },
     "footer": {
         "fields": [
             ["status", "elapsed", "model", "cost", "compression_exhausted"],
@@ -45,6 +42,9 @@ _DEFAULT_STREAMING_CONFIG: dict[str, Any] = {
         "show_label": False,
     },
 }
+
+# Hold strong refs to pre-warm tasks (prevent GC per Python docs)
+_prewarm_tasks: set = set()
 
 def _backup_config() -> None:
     """Back up config.yaml once per install (skips if a backup already exists)."""
@@ -197,7 +197,10 @@ def register(ctx: "PluginContext") -> None:
                 _logger.debug("hermes-lark-streaming v%s: no running event loop, skipping pre-warm", __version__)
                 loop = None
             if loop is not None and loop.is_running():
-                loop.create_task(ctrl._ensure_init())
+                _prewarm_task = loop.create_task(ctrl._ensure_init())
+                # Hold strong ref to prevent GC (Python docs: save reference to task)
+                _prewarm_tasks.add(_prewarm_task)
+                _prewarm_task.add_done_callback(_prewarm_tasks.discard)
                 _logger.info("hermes-lark-streaming v%s: FeishuClient pre-warm scheduled", __version__)
             else:
                 _logger.debug("hermes-lark-streaming v%s: event loop not running, skipping pre-warm", __version__)

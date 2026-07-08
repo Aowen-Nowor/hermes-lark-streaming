@@ -233,7 +233,7 @@ def _cmd_doctor() -> int:
     try:
         from hermes_lark_streaming.config import Config
         cfg = Config()
-        print(f"[3/6] Configuration:")
+        print("[3/6] Configuration:")
         for k in ("enabled", "linear", "gateway_cards", "flush_interval_ms",
                    "card_duration_sec", "print_strategy", "print_step",
                    "panel_expanded", "streaming_panel_expanded",
@@ -255,19 +255,19 @@ def _cmd_doctor() -> int:
             has_dotenv = "FEISHU_APP_ID=" in txt and "FEISHU_APP_SECRET=" in txt
         except Exception:
             pass
-    print(f"[4/6] Feishu credentials:")
+    print("[4/6] Feishu credentials:")
     print(f"      env vars:    {'configured' if has_env else 'not set'}")
     print(f"      config.yaml: {'configured' if has_cfg else 'not set'}")
     print(f"      ~/.hermes/.env: {'exists' if env_file.exists() else 'not found'}"
           + (f" (found)" if has_dotenv else ""))
     if not (has_env or has_cfg or has_dotenv):
-        print(f"      ⚠ MISSING — cards will NOT work.")
+        print("      ⚠ MISSING — cards will NOT work.")
 
     print()
     try:
         from hermes_lark_streaming.patching import _patch_status
         if _patch_status:
-            print(f"[5/6] Patch status:")
+            print("[5/6] Patch status:")
             for key, val in _patch_status.items():
                 if key in ("version", "hermes_layout"):
                     continue
@@ -275,7 +275,7 @@ def _cmd_doctor() -> int:
                 print(f"      {icon} {key}: {val}")
             print(f"      Hermes layout: {_patch_status.get('hermes_layout', {})}")
         else:
-            print(f"[5/6] Patch status: (not available — gateway not started)")
+            print("[5/6] Patch status: (not available — gateway not started)")
     except ModuleNotFoundError as e:
         print(f"[5/6] Patch status: (skipped — {e})")
     except Exception as e:

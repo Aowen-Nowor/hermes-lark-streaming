@@ -49,11 +49,9 @@ def _enforce_card_element_limit(
     # ── Find the unified panel element in card body ──
     body = card.get("body", {})
     elements = body.get("elements", [])
-    panel_idx = None
     panel = None
-    for i, elem in enumerate(elements):
+    for elem in elements:
         if elem.get("element_id") == panel_element_id and elem.get("tag") == "collapsible_panel":
-            panel_idx = i
             panel = elem
             break
 
