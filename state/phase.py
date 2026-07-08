@@ -1,12 +1,4 @@
-"""Card lifecycle phase — explicit state machine with enforced transitions.
-
-Design rationale (aligned with openclaw-lark StreamingCardController):
-- Explicit PHASE_TRANSITIONS map defines legal transitions
-- Terminal phases have no outgoing transitions (absorbing states)
-- TerminalReason tracks WHY a session ended
-- create_epoch prevents stale creation callbacks from corrupting state
-- should_proceed() unifies terminal + unavailable + phase checks
-"""
+"""Design rationale (aligned with openclaw-lark StreamingCardController):"""
 
 from __future__ import annotations
 
@@ -15,26 +7,8 @@ from typing import Any
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-
-# ── Phase constants ───────────────────────────────────────────────────
-# All phases are plain strings for backward compatibility.
-# Existing code using ``session.state == "idle"`` continues to work.
-# New code should use ``session.transition(to, source)`` for validated
-# transitions.
-
 class CardPhase:
-    """Card lifecycle phases — string constants for backward compatibility.
-
-    Phases represent the lifecycle stage of a card session, from creation
-    through streaming to terminal state.  Each phase has a defined set of
-    legal successor phases; attempts to transition to an illegal successor
-    are logged and rejected.
-
-    Backward compatibility: all phase constants are plain strings, so
-    existing code using ``session.state == "idle"`` continues to work.
-    New code should use ``session.transition(to, source)`` for validated
-    transitions.
-    """
+    """Phases represent the lifecycle stage of a card session, from creation"""
 
     IDLE = "idle"
     CREATING = "creating"
@@ -52,7 +26,6 @@ class CardPhase:
     # DEPRECATED: use CREATION_FAILED instead.
     FAILED = "creation_failed"
 
-
 class TerminalReason:
     """Why a session entered a terminal phase."""
 
@@ -61,17 +34,6 @@ class TerminalReason:
     ABORT = "abort"                # Explicitly cancelled by user
     UNAVAILABLE = "unavailable"    # Source message was deleted/recalled
     CREATION_FAILED = "creation_failed"  # Card creation failed
-
-
-# v1.2.0 C1: 已删除 CardVisualState / PHASE_TO_VISUAL / get_visual_state。
-# 这些在 v1.0.3 引入但生产代码从未读取（卡片渲染实际用 session.state /
-# is_error / is_aborted 参数）。
-
-
-# ── Legal phase transitions ──────────────────────────────────────────
-# Maps each phase to the set of phases it may transition to.
-# Terminal phases (COMPLETED, CREATION_FAILED, ABORTED, TERMINATED) have
-# no outgoing transitions — they are absorbing states.
 
 PHASE_TRANSITIONS: dict[str, frozenset[str]] = {
     CardPhase.IDLE: frozenset({CardPhase.CREATING, CardPhase.ABORTED, CardPhase.TERMINATED}),
@@ -108,7 +70,6 @@ TERMINAL_REASON_TO_PHASE: dict[str, str] = {
     TerminalReason.UNAVAILABLE: CardPhase.TERMINATED,
     TerminalReason.CREATION_FAILED: CardPhase.CREATION_FAILED,
 }
-
 
 def is_legal_transition(from_phase: str, to_phase: str) -> bool:
     """Check if a phase transition is legal."""

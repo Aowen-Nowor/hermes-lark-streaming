@@ -6,6 +6,8 @@ import os
 import time
 from pathlib import Path
 from typing import Any
+
+import pytest
 from unittest.mock import MagicMock, patch
 
 from hermes_lark_streaming.config import Config, _get_hermes_config_path
@@ -376,7 +378,7 @@ class TestConfigSingleton:
 
         之前 Config() 每次新建实例，reload 只清新实例缓存，
         controller 持有的旧实例缓存不清 → 改配置 + reload 后
-        header_enabled 等走 _plugin_sec() 的属性不生效。
+        走 _plugin_sec() 的属性（如 enabled）不生效。
         单例后所有 Config() 共享实例，reload 全局生效。
         """
         import yaml
@@ -386,17 +388,17 @@ class TestConfigSingleton:
 
         config_path = Path(str(tmp_path)) / "config.yaml"
         config_path.write_text(yaml.dump({
-            "hermes_lark_streaming": {"enabled": True, "header": {"enabled": False}},
+            "hermes_lark_streaming": {"enabled": False},
         }))
 
         with patch("hermes_lark_streaming.config.reader._get_hermes_config_path", return_value=config_path):
             # controller 持有的实例（模拟 StreamCardController.__init__）
             ctrl_cfg = Config()
-            assert ctrl_cfg.header_enabled is False
+            assert ctrl_cfg.enabled is False
 
         # 改配置文件
         config_path.write_text(yaml.dump({
-            "hermes_lark_streaming": {"enabled": True, "header": {"enabled": True}},
+            "hermes_lark_streaming": {"enabled": True},
         }))
 
         # 模拟 /aowen config reload（aowen 新建 Config 调 reload）
@@ -405,7 +407,7 @@ class TestConfigSingleton:
             reload_cfg.reload()
 
             # controller 持有的实例现在应读到新值
-            assert ctrl_cfg.header_enabled is True, \
+            assert ctrl_cfg.enabled is True, \
                 "reload 后 controller 持有实例的缓存应被清除，读到新配置"
 
 
@@ -431,3 +433,27 @@ class TestPrintStep:
     def test_no_section(self) -> None:
         cfg = _make_config({})
         assert cfg.print_step == 4
+
+
+# ── v1.5.0: config backward compat (stale header.enabled) ──
+
+
+class TestConfigBackwardCompatV150:
+    """v1.5.0: header.enabled deleted from config. Stale value in config.yaml
+    must be safely ignored (not crash)."""
+
+    def test_stale_header_enabled_ignored(self, tmp_path: object) -> None:
+        """Config with stale header.enabled should not crash on access."""
+        cfg = _make_config({
+            "hermes_lark_streaming": {
+                "enabled": True,
+                "linear": True,
+                "header": {"enabled": True},  # stale, should be ignored
+            }
+        })
+        # Accessing deleted header_enabled should raise AttributeError (safe)
+        with pytest.raises(AttributeError):
+            _ = cfg.header_enabled
+        # But enabled/linear should work fine
+        assert cfg.enabled is True
+        assert cfg.linear is True

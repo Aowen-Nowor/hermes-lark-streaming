@@ -1,3 +1,28 @@
+## v1.5.0 (2026-07-08)
+
+架构收敛版 — 删除 IM 降级路径 + 全量重建路径 + header 颜色切换 + v1.4.1 懒重打 + deferred loading 3 套重打 + `_on_card_action_trigger` patch（SDK bound method 失效）。生产代码从 14,780 行降至 ~10,300 行（-30%）。主链路唯一化：CardKit create → Phase 2 → Phase 3 → preservative seal，无降级分支。兼容 hermes v0.18.1（集成测试 26 passed）。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🔧 Refactor (P0) | 删除 IM 降级路径 (`_do_im_fallback_flush`/`_do_im_fallback_seal`/`build_im_fallback_card`/`PATCH_MS`/`use_cardkit` 字段) | 生产日志铁证：`cardkit_create` 从未失败（4 个日志文件 0 次触发），IM 降级是死代码。维护两套 flush + 两套 seal 增加复杂度且从不执行 | 删除整个 IM 降级路径。CardKit create 失败直接 `raise` → 外层 `except Exception` 标记 CREATION_FAILED。主链路唯一化 (`controller/linear_mixin.py`, `cardkit/cards.py`, `state/session.py`, `flush/`) |
+| 🔧 Refactor (P0) | 删除全量重建路径 (`build_unified_complete_card`/`_phase2_failed`/`_phase2_never_succeeded`/`_header_driven_rebuild`/`record_full_rebuild`) | 全量重建 22 次触发全是 header 颜色切换（非失败兜底）。放弃 header 颜色切换后，全量重建无存在必要。`_phase2_failed` 标志为全量重建服务，删除后 Phase 2 schema_error/element_not_found 保留 dirty-flag 清空（防 futile retry），不再设标志 | 删除全量重建 fallback 块。`_do_linear_complete` 从 460 行简化到 ~220 行：drain loop → `_preservative_seal` → COMPLETED/CREATION_FAILED。封卡失败直接 CREATION_FAILED，不再原地重建 (`controller/linear_mixin.py`, `cardkit/cards.py`, `aowen/__init__.py`) |
+| 🔧 Refactor (P1) | 删除 header 颜色切换功能 (`_build_header`/`_HEADER_STATES`/`header_enabled` 配置) | header 颜色切换依赖全量重建（CardKit batch_update 不支持更新 card-level header）。删除全量重建后 header 颜色无法切换。用户感知小（streaming 蓝色保持），换取主链路简化 | 删除 `_build_header`、`_HEADER_STATES`、`header_enabled` 配置属性、`build_streaming_card_v2`/`build_gateway_card` 的 header_enabled 参数。卡片无 header，内容区域更大 (`cardkit/elements.py`, `config/reader.py`, `cardkit/cards.py`, `cardkit/special.py`) |
+| 🔧 Refactor (P1) | 删除 v1.4.1 懒重打 (`lazy_repatch_feishu_adapter` + 60s 节流状态) | v1.4.2 已在 `_handle_card_action_event` 主链路点修复 /card 问题，懒重打治不了 SDK bound method 根因，是 v1.4.1 错误兜底 | 删除 `lazy_repatch_feishu_adapter` + `_lazy_repatch_*` 状态 + `handle_pre_gateway_dispatch` 中的调用 (`patching/__init__.py`, `aowen/__init__.py`) |
+| 🔧 Refactor (P1) | 删除 deferred loading 3 套重打 → 1 套按需 repatch | v1.4.0 的 2s+8s 定时重打 + v1.4.1 的 60s 懒重打共 3 套，治标不治本。v1.4.2 的 `_handle_card_action_event` patch + 按需 repatch（`_wrap_feishu_adapter_send` 入口检查 `id(type(self))`）覆盖所有场景 | 删除 `_schedule_direct_patch` + `_apply_feishu_adapter_deferred_repatch`。`_wrap_feishu_adapter_send` 入口新增 6 行按需 repatch 检查：`if id(type(self)) not in _patched_feishu_classes: _apply_feishu_adapter_patches(type(self), is_repatch=True)`。O(1) set lookup，每条消息触发，覆盖任何 deferred loading 时窗口 (`patching/__init__.py`, `patching/adapter.py`) |
+| 🔧 Refactor (P1) | 删除 `_on_card_action_trigger` patch (`_wrap_feishu_card_action_trigger`/`_empty_card_action_response`) | SDK WebSocket 模式下 `register_p2_card_action_trigger` 保存 bound method 引用，类属性替换不影响已保存引用 → patch 从未执行（生产日志铁证：patched ✓ 9 次，wrapper 0 次）。`_handle_card_action_event` patch（v1.4.2）通过 `self.` 动态查找可靠覆盖 | 删除 `_wrap_feishu_card_action_trigger` + `_empty_card_action_response` + `_apply_feishu_adapter_patches` 中的注册块。保留 `_wrap_handle_card_action_event`（v1.4.2 主链路修复）(`patching/adapter.py`, `patching/__init__.py`) |
+| 🔧 Refactor (P2) | 统一错误处理 + 精简注释 | 7 处散落 `except FeishuAPIError` 各自判 streaming_closed/schema_error/element_not_found。注释占比 23%，含大量"what"叙述和版本历史 | 新增 `_handle_cardkit_error(session, e, phase) -> str` 统一分类（streaming_closed/schema_error/element_not_found/other），7 处调用简化。注释精简到 ~8%，保留"why"和坑警告，删"what"叙述。生产代码 14,780 → ~10,300 行 (-30%) (`controller/linear_mixin.py`, 所有文件) |
+| ✅ Compat | hermes v0.18.1 兼容性验证 | hermes 2026.07.07 更新到 v0.18.1 | SSH 服务器读 hermes v0.18.1 源码：所有 patch 目标方法存在（`_on_card_action_trigger`/`_handle_card_action_event`/`send_clarify`/`_build_event_handler`/GatewayRunner 方法/AIAgent.run_conversation` with `persist_user_timestamp`/`cron._deliver_result`）。`_on_card_action_trigger` 仍调用 `self._handle_card_action_event(data)`（动态查找）→ v1.4.2 patch 有效。`/card` 仍不在 COMMAND_REGISTRY → `_handle_card_action_event` patch 仍需。集成测试 26 passed, 4 skipped |
+
+**审计方法**: 架构收敛经生产日志 + 代码 + hermes 源码三方对齐。①SSH 服务器取 agent.log（4 个 rotated 文件）grep：IM 降级 0 次触发（死代码）、全量重建 22 次全是 header 颜色切换（非失败兜底）、`_on_card_action_trigger patched ✓` 9 次但 wrapper 0 次（SDK bound method 失效铁证）。②读 hermes v0.18.1 源码确认所有 patch 目标方法存在且 `_on_card_action_trigger` 仍通过 `self.` 动态查找调用 `_handle_card_action_event`。③集成测试（HERMES_SRC_DIR=/usr/local/lib/hermes-agent）26 passed, 4 skipped。858 单元测试通过，0 回归。生产代码 14,780 → ~10,300 行 (-30%)，主链路唯一化（CardKit create → Phase 2 → Phase 3 → preservative seal，无降级分支）。
+
+**已知限制**:
+- 放弃 header 颜色切换：卡片 streaming 时蓝色保持，不再切到 completed(绿)/error(红)/stopped(红)。用户感知小，换取主链路简化
+- CardKit create 失败直接 CREATION_FAILED（不再降级 IM 卡片）。生产从未触发，但极端飞书服务端故障时用户看不到卡片。可接受（`update_card` 大概率也失败）
+- 全量重建删除后，preservative seal 失败直接 CREATION_FAILED。生产 22 次全量重建全是 header 切换（非 seal 失败），删除后无影响
+- 总代码 ~10,300 行（目标 ≤10,000，略超 300 行，主要是 aowen 卡片构建器和 CLI 无法再精简而不丢功能）
+
+---
+
 ## v1.4.2 (2026-07-07)
 
 紧急修复 v1.4.1 未解决的 `/card` 问题 — 用户升级 v1.4.1 后卡片交互仍返回 "Unknown command /card"。经原始日志（agent.log 3.6MB + gateway.log 140KB）+ hermes core 源码 + lark_oapi SDK 源码三方对齐，定位 v1.4.1 patch 错了拦截层。

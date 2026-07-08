@@ -1,8 +1,4 @@
-"""State sub-package — session, text, tooluse, linear, phase modules.
-
-Re-exports key names from sub-modules for convenient access:
-    from hermes_lark_streaming.state import CardSession, TextState, ToolUseTracker, UnifiedLinearState
-"""
+"""Re-exports key names from sub-modules for convenient access:"""
 
 from .session import CardSession  # noqa: F401
 from .text import TextState, split_reasoning_text, strip_reasoning_tags, extract_thinking_content  # noqa: F401

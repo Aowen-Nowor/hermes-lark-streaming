@@ -15,10 +15,8 @@ from hermes_lark_streaming.cardkit import (
     _loading_hint_element,
     _longest_backtick_run,
     _render_footer_field,
-    build_im_fallback_card,
     build_preservative_seal_actions,
     build_streaming_card_v2,
-    build_unified_complete_card,
     build_unified_panel,
 )
 from hermes_lark_streaming.cardkit.md import (
@@ -458,14 +456,6 @@ class TestBuildStreamingCardV2:
         assert "en_us" in i18n
 
 
-class TestBuildImFallbackCard:
-    def test_structure(self) -> None:
-        card = build_im_fallback_card()
-        assert "config" in card
-        assert "elements" in card
-        assert len(card["elements"]) >= 1
-
-
 class TestBuildCronCard:
     def test_basic_card_structure(self) -> None:
         from hermes_lark_streaming.cardkit import build_cron_card
@@ -855,20 +845,6 @@ class TestSummaryI18nContent:
         assert "zh_cn" in summary["i18n_content"]
         assert "en_us" in summary["i18n_content"]
 
-    def test_unified_complete_card_summary_has_i18n(self) -> None:
-        from hermes_lark_streaming.cardkit import build_unified_complete_card
-
-        round_ = ReasoningRound(index=1, text="thinking")
-        card = build_unified_complete_card(
-            reasoning_rounds=[round_],
-            answer_text="the answer",
-            tool_steps=[],
-        )
-        summary = card["config"].get("summary", {})
-        assert "i18n_content" in summary, f"summary={summary}"
-        assert summary["i18n_content"]["zh_cn"] == summary["content"]
-        assert "the answer" in summary["content"]
-
 
 class TestBuildUnifiedPanelTrimming:
     """Tests for element limit trimming in build_unified_panel."""
@@ -1002,27 +978,31 @@ class TestBuildUnifiedPanelTrimming:
 
         With 20 reasoning rounds + 20 tool steps (each with max elements),
         the total card element count can exceed 200. The card-level safety
-        net in build_unified_complete_card trims panel children until
+        net in _enforce_card_element_limit trims panel children until
         the total is at or below 195.
         """
         # 20 rounds + 20 steps, each with max elements (detail + result for tools)
+        from hermes_lark_streaming.cardkit.elements import build_unified_panel as _build_panel
         rounds = self._make_rounds(20)
         steps = self._make_steps(20)
-        card = build_unified_complete_card(
+        panel = _build_panel(
             reasoning_rounds=rounds,
             tool_steps=steps,
-            answer_text="Test answer",
             show_reasoning=True,
             max_reasoning_rounds=20,
             max_tool_steps=20,
-            footer_data={"duration": 10, "model": "test"},
         )
-        total_count = _count_tag_objects(card)
+        card = {
+            "schema": "2.0",
+            "body": {"elements": [panel, {"tag": "markdown", "content": "Test answer"}]},
+        }
+        result = _enforce_card_element_limit(card)
+        total_count = _count_tag_objects(result)
         # Should be at or below 195 (200 - 5 margin)
         assert total_count <= 195, f"Total element count {total_count} exceeds safety threshold 195"
         # Should have a collapse hint in panel children (safety net trimmed items)
         panel = None
-        for elem in card.get("body", {}).get("elements", []):
+        for elem in result.get("body", {}).get("elements", []):
             if elem.get("element_id") == "agent_process_panel":
                 panel = elem
                 break
@@ -1052,18 +1032,22 @@ class TestEnforceCardElementLimit:
 
     def test_no_trim_when_under_limit(self):
         """Card under 195 elements is not trimmed."""
-        card = build_unified_complete_card(
+        from hermes_lark_streaming.cardkit.elements import build_unified_panel as _build_panel
+        panel = _build_panel(
             reasoning_rounds=self._make_rounds(5),
             tool_steps=self._make_steps(5),
-            answer_text="Short answer",
             show_reasoning=True,
-            footer_data={"duration": 10, "model": "test"},
         )
-        total = _count_tag_objects(card)
+        card = {
+            "schema": "2.0",
+            "body": {"elements": [panel, {"tag": "markdown", "content": "Short answer"}]},
+        }
+        result = _enforce_card_element_limit(card)
+        total = _count_tag_objects(result)
         assert total <= 195
         # No collapse hint should exist
         panel = None
-        for elem in card.get("body", {}).get("elements", []):
+        for elem in result.get("body", {}).get("elements", []):
             if elem.get("element_id") == "agent_process_panel":
                 panel = elem
                 break
@@ -1074,19 +1058,28 @@ class TestEnforceCardElementLimit:
 
     def test_trim_preserves_answer_and_footer(self):
         """Answer text and footer are never trimmed — only panel children."""
-        card = build_unified_complete_card(
+        from hermes_lark_streaming.cardkit.elements import build_unified_panel as _build_panel
+        panel = _build_panel(
             reasoning_rounds=self._make_rounds(25),
             tool_steps=self._make_steps(25),
-            answer_text="This answer must not be trimmed",
             show_reasoning=True,
             max_reasoning_rounds=25,
             max_tool_steps=25,
-            footer_data={"duration": 10, "model": "test"},
         )
-        total = _count_tag_objects(card)
+        card = {
+            "schema": "2.0",
+            "body": {"elements": [
+                panel,
+                {"tag": "markdown", "content": "This answer must not be trimmed"},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": "footer"},
+            ]},
+        }
+        result = _enforce_card_element_limit(card)
+        total = _count_tag_objects(result)
         assert total <= 195
         # Answer must still be present
-        body_elements = card.get("body", {}).get("elements", [])
+        body_elements = result.get("body", {}).get("elements", [])
         answer_found = any(
             "This answer must not be trimmed" in elem.get("content", "")
             for elem in body_elements

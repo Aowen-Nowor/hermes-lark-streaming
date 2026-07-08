@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/项目-Vibe%20Coding-ff69b4" alt="Vibe Coding">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-1.4.2-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.5.0-ff9800.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -132,8 +132,6 @@ hermes_lark_streaming:
   card_ttl_sec: 600               # 卡片存活检测超时（秒）
   max_tool_steps: 20               # 统一面板最多显示的工具步骤数（默认20，范围1~100）
   max_reasoning_rounds: 20         # 统一面板最多显示的推理轮次数（默认20，范围1~100）
-  header:
-    enabled: false                  # 卡片头部（蓝色处理中 → 绿色已完成 / 红色出错-已停止）。默认关闭。详见下方说明
 
   footer:
     show_label: false              # 是否显示字段标签
@@ -153,22 +151,6 @@ hermes_lark_streaming:
       #   history_offset — 对话历史偏移量；值越大对话越长，值突然变小说明发生了上下文压缩
       # 每个内层列表为页脚的一行，字段仅在有值时显示
 ```
-
-### 卡片头部（`header.enabled`）
-
-开启 `header.enabled: true` 后，agent 回复卡片顶部显示状态头部：
-
-- **流式中**：蓝色头部，“处理中...”
-- **已完成**：绿色头部，“已完成”
-- **出错**：红色头部，“出错”
-- **已停止**（被中断）：红色头部，“已停止”
-
-默认 `false`（关闭）——卡片没有头部，与 v1.1.x 行为一致。
-
-> **注意**：受飞书 CardKit API 限制，settings/batch_update 接口在流式或增量封卡过程中**无法更新卡片级头部**，只有全量重建（`cardkit_update`）能改变头部颜色。因此**开启 `header.enabled` 后，封卡路径会改走全量重建**（而非默认的增量封卡），以保证头部颜色正确切换（蓝 → 绿/红）。关闭时使用默认增量封卡（性能更优）。
-
-> **作用范围**：`header.enabled` 仅影响 agent 流式卡片和完成态卡片。Cron 推送卡片、网关内部消息卡片不受影响。`/aowen` 命令卡片始终有自己的 banner 风格头部（v1.1.0 设计语言的一部分），不受此配置控制。
-
 
 ### 推理面板显示
 

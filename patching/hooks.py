@@ -1,8 +1,4 @@
-"""Runtime Hook Functions for Monkey Patching.
-
-These functions are called by patching/ sub-package when wrapping Hermes methods.
-They perform one task: check config → call controller.
-"""
+"""These functions are called by patching/ sub-package when wrapping Hermes methods."""
 
 from __future__ import annotations
 
@@ -14,7 +10,6 @@ from typing import Any
 from ..controller import get_controller
 
 _logger = logging.getLogger("hermes_lark_streaming")
-
 
 def _safe_hook(
     default_return: Any = None,
@@ -37,7 +32,6 @@ def _safe_hook(
         return wrapper
 
     return decorator
-
 
 def on_feishu_normalize(
     *,
@@ -92,12 +86,10 @@ def on_feishu_normalize(
         source.thread_id = None
         event.source = source
 
-
 @_safe_hook()
 def on_message_started(*, ctrl: Any, message_id: str, chat_id: str, anchor_id: str | None = None) -> None:
     """[注入点 1] 函数开头 — message.started."""
     ctrl.on_message_started(message_id=message_id, chat_id=chat_id, anchor_id=anchor_id)
-
 
 @_safe_hook(default_return=False)
 def on_message_completed(
@@ -138,7 +130,6 @@ def on_message_completed(
         )
     )
 
-
 @_safe_hook(default_return=False)
 def on_tool_updated(
     *,
@@ -157,13 +148,11 @@ def on_tool_updated(
     )
     return True
 
-
 @_safe_hook(default_return=False, log_level="debug")
 def on_answer_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
     """[注入点 4] _stream_delta_cb — answer.delta."""
     ctrl.on_answer(message_id=message_id, text=text)
     return True
-
 
 @_safe_hook(default_return=False, log_level="debug")
 def on_thinking_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
@@ -171,13 +160,11 @@ def on_thinking_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
     ctrl.on_thinking(message_id=message_id, text=text)
     return True
 
-
 @_safe_hook(default_return=False, log_level="debug")
 def on_reasoning_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
     """[注入点 6] reasoning_callback — native model reasoning delta."""
     ctrl.on_reasoning(message_id=message_id, text=text)
     return True
-
 
 @_safe_hook(default_return=False, log_level="debug")
 def on_background_review_message(
@@ -191,12 +178,10 @@ def on_background_review_message(
     deferred: bool = ctrl.defer_background_review(message_id=message_id, text=text, sender=sender)
     return deferred
 
-
 @_safe_hook()
 def on_message_aborted(*, ctrl: Any, message_id: str) -> None:
     """[注入点 8] stale return None 前 — message.aborted."""
     ctrl.on_aborted(message_id=message_id)
-
 
 @_safe_hook()
 def on_message_interrupted(
@@ -214,7 +199,6 @@ def on_message_interrupted(
         chat_id=chat_id,
         anchor_id=anchor_id,
     )
-
 
 async def on_cron_deliver(
     *,

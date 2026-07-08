@@ -461,30 +461,6 @@ class TestHighFrequencyLoggingDowngrade:
                 f"Legacy prefix {old_prefix} should be replaced with 'HLS:'"
 
 
-class TestStartupDelay:
-    """v0.15.5 perf: startup delay reduced from 5s to 2s."""
-
-    def test_startup_delay_is_2s(self) -> None:
-        """_schedule_direct_patch should sleep 2 seconds, not 5."""
-        from hermes_lark_streaming.patching import _schedule_direct_patch
-        import inspect
-
-        source = inspect.getsource(_schedule_direct_patch)
-        assert "time.sleep(2)" in source, \
-            "Startup delay should be 2 seconds (reduced from 5)"
-        assert "time.sleep(5)" not in source, \
-            "Startup delay should NOT be 5 seconds (reduced to 2)"
-
-    def test_startup_delay_log_says_2s(self) -> None:
-        """Log message should reflect the 2s delay."""
-        from hermes_lark_streaming.patching import _schedule_direct_patch
-        import inspect
-
-        source = inspect.getsource(_schedule_direct_patch)
-        assert "2s delay" in source, \
-            "Log message should mention '2s delay'"
-
-
 # ── v0.18.1: GatewayRunner delayed patch + edit chat_id fix ──
 
 
@@ -517,112 +493,87 @@ class TestInterceptedEditChatId:
         assert "content" in params
 
 
-# ── v1.4.1: lazy repatch throttling ──
+# ── v1.5.0: on-demand repatch in _wrap_feishu_adapter_send ──
 
 
-class TestLazyRepatchV141:
-    """v1.4.1: lazy_repatch_feishu_adapter throttled re-patch from pre_gateway_dispatch.
+class TestOnDemandRepatchV150:
+    """v1.5.0: on-demand repatch check in _wrap_feishu_adapter_send.
 
-    Root cause (Issue 1): _schedule_direct_patch 的 2s/10s 固定调度在某些
-    hermes v0.17.0 环境下早于真身加载完成，真身从未被 patch → clarify
-    卡片 action 落入 hermes core 原生 _handle_card_action_event → /card
-    合成命令 → "Unknown command /card"。懒重打在每条消息节流检查，覆盖
-    固定调度漏掉的窗口。
+    Replaces 3 deferred-loading timer schedules. Checks id(type(self)) in
+    _patched_feishu_classes on every send(); if not, patches the class now.
     """
 
-    def test_lazy_repatch_function_exists(self) -> None:
-        from hermes_lark_streaming.patching import lazy_repatch_feishu_adapter
-        assert callable(lazy_repatch_feishu_adapter)
+    def test_patched_feishu_classes_set_exists(self) -> None:
+        from hermes_lark_streaming.patching import _patched_feishu_classes
+        assert isinstance(_patched_feishu_classes, set)
 
-    def test_lazy_repatch_throttled_within_interval(self) -> None:
-        """Within the 60s throttle window, second call must skip (return False)."""
+    @pytest.mark.asyncio
+    async def test_send_triggers_repatch_for_unpatched_class(self) -> None:
+        """When adapter instance's class is NOT in _patched_feishu_classes,
+        send() should trigger _apply_feishu_adapter_patches for that class."""
         from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching.adapter import _wrap_feishu_adapter_send
 
-        # Reset throttle timestamp
-        P._lazy_repatch_last_ts = 0.0
+        # Create a fake adapter class (not in _patched_feishu_classes)
+        class FakeAdapter:
+            async def send(self, chat_id, content, reply_to=None, metadata=None, **kwargs):
+                return "sent"
 
-        call_count = {"resolve": 0}
-        fake_cls = type("FakeFA", (), {})
+        fake_adapter = FakeAdapter()
+        wrapped_send = _wrap_feishu_adapter_send(FakeAdapter.send)
 
-        def fake_resolve(self):
-            call_count["resolve"] += 1
-            return fake_cls
+        # Patch _apply_feishu_adapter_patches to track calls
+        repatch_called = {"yes": False, "cls": None}
+        orig_apply = P._apply_feishu_adapter_patches
 
         def fake_apply(cls, *, is_repatch=False):
-            # Simulate _apply_feishu_adapter_patches registering the class
+            repatch_called["yes"] = True
+            repatch_called["cls"] = cls
             P._patched_feishu_classes.add(id(cls))
             return True
 
-        with (
-            patch.object(P.HermesCompat, "resolve_feishu_adapter_class_fresh", fake_resolve),
-            patch.object(P, "_apply_feishu_adapter_patches", side_effect=fake_apply) as mock_apply,
-        ):
-            # First call: cls_id not in _patched_feishu_classes → resolve + apply
-            r1 = P.lazy_repatch_feishu_adapter()
-            assert r1 is True
-            assert call_count["resolve"] == 1
-            mock_apply.assert_called_once()
-            # fake_cls now in _patched_feishu_classes (fake_apply added it)
-            assert id(fake_cls) in P._patched_feishu_classes
+        P._apply_feishu_adapter_patches = fake_apply
+        try:
+            # Ensure FakeAdapter NOT in patched set
+            P._patched_feishu_classes.discard(id(FakeAdapter))
 
-            # Second call immediately: throttled (within 60s) → return False, no resolve
-            r2 = P.lazy_repatch_feishu_adapter()
-            assert r2 is False
-            assert call_count["resolve"] == 1, "throttled call must not resolve"
+            # Call wrapped send — should trigger repatch
+            result = await wrapped_send(fake_adapter, "chat1", "hello")
 
-        # Cleanup
-        P._patched_feishu_classes.discard(id(fake_cls))
-        P._lazy_repatch_last_ts = 0.0
+            assert repatch_called["yes"], "on-demand repatch should trigger for unpatched class"
+            assert repatch_called["cls"] is FakeAdapter
+        finally:
+            P._apply_feishu_adapter_patches = orig_apply
+            P._patched_feishu_classes.discard(id(FakeAdapter))
 
-    def test_lazy_repatch_force_skips_throttle(self) -> None:
-        """force=True bypasses the 60s throttle (for /aowen doctor)."""
+    @pytest.mark.asyncio
+    async def test_send_skips_repatch_for_patched_class(self) -> None:
+        """When adapter instance's class IS in _patched_feishu_classes,
+        send() should NOT trigger repatch (O(1) skip)."""
         from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching.adapter import _wrap_feishu_adapter_send
 
-        P._lazy_repatch_last_ts = 0.0
-        call_count = {"resolve": 0}
-        fake_cls = type("FakeFA2", (), {})
+        class FakeAdapter2:
+            async def send(self, chat_id, content, reply_to=None, metadata=None, **kwargs):
+                return "sent"
 
-        def fake_resolve(self):
-            call_count["resolve"] += 1
-            return fake_cls
+        fake_adapter = FakeAdapter2()
+        wrapped_send = _wrap_feishu_adapter_send(FakeAdapter2.send)
+
+        # Mark FakeAdapter2 as already patched
+        P._patched_feishu_classes.add(id(FakeAdapter2))
+
+        repatch_called = {"yes": False}
+        orig_apply = P._apply_feishu_adapter_patches
 
         def fake_apply(cls, *, is_repatch=False):
-            P._patched_feishu_classes.add(id(cls))
+            repatch_called["yes"] = True
             return True
 
-        with (
-            patch.object(P.HermesCompat, "resolve_feishu_adapter_class_fresh", fake_resolve),
-            patch.object(P, "_apply_feishu_adapter_patches", side_effect=fake_apply),
-        ):
-            # Make _patched_feishu_classes empty so repatch proceeds
-            P._patched_feishu_classes.clear()
-            P.lazy_repatch_feishu_adapter()
-            assert call_count["resolve"] == 1
-            assert id(fake_cls) in P._patched_feishu_classes
-
-            # force=True immediately after with a NEW fake cls → bypass throttle, patch new
-            fake_cls2 = type("FakeFA3", (), {})
-
-            def fake_resolve2(self):
-                call_count["resolve"] += 1
-                return fake_cls2
-
-            with patch.object(P.HermesCompat, "resolve_feishu_adapter_class_fresh", fake_resolve2):
-                r = P.lazy_repatch_feishu_adapter(force=True)
-                assert r is True, "force=True must bypass throttle and patch new class"
-                assert id(fake_cls2) in P._patched_feishu_classes
-
-        # Cleanup
-        P._patched_feishu_classes.discard(id(fake_cls))
-        P._patched_feishu_classes.discard(id(fake_cls2))
-        P._lazy_repatch_last_ts = 0.0
-
-    def test_lazy_repatch_none_class_returns_false(self) -> None:
-        """If FeishuAdapter can't be resolved yet, return False (no crash)."""
-        from hermes_lark_streaming import patching as P
-
-        P._lazy_repatch_last_ts = 0.0
-        with patch.object(P.HermesCompat, "resolve_feishu_adapter_class_fresh", return_value=None):
-            r = P.lazy_repatch_feishu_adapter(force=True)
-            assert r is False
-        P._lazy_repatch_last_ts = 0.0
+        P._apply_feishu_adapter_patches = fake_apply
+        try:
+            result = await wrapped_send(fake_adapter, "chat1", "hello")
+            assert not repatch_called["yes"], "repatch should NOT trigger for already-patched class"
+        finally:
+            P._apply_feishu_adapter_patches = orig_apply
+            P._patched_feishu_classes.discard(id(FakeAdapter2))
