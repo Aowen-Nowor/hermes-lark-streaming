@@ -132,6 +132,7 @@ hermes_lark_streaming:
   card_ttl_sec: 600               # Card alive detection timeout (seconds)
   max_tool_steps: 20               # Max tool steps shown in panel (default 20, range 1–100)
   max_reasoning_rounds: 20         # Max reasoning rounds shown in panel (default 20, range 1–100)
+  width_mode: default              # Card width: "default"(600px), "fill"(fill window), or px value (e.g. 700, 800)
 
   footer:
     show_label: false              # Show field labels

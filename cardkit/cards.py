@@ -141,6 +141,7 @@ def build_streaming_card_v2(
     include_unified_panel: bool = True,
     include_loading_hint: bool = True,
     include_answer_element: bool = True,
+    card_width: str | int = "default",
 ) -> dict[str, Any]:
     """Card lifecycle (v1.0.2+):"""
     elements: list[dict] = []
@@ -160,16 +161,24 @@ def build_streaming_card_v2(
     # ── Loading spinner ──
     elements.append(_loading_element())
 
+    card_config: dict[str, Any] = {
+        "streaming_mode": True,
+        "streaming_config": {
+            "print_frequency_ms": {"default": 70},
+            "print_step": {"default": print_step},
+            "print_strategy": print_strategy,
+        },
+        "locales": _LOCALES,
+    }
+    if isinstance(card_width, int):
+        card_config["width"] = card_width
+    else:
+        card_config["width_mode"] = card_width
+
     card: dict[str, Any] = {
         "schema": "2.0",
         "config": {
-            "streaming_mode": True,
-            "streaming_config": {
-                "print_frequency_ms": {"default": 70},
-                "print_step": {"default": print_step},
-                "print_strategy": print_strategy,
-            },
-            "locales": _LOCALES,
+            **card_config,
             "summary": {
                 "content": _T["processing"][0],
                 "i18n_content": _t("processing"),
