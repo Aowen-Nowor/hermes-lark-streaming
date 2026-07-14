@@ -238,6 +238,7 @@ hermes_lark_streaming:
   card_ttl_sec: 600
   max_tool_steps: 20               # 范围 1~100
   max_reasoning_rounds: 20         # 范围 1~100
+  width_mode: default              # 卡片宽度："default"(600px) / "fill"(撑满窗口) / 像素值(如 700, 800)
   footer:
     show_label: false
     fields: [[status, elapsed, model, cost, compression_exhausted]]

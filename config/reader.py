@@ -186,6 +186,25 @@ class Config:
         return str(self._platform_cfg().get("base_url", "https://open.feishu.cn/open-apis"))
 
     @property
+    def card_width(self) -> str | int:
+        """卡片宽度: "default"(600px), "fill"(撑满窗口), 或自定义像素值(如 700, 800)."""
+        sec = self._plugin_sec()
+        val = sec.get("width_mode", "default")
+        if isinstance(val, int) and val > 0:
+            return val
+        if isinstance(val, str):
+            stripped = val.strip()
+            if stripped in ("default", "fill"):
+                return stripped
+            try:
+                n = int(stripped)
+                if n > 0:
+                    return n
+            except (ValueError, TypeError):
+                pass
+        return "default"
+
+    @property
     def card_duration_sec(self) -> int:
         return _to_int(self._plugin_sec().get("card_ttl_sec", 600), default=600)
 

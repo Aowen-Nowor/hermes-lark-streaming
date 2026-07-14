@@ -129,6 +129,7 @@ class UnifiedControllerMixin:
                     streaming_panel_expanded=self._cfg.streaming_panel_expanded,
                     print_strategy=self._cfg.print_strategy,
                     print_step=self._cfg.print_step,
+                    card_width=self._cfg.card_width,
                 )
                 card_id = await self._client.cardkit_create(card)
                 card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)

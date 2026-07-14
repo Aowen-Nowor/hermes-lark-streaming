@@ -132,6 +132,7 @@ hermes_lark_streaming:
   card_ttl_sec: 600               # 卡片存活检测超时（秒）
   max_tool_steps: 20               # 统一面板最多显示的工具步骤数（默认20，范围1~100）
   max_reasoning_rounds: 20         # 统一面板最多显示的推理轮次数（默认20，范围1~100）
+  width_mode: default              # 卡片宽度："default"(600px)、"fill"(撑满窗口)、或像素值(如 700, 800)
 
   footer:
     show_label: false              # 是否显示字段标签
