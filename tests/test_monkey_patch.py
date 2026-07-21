@@ -577,3 +577,201 @@ class TestOnDemandRepatchV150:
         finally:
             P._apply_feishu_adapter_patches = orig_apply
             P._patched_feishu_classes.discard(id(FakeAdapter2))
+
+
+# ── v1.6.0: platform_registry.create_adapter hook (main-chain deferred-loading fix) ──
+
+
+class TestCreateAdapterHookV160:
+    """v1.6.0: hook platform_registry.create_adapter so every FeishuAdapter
+    instance hermes creates has its class patched BEFORE it reaches callers.
+
+    This is the main-chain fix replacing v1.5.0's on-demand repatch
+    (chicken-and-egg) and v1.4.0's 2s+10s timer (fragile time-window bet).
+    """
+
+    def test_wrap_create_adapter_patches_unpatched_feishu_class(self) -> None:
+        """When create_adapter returns a feishu adapter whose class is NOT yet
+        patched (deferred-loaded 真身), the hook patches it before returning."""
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching import _wrap_platform_registry_create_adapter
+
+        class FakeDeferredFeishuAdapter:
+            """模拟 hermes deferred loading 产生的真身 class B（未被 patch）。"""
+            platform = type("P", (), {"value": "feishu"})()
+
+            def __init__(self, config):
+                self.config = config
+
+        # Make sure class B is NOT in patched set
+        P._patched_feishu_classes.discard(id(FakeDeferredFeishuAdapter))
+
+        def orig_create(name, config):
+            return FakeDeferredFeishuAdapter(config)
+
+        wrapped = _wrap_platform_registry_create_adapter(orig_create)
+
+        repatch_called = {"yes": False, "cls": None}
+        orig_apply = P._apply_feishu_adapter_patches
+
+        def fake_apply(cls, *, is_repatch=False):
+            repatch_called["yes"] = True
+            repatch_called["cls"] = cls
+            P._patched_feishu_classes.add(id(cls))
+            return True
+
+        P._apply_feishu_adapter_patches = fake_apply
+        try:
+            adapter = wrapped("feishu", {"token": "x"})
+            assert isinstance(adapter, FakeDeferredFeishuAdapter)
+            assert repatch_called["yes"], "hook should patch unpatched feishu class"
+            assert repatch_called["cls"] is FakeDeferredFeishuAdapter
+        finally:
+            P._apply_feishu_adapter_patches = orig_apply
+            P._patched_feishu_classes.discard(id(FakeDeferredFeishuAdapter))
+
+    def test_wrap_create_adapter_skips_already_patched_class(self) -> None:
+        """When the feishu class is already patched, hook does O(1) skip."""
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching import _wrap_platform_registry_create_adapter
+
+        class FakePatchedAdapter:
+            platform = type("P", (), {"value": "feishu"})()
+
+        P._patched_feishu_classes.add(id(FakePatchedAdapter))
+
+        def orig_create(name, config):
+            return FakePatchedAdapter()
+
+        wrapped = _wrap_platform_registry_create_adapter(orig_create)
+
+        repatch_called = {"yes": False}
+        orig_apply = P._apply_feishu_adapter_patches
+
+        def fake_apply(cls, *, is_repatch=False):
+            repatch_called["yes"] = True
+            return True
+
+        P._apply_feishu_adapter_patches = fake_apply
+        try:
+            adapter = wrapped("feishu", {})
+            assert isinstance(adapter, FakePatchedAdapter)
+            assert not repatch_called["yes"], "should skip already-patched class"
+        finally:
+            P._apply_feishu_adapter_patches = orig_apply
+            P._patched_feishu_classes.discard(id(FakePatchedAdapter))
+
+    def test_wrap_create_adapter_ignores_non_feishu_platform(self) -> None:
+        """Non-feishu adapters (irc/telegram/...) must pass through untouched."""
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching import _wrap_platform_registry_create_adapter
+
+        class FakeIrcAdapter:
+            platform = type("P", (), {"value": "irc"})()
+
+        def orig_create(name, config):
+            return FakeIrcAdapter()
+
+        wrapped = _wrap_platform_registry_create_adapter(orig_create)
+
+        repatch_called = {"yes": False}
+        orig_apply = P._apply_feishu_adapter_patches
+
+        def fake_apply(cls, *, is_repatch=False):
+            repatch_called["yes"] = True
+            return True
+
+        P._apply_feishu_adapter_patches = fake_apply
+        try:
+            adapter = wrapped("irc", {})
+            assert isinstance(adapter, FakeIrcAdapter)
+            assert not repatch_called["yes"], "should not patch non-feishu adapter"
+        finally:
+            P._apply_feishu_adapter_patches = orig_apply
+
+    def test_wrap_create_adapter_passes_through_none(self) -> None:
+        """If orig returns None (unknown platform), hook returns None unchanged."""
+        from hermes_lark_streaming.patching import _wrap_platform_registry_create_adapter
+
+        def orig_create(name, config):
+            return None
+
+        wrapped = _wrap_platform_registry_create_adapter(orig_create)
+        assert wrapped("feishu", {}) is None
+
+    def test_wrap_create_adapter_detects_feishu_via_class_module(self) -> None:
+        """When name is not 'feishu' string (e.g. Platform enum), hook falls
+        back to sniffing the adapter class's module path for 'feishu'."""
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching import _wrap_platform_registry_create_adapter
+
+        # Simulate a Platform enum whose str() isn't "feishu" but the class
+        # module contains "feishu"
+        class FakeEnumAdapter:
+            __module__ = "hermes_plugins.feishu_platform.adapter"
+
+        def orig_create(name, config):
+            return FakeEnumAdapter()
+
+        wrapped = _wrap_platform_registry_create_adapter(orig_create)
+
+        repatch_called = {"yes": False}
+        orig_apply = P._apply_feishu_adapter_patches
+
+        def fake_apply(cls, *, is_repatch=False):
+            repatch_called["yes"] = True
+            P._patched_feishu_classes.add(id(cls))
+            return True
+
+        P._apply_feishu_adapter_patches = fake_apply
+        try:
+            P._patched_feishu_classes.discard(id(FakeEnumAdapter))
+            wrapped(type("Enum", (), {"value": "unknown"}), {})
+            assert repatch_called["yes"], "should detect feishu via module path"
+        finally:
+            P._apply_feishu_adapter_patches = orig_apply
+            P._patched_feishu_classes.discard(id(FakeEnumAdapter))
+
+    def test_apply_create_adapter_hook_installs_wrapper(self, monkeypatch) -> None:
+        """_apply_create_adapter_hook wraps platform_registry.create_adapter
+        and marks it with _hls_create_adapter_wrapped guard."""
+        from hermes_lark_streaming import patching as P
+        import types as _types
+
+        # Build a fake gateway.platform_registry module with a singleton
+        fake_pr = _types.SimpleNamespace()
+
+        def orig_create(name, config):
+            return None
+
+        fake_pr.create_adapter = orig_create
+
+        fake_mod = _types.ModuleType("gateway.platform_registry")
+        fake_mod.platform_registry = fake_pr
+        monkeypatch.setitem(__import__("sys").modules, "gateway.platform_registry", fake_mod)
+
+        result = P._apply_create_adapter_hook()
+        assert result is True
+        assert getattr(fake_pr.create_adapter, "_hls_create_adapter_wrapped", False) is True
+
+        # Calling again should be idempotent (guard short-circuits)
+        result2 = P._apply_create_adapter_hook()
+        assert result2 is True
+
+    def test_apply_create_adapter_hook_handles_missing_registry(self, monkeypatch) -> None:
+        """If gateway.platform_registry import fails, hook returns False (deferred)."""
+        from hermes_lark_streaming import patching as P
+        import builtins
+        import sys
+
+        # Ensure module not cached, and force ImportError for this path
+        monkeypatch.delitem(sys.modules, "gateway.platform_registry", raising=False)
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "gateway.platform_registry":
+                raise ImportError("simulated")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        assert P._apply_create_adapter_hook() is False

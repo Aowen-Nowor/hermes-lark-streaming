@@ -1,3 +1,24 @@
+## v1.6.0 (2026-07-21)
+
+Clarify 卡片失效复发修复 — hermes v0.19.0 升级后 clarify 退回纯文本（"❓ 问题 / 编号列表 / Reply with the number..."）。三路调研（插件代码 + hermes v0.19.0 源码 + 服务器日志）确认根因不在 hermes（v0.17.0→v0.19.0 clarify dispatch / deferred loading / 纯文本格式零改动），而在插件 v1.5.0 误删 v1.4.0 的 deferred loading 修复。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | hermes 升级到 v0.19.0 后，Clarify 交互卡片消失，显示纯文本编号列表（"❓ 测试 Clarify 交互卡片 / 卡片正常 👍 / 卡片异常 ❌ / Reply with the number, the option text, or your own answer."） | v1.5.0 commit cee17bc "架构收敛"误删 v1.4.0 的 `_schedule_direct_patch` + `_apply_feishu_adapter_deferred_repatch`（2s+10s 定时重打），替换为 `_wrap_feishu_adapter_send` 入口 on-demand repatch。该 on-demand repatch 有**两处致命缺陷**：①chicken-and-egg 死结——on-demand 检查代码本身是 wrapper，只装在已 patch 的 class 上，未 patch 的真身（deferred loading 后加载的 `hermes_plugins.feishu_platform.adapter.FeishuAdapter`）永远不触发它；②clarify 走 `send_clarify` 不走 `send`，即使 on-demand 在 send 上能跑也救不了 clarify。结果：gateway 用未 patch 的真身实例，`send_clarify` 走 `BasePlatformAdapter` 默认纯文本实现（`gateway/platforms/base.py:3208`），插件 `_intercepted_send_clarify` wrapper 从未被调用（服务器日志 0 hits `clarify card:` + 1 hit `Routing message to clarify text-intercept` 铁证）。hermes v0.19.0 不是根因——clarify dispatch 路径、deferred loading 机制、纯文本格式在 v0.17.0→v0.19.0 期间零改动（2976 commits） | **主链路修复**：hook `platform_registry.create_adapter`（`gateway/platform_registry.py:278`，public API，v0.17.0→v0.19.0 零 commits，4 条 adapter 创建路径 initial/reconnect/multiplex start/reconnect 全汇聚于此）。新增 `_wrap_platform_registry_create_adapter` + `_apply_create_adapter_hook`：每次 hermes 创建 feishu adapter 实例时，在返回给调用方之前对其 class 跑 `_apply_feishu_adapter_patches`（id 去重）。不依赖定时器、不依赖"先调用才触发"、覆盖 `send_clarify` 和所有其他方法。clarify 回调路径（`_handle_card_action_event` patch，v1.4.2 主链路）v1.5.0 本就正常，无需恢复 (`patching/__init__.py`) |
+| 🧪 Test | 新增 7 个 `TestCreateAdapterHookV160` 单元测试 + 2 个 `TestClarifyDispatchPatch` E2E 测试 | v1.5.0 的 `TestOnDemandRepatchV150` 只测 send 触发 repatch，没测 send_clarify 触发，且没测 create_adapter hook，所以 CI 没防住这次回归 | 单元测试覆盖：hook 对未 patch feishu class 触发 patch、对已 patch class O(1) skip、非 feishu 平台透传、orig 返回 None 透传、class module path 兜底检测、hook 安装幂等、import 失败 deferred。E2E 测试覆盖：`_apply_feishu_adapter_patches` 确实把 `send_clarify` wrapper 装上 class（`__name__ == "_intercepted_send_clarify"`）、create_adapter hook 对 deferred-loaded 真身 class patch 后实例的 `send_clarify` 确实是 wrapper（非纯文本 fallback）(`tests/test_monkey_patch.py`, `tests/e2e/test_e2e_clarify.py`) |
+| 🧪 Test | E2E 真飞书验证（7 passed） | 用户要求 E2E 真飞书测试 | 用插件实际 `FeishuClient` 向测试群发真实 clarify 卡片（dict_repr/normal/special_chars/submitted/confirmed 五种 + 2 dispatch path），全部通过。非自造卡片，验证插件真实发卡链路 (`tests/e2e/test_e2e_clarify.py`) |
+
+**审计方法**: 三路调研对齐求证。2-a 拉取 DEV 最新代码（HEAD=v1.5.0，用户说的 v1.6.0 远端不存在），git diff v1.4.0→v1.5.0 定位 cee17bc 误删 deferred repatch。2-b 浅克隆 hermes-agent v0.19.0（HEAD=3ef6bbd20，2976 commits），确认 clarify dispatch 路径（`clarify_tool` → `_clarify_callback_sync` → `_status_adapter.send_clarify` → `BasePlatformAdapter.send_clarify` 纯文本）、deferred loading 机制（`platform_registry.py` 零 commits）、纯文本格式（`base.py:3208-3263` 与用户报告逐字吻合）三方面 v0.17.0→v0.19.0 零改动。2-c SSH 服务器抓 agent.log（10:15:18 clarify 测试窗口）：`FeishuAdapter resolved via plugins.platforms.feishu.adapter`（替身）+ `send_clarify patched ✓`（假阳性）+ 0 hits `clarify card:` + 1 hit `Routing message to clarify text-intercept`（走 hermes 原生纯文本）+ 0 hits `re-patched on deferred`（v1.5.0 删了定时重打），铁证 clarify 完全没走插件 patch。2-b 子任务精确定位 hook 点 `platform_registry.create_adapter`（public API，4 条创建路径汇聚，v0.17.0→v0.19.0 零 commits）。修复基于代码+源码+日志三方对齐，未自行构造测试卡片。849 单元测试 + 26 集成测试 + 22 e2e(mock) + 7 e2e(真飞书) 全部通过。
+
+**已知限制**:
+- 服务器实际跑的是 v1.5.0（用户说的 v1.6.0 之前不存在），本次作为 v1.6.0 发布
+- v1.5.0 的 `_wrap_feishu_adapter_send` 入口 on-demand repatch 保留（对 class A 替身实例仍有效，无害，作为 defense-in-depth）
+- `resolve_feishu_adapter_class_fresh()` 方法保留但生产无调用方（v1.4.0 遗留，未删以防未来需要）
+- hook 点 `platform_registry.create_adapter` 是 hermes public API，但若 hermes 未来重构 platform 注册机制（如改名/移到其他模块），hook 会失效——集成测试 `test_hermes_compat.py` 已校验该方法存在（REQUIRED），CI 会第一时间报警
+
+---
+
+
 ## v1.5.0 (2026-07-08)
 
 架构收敛版 — 删除 IM 降级路径 + 全量重建路径 + header 颜色切换 + v1.4.1 懒重打 + deferred loading 3 套重打 + `_on_card_action_trigger` patch（SDK bound method 失效）。生产代码从 14,780 行降至 ~10,300 行（-30%）。主链路唯一化：CardKit create → Phase 2 → Phase 3 → preservative seal，无降级分支。兼容 hermes v0.18.1（集成测试 26 passed）。
