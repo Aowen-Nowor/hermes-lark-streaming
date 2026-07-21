@@ -53,21 +53,28 @@ _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 _RE_BACKTICK_RUN = re.compile(r"`+")
 _RE_MD_SPECIAL = re.compile(r"([`*_{}\[\]<>])")
 
-def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
-    """提取飞书图片为独立 Card 2.0 img 元素，返回 (清理后的文本, img元素列表)."""
+def _extract_images_from_markdown(text: str, *, image_size: str = "fit_horizontal") -> tuple[str, list[dict]]:
+    """提取飞书图片为独立 Card 2.0 img 元素，返回 (清理后的文本, img元素列表).
+    image_size: "fit_horizontal"(默认), "stretch", "large", "medium", "small", "tiny", 或 "Wpx Hpx".
+    """
     images: list[dict] = []
 
     def _replace(m: re.Match) -> str:
         alt = m.group(1)
         img_key = m.group(2)
-        images.append({
+        element = {
             "tag": "img",
             "img_key": img_key,
-            "scale_type": "fit_horizontal",
             "alt": {"tag": "plain_text", "content": alt},
             "corner_radius": "8px",
             "preview": True,
-        })
+        }
+        if image_size == "fit_horizontal":
+            element["scale_type"] = "fit_horizontal"
+        else:
+            element["scale_type"] = "crop_center"
+            element["size"] = image_size
+        images.append(element)
         return ""
 
     cleaned = _IMG_MD_PATTERN.sub(_replace, text)

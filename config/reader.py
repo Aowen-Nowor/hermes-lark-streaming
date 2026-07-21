@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -203,6 +204,22 @@ class Config:
             except (ValueError, TypeError):
                 pass
         return "default"
+
+    @property
+    def image_size(self) -> str:
+        sec = self._plugin_sec()
+        val = sec.get("image_size", "fit_horizontal")
+        if not isinstance(val, str):
+            return "fit_horizontal"
+        stripped = val.strip()
+        _SIZE_PRESETS = frozenset({
+            "fit_horizontal", "stretch", "large", "medium", "small", "tiny",
+        })
+        if stripped in _SIZE_PRESETS:
+            return stripped
+        if re.match(r'^\d+px\s+\d+px$', stripped):
+            return stripped
+        return "fit_horizontal"
 
     @property
     def card_duration_sec(self) -> int:

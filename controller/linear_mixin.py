@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import time as _time
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
@@ -13,6 +15,7 @@ from ..cardkit import (
     UNIFIED_PANEL_ELEMENT_ID,
     _LOADING_ELEMENT_ID,
     _LOADING_HINT_ELEMENT_ID,
+    _extract_images_from_markdown,
     _streaming_element,
     build_streaming_card_v2,
     build_unified_panel,
@@ -89,8 +92,31 @@ async def _fallback_write_answer(
         _logger.warning("HLS: fallback write answer failed: %s", e)
         return False
 
+async def _process_media_images(client: Any, text: str) -> str:
+    """扫描 answer_text 中的 IMG:/path 引用，上传到飞书获取 img_key，
+    替换为 ![alt](img_key) 供 _extract_images_from_markdown 处理。
+    如果文件不存在或上传失败，保持原来的 IMG: 路径不变。"""
+    if not client or not text:
+        return text
+    result = text
+    for m in _IMG_PATH_RE.finditer(text):
+        path = m.group(1)
+        if not os.path.isfile(path):
+            continue
+        try:
+            img_key = await client.upload_local_image(path)
+            if img_key:
+                result = result.replace(m.group(0), f'![media]({img_key})')
+        except Exception:
+            _logger.debug("HLS: _process_media_images upload failed for %s", path, exc_info=True)
+    return result
+
 # NOTE: This is the *server-side flush interval* (how often we send
 _ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 70ms 上调）
+# MEDIA 路径匹配正则 - 用于 _process_media_images
+# 注意：这里用 IMG: 而非 MEDIA:，因为 MEDIA: 会被 Hermes 平台层拦截发送为独立附件
+# IMG: 只在插件内生效，不会被平台处理
+_IMG_PATH_RE = re.compile(r'IMG:([^\s\n]+)')
 
 class UnifiedControllerMixin:
     """Unified panel linear mode — phased card lifecycle."""
@@ -705,7 +731,11 @@ class UnifiedControllerMixin:
             # v1.3.1 fix: Do NOT skip this step even when the answer was already fully
             # guard) is a minor visual issue; content truncation is a P0 data-loss bug.
             if state is not None and state.answer_text and "answer" in session._creation_stages:
-                optimized_content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(state.answer_text))) or " "
+                # ── Process MEDIA: paths → upload to Feishu → extract as card img elements ──
+                _seal_answer_text = await _process_media_images(self._client, state.answer_text)
+                _seal_answer_text, _seal_img_elements = _extract_images_from_markdown(_seal_answer_text, image_size=self._cfg.image_size)
+                _seal_answer_text = _seal_answer_text or " "
+                optimized_content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(_seal_answer_text))) or " "
                 seal_actions.append({
                     "action": "partial_update_element",
                     "params": {
@@ -715,6 +745,15 @@ class UnifiedControllerMixin:
                         },
                     },
                 })
+                if _seal_img_elements:
+                    seal_actions.append({
+                        "action": "add_elements",
+                        "params": {
+                            "type": "insert_after",
+                            "target_element_id": ANSWER_ELEMENT_ID,
+                            "elements": _seal_img_elements,
+                        },
+                    })
 
             # ── Step 3: Add footer + delete loading elements ──
             seal_actions.extend(
@@ -907,7 +946,10 @@ class UnifiedControllerMixin:
                             # v1.3.1: same fix as main seal path — always send final
                             # (see v1.3.1 fix comment in main seal path above).
                             if state.answer_text and "answer" in session._creation_stages:
-                                optimized_content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(state.answer_text))) or " "
+                                _retry_answer_text = await _process_media_images(self._client, state.answer_text)
+                                _retry_answer_text, _retry_img_elements = _extract_images_from_markdown(_retry_answer_text, image_size=self._cfg.image_size)
+                                _retry_answer_text = _retry_answer_text or " "
+                                optimized_content = escape_markdown_asterisks(_downgrade_tables(optimize_markdown_style(_retry_answer_text))) or " "
                                 retry_actions.append({
                                     "action": "partial_update_element",
                                     "params": {
@@ -917,6 +959,15 @@ class UnifiedControllerMixin:
                                         },
                                     },
                                 })
+                                if _retry_img_elements:
+                                    retry_actions.append({
+                                        "action": "add_elements",
+                                        "params": {
+                                            "type": "insert_after",
+                                            "target_element_id": ANSWER_ELEMENT_ID,
+                                            "elements": _retry_img_elements,
+                                        },
+                                    })
                         retry_actions.extend(
                             build_preservative_seal_actions(
                                 partial=partial,
