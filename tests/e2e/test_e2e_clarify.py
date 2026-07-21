@@ -206,3 +206,103 @@ class TestClarifyCardNormalization:
                 "mock_chat", card
             )
             assert msg_id
+
+
+class TestClarifyDispatchPatch:
+    """v1.6.0: verify the clarify dispatch path is actually patched.
+
+    These tests exist because v1.5.0 silently regressed clarify (deferred
+    loading + chicken-and-egg on-demand repatch). The existing card-JSON
+    E2E tests above do NOT cover the dispatch path — they only test that
+    build_clarify_card produces correct JSON. A regression in the patch
+    layer (send_clarify wrapper never installed on the real class) would
+    pass those tests but fail in production, exactly like v1.5.0 did.
+    """
+
+    def test_apply_feishu_adapter_patches_wraps_send_clarify(self) -> None:
+        """_apply_feishu_adapter_patches must install the send_clarify wrapper
+        on the given class. This is the single most important assertion for
+        the v1.6.0 fix — if the wrapper isn't installed, clarify falls back
+        to hermes' plain-text BasePlatformAdapter.send_clarify."""
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching.adapter import _wrap_feishu_adapter_send_clarify
+
+        class FakeFeishuAdapterClass:
+            """Simulates the real (deferred-loaded) FeishuAdapter class B.
+            send_clarify here mirrors hermes BasePlatformAdapter default
+            (plain-text fallback) — before patching this is what would run."""
+            async def send(self, chat_id, content, reply_to=None, metadata=None, **kwargs):
+                return "sent"
+            async def send_clarify(self, chat_id, question, choices, clarify_id,
+                                   session_key, metadata=None, **kwargs):
+                return "PLAIN_TEXT_FALLBACK"
+            async def edit_message(self, *a, **kw):
+                return None
+            async def add_reaction(self, *a, **kw):
+                return None
+            async def delete_reaction(self, *a, **kw):
+                return None
+
+        cls = FakeFeishuAdapterClass
+        P._patched_feishu_classes.discard(id(cls))
+
+        try:
+            result = P._apply_feishu_adapter_patches(cls, is_repatch=True)
+            assert result is True, "patch should succeed"
+            # The wrapper must be installed on the class (name check is robust
+            # — _intercepted_send_clarify is the closure created by
+            # _wrap_feishu_adapter_send_clarify)
+            assert cls.send_clarify.__name__ == "_intercepted_send_clarify", \
+                f"send_clarify must be wrapped, got {cls.send_clarify.__name__!r}"
+            assert cls.send.__name__ == "_intercepted_send", \
+                f"send must be wrapped, got {cls.send.__name__!r}"
+            # And class id must be recorded
+            assert id(cls) in P._patched_feishu_classes
+        finally:
+            P._patched_feishu_classes.discard(id(cls))
+
+    def test_create_adapter_hook_patches_unpatched_feishu_class_e2e(self) -> None:
+        """The v1.6.0 create_adapter hook must patch an unpatched feishu
+        adapter class (simulating the deferred-loaded 真身) so that a
+        subsequent send_clarify call on its instance goes through the
+        plugin wrapper, NOT the plain-text fallback."""
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching import _wrap_platform_registry_create_adapter
+
+        class FakeRealFeishuAdapter:
+            """模拟 hermes v0.17+ deferred loading 产生的真身 class B。
+            send_clarify 走 BasePlatformAdapter 默认纯文本实现。"""
+            def __init__(self, config):
+                self.config = config
+            async def send(self, chat_id, content, reply_to=None, metadata=None, **kwargs):
+                return "sent"
+            async def send_clarify(self, chat_id, question, choices, clarify_id,
+                                   session_key, metadata=None, **kwargs):
+                return "PLAIN_TEXT_FALLBACK"
+            async def edit_message(self, *a, **kw):
+                return None
+            async def add_reaction(self, *a, **kw):
+                return None
+            async def delete_reaction(self, *a, **kw):
+                return None
+
+        cls_b = FakeRealFeishuAdapter
+        P._patched_feishu_classes.discard(id(cls_b))
+
+        def orig_create_adapter(name, config):
+            # Simulate hermes instantiating the deferred-loaded real class
+            return cls_b(config)
+
+        wrapped_create = _wrap_platform_registry_create_adapter(orig_create_adapter)
+
+        try:
+            # Simulate gateway calling create_adapter("feishu", config)
+            adapter = wrapped_create("feishu", {"app_id": "x"})
+            # After hook, the instance's class must be patched
+            assert id(type(adapter)) in P._patched_feishu_classes, \
+                "create_adapter hook must register the real class in _patched_feishu_classes"
+            # And send_clarify on the instance must now be the wrapper
+            assert type(adapter).send_clarify.__name__ == "_intercepted_send_clarify", \
+                f"send_clarify must be wrapped after hook, got {type(adapter).send_clarify.__name__!r}"
+        finally:
+            P._patched_feishu_classes.discard(id(cls_b))
