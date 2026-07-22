@@ -247,6 +247,12 @@ class Config:
         return _to_bool(footer.get("show_label", False))
 
     @property
+    def show_session_title(self) -> bool:
+        """是否在卡片顶部显示会话标题。默认 True."""
+        sec = self._plugin_sec()
+        return _to_bool(sec.get("show_session_title", True), default=True)
+
+    @property
     def gateway_cards(self) -> bool:
         """默认 True. TTL 缓存读取."""
         sec = self._reload_cached().get("hermes_lark_streaming")

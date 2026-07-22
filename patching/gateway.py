@@ -18,6 +18,20 @@ from . import (
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
 
+def _get_session_title(agent_ref) -> str:
+    """从 agent 对象安全地获取 session_title."""
+    if not agent_ref:
+        return ""
+    try:
+        session_db = getattr(agent_ref, "_session_db", None)
+        session_id = getattr(agent_ref, "session_id", None)
+        if session_db and session_id:
+            title = session_db.get_session_title(session_id)
+            return title or ""
+    except Exception:
+        pass
+    return ""
+
 def _wrap_handle_message(orig: Callable) -> Callable:
     """Inject NORMALIZE hook at the top of GatewayRunner._handle_message."""
 
@@ -373,6 +387,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                         duration=_elapsed_child,
                         model=result.get("model", ""),
                         provider=_provider_value,
+                        session_title=_get_session_title(_agent_ref_child),
                         tokens={
                             "input_tokens": result.get("input_tokens", 0),
                             "output_tokens": result.get("output_tokens", 0),
@@ -411,6 +426,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     duration=time.monotonic() - _saved_parent_ctx.get("_msg_start_time", time.monotonic()),
                     aborted=True,
                     error_message="Interrupted by new message",
+                    session_title=_get_session_title(ctx.get("_agent_ref") if ctx else None),
                 )
                 _saved_parent_ctx["card_sent"] = True
                 # BUG FIX (v0.15.4): Also set card_sent on the original
@@ -474,6 +490,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     duration=_elapsed,
                     model=result.get("model", ""),
                     provider=_provider_value,
+                    session_title=_get_session_title(_agent_ref),
                     tokens={
                         "input_tokens": result.get("input_tokens", 0),
                         "output_tokens": result.get("output_tokens", 0),
@@ -652,6 +669,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                         duration=_elapsed,
                         model=(result or {}).get("model", ""),
                         provider=_provider_value,
+                        session_title=_get_session_title(_agent_ref),
                         tokens={
                             "input_tokens": (result or {}).get("input_tokens", 0),
                             "output_tokens": (result or {}).get("output_tokens", 0),

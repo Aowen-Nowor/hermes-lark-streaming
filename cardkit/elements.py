@@ -672,13 +672,51 @@ def _build_footer_elements(
         },
     ]
 
-def build_preservative_seal_actions(*, partial: bool = False, footer_data: dict | None = None, is_error: bool = False, is_aborted: bool = False, error_message: str = "", footer_fields: list[list[str]] | None = None, footer_show_label: bool = False, existing_elements: set[str] | None = None, card_trace_id: str = "") -> list[dict]:
+def _build_session_title_header(title: str) -> list[dict]:
+    """构建会话标题头部元素."""
+    if not title:
+        return []
+    # 截断过长的标题
+    max_len = 50
+    display_title = title if len(title) <= max_len else title[:max_len] + "..."
+    # 转义 markdown 特殊字符
+    safe_title = display_title.replace("*", "\\*").replace("_", "\\_")
+    return [
+        {
+            "tag": "markdown",
+            "content": f"📋 **{safe_title}**",
+            "text_size": "heading",
+        },
+        {"tag": "hr"},
+    ]
+
+def build_preservative_seal_actions(*, partial: bool = False, footer_data: dict | None = None, is_error: bool = False, is_aborted: bool = False, error_message: str = "", footer_fields: list[list[str]] | None = None, footer_show_label: bool = False, existing_elements: set[str] | None = None, card_trace_id: str = "", session_title: str = "") -> list[dict]:
     """构建保留式封卡 batch_update actions. Inserts error panel + footer via insert_before
     loading_icon, then deletes loading_hint + loading_icon. existing_elements filters deletes."""
     actions: list[dict] = []
 
     def _elem_exists(eid: str) -> bool:
         return existing_elements is None or eid in existing_elements
+
+    # Session title header — insert at the very top of the card.
+    if session_title:
+        title_elements = _build_session_title_header(session_title)
+        if title_elements:
+            # Find the first existing element to insert before
+            first_target = None
+            for candidate in (UNIFIED_PANEL_ELEMENT_ID, ANSWER_ELEMENT_ID, STREAMING_ELEMENT_ID, _LOADING_HINT_ELEMENT_ID, _LOADING_ELEMENT_ID):
+                if _elem_exists(candidate):
+                    first_target = candidate
+                    break
+            if first_target:
+                actions.append({
+                    "action": "add_elements",
+                    "params": {
+                        "type": "insert_before",
+                        "target_element_id": first_target,
+                        "elements": title_elements,
+                    },
+                })
 
     # Error/interrupt panel.
     if error_message:
