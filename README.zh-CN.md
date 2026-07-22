@@ -133,6 +133,8 @@ hermes_lark_streaming:
   max_tool_steps: 20               # 统一面板最多显示的工具步骤数（默认20，范围1~100）
   max_reasoning_rounds: 20         # 统一面板最多显示的推理轮次数（默认20，范围1~100）
   width_mode: default              # 卡片宽度："default"(600px)、"fill"(撑满窗口)、或像素值(如 700, 800)
+  image_size: fit_horizontal        # 图片尺寸："fit_horizontal"、"stretch"、"large"、"medium"、"small"、"tiny"、或 "Wpx Hpx"
+  show_session_title: true          # 是否在卡片顶部显示会话标题
 
   footer:
     show_label: false              # 是否显示字段标签
@@ -142,6 +144,7 @@ hermes_lark_streaming:
       #   status      — 回复状态（已完成 / 出错 / 已停止）
       #   elapsed     — AI 回复耗时
       #   model       — 使用的模型名称
+      #   provider    — 提供商名称（custom provider 自动解析为实际名称）
       #   cost        — 预估费用及可信度（$0.023 估算 / $0.023 实报 / 免费）
       #   compression_exhausted — 上下文已满（⚠ 上下文已满）
       # 以下字段默认不显示 — 在 fields 列表中添加即可启用：

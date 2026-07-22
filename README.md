@@ -133,6 +133,8 @@ hermes_lark_streaming:
   max_tool_steps: 20               # Max tool steps shown in panel (default 20, range 1–100)
   max_reasoning_rounds: 20         # Max reasoning rounds shown in panel (default 20, range 1–100)
   width_mode: default              # Card width: "default"(600px), "fill"(fill window), or px value (e.g. 700, 800)
+  image_size: fit_horizontal        # Image size: "fit_horizontal", "stretch", "large", "medium", "small", "tiny", or "Wpx Hpx"
+  show_session_title: true          # Show session title at the top of the card
 
   footer:
     show_label: false              # Show field labels
@@ -142,6 +144,7 @@ hermes_lark_streaming:
       #   status      — Reply status (Completed / Error / Stopped)
       #   elapsed     — AI response elapsed time
       #   model       — Model name used
+      #   provider    — Provider name (resolves custom provider to actual name)
       #   cost        — Estimated cost with trust indicator ($0.023 est. / $0.023 actual / Free)
       #   compression_exhausted — Context window is full (⚠ Context Full)
       # Fields below are not shown by default — add them to the fields list to enable:

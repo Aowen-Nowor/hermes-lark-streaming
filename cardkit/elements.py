@@ -679,8 +679,7 @@ def _build_session_title_header(title: str) -> list[dict]:
     # 截断过长的标题
     max_len = 50
     display_title = title if len(title) <= max_len else title[:max_len] + "..."
-    # 转义 markdown 特殊字符
-    safe_title = display_title.replace("*", "\\*").replace("_", "\\_")
+    safe_title = _escape_md(display_title)
     return [
         {
             "tag": "markdown",

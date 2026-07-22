@@ -767,7 +767,7 @@ class UnifiedControllerMixin:
                     footer_show_label=footer_show_label,
                     existing_elements=session.existing_elements,
                     card_trace_id=session.card_trace_id,
-                    session_title=session.footer.get("session_title", ""),
+                    session_title=session.footer.get("session_title", "") if self._cfg.show_session_title else "",
                 )
             )
 
@@ -980,7 +980,7 @@ class UnifiedControllerMixin:
                                 footer_show_label=footer_show_label,
                                 existing_elements=session.existing_elements,
                                 card_trace_id=session.card_trace_id,
-                                session_title=session.footer.get("session_title", ""),
+                                session_title=session.footer.get("session_title", "") if self._cfg.show_session_title else "",
                             )
                         )
                         # batch_update BEFORE close_streaming (same order as try block)

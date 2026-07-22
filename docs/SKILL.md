@@ -239,9 +239,11 @@ hermes_lark_streaming:
   max_tool_steps: 20               # 范围 1~100
   max_reasoning_rounds: 20         # 范围 1~100
   width_mode: default              # 卡片宽度："default"(600px) / "fill"(撑满窗口) / 像素值(如 700, 800)
+  image_size: fit_horizontal        # 图片尺寸："fit_horizontal" / "stretch" / "large" / "medium" / "small" / "tiny" / "Wpx Hpx"
+  show_session_title: true          # 是否在卡片顶部显示会话标题
   footer:
     show_label: false
-    fields: [[status, elapsed, model, cost, compression_exhausted]]
+    fields: [[status, elapsed, model, provider, cost, compression_exhausted]]
 
 # display 节是 Hermes 全局配置，不在 hermes_lark_streaming 下
 display:

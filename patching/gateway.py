@@ -32,6 +32,22 @@ def _get_session_title(agent_ref) -> str:
         pass
     return ""
 
+def _resolve_provider(agent_ref) -> str:
+    """从 agent 对象提取 provider 名称，对 custom provider 解析实际名称."""
+    if not agent_ref:
+        return ""
+    provider = getattr(agent_ref, "provider", "") or ""
+    if provider != "custom":
+        return provider
+    custom_providers = getattr(agent_ref, "_custom_providers", []) or []
+    base_url = (getattr(agent_ref, "base_url", "") or "").rstrip("/")
+    for entry in custom_providers:
+        if isinstance(entry, dict):
+            entry_url = (entry.get("base_url") or "").rstrip("/")
+            if base_url and entry_url == base_url:
+                return entry.get("name", "custom")
+    return provider
+
 def _wrap_handle_message(orig: Callable) -> Callable:
     """Inject NORMALIZE hook at the top of GatewayRunner._handle_message."""
 
@@ -368,19 +384,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     estimated_cost_usd = getattr(_agent_ref_child, "session_estimated_cost_usd", 0) if _agent_ref_child else 0
                     cost_status = getattr(_agent_ref_child, "session_cost_status", "unknown") if _agent_ref_child else "unknown"
 
-                    # 提取实际的 provider 名称（对 custom provider 解析实际名称）
-                    _provider_value = getattr(_agent_ref_child, "provider", "") or ""
-                    if _provider_value == "custom":
-                        # 从 _custom_providers 列表中根据 base_url 查找实际名称
-                        _custom_providers = getattr(_agent_ref_child, "_custom_providers", []) or []
-                        _base_url = getattr(_agent_ref_child, "base_url", "") or ""
-                        _base_url = _base_url.rstrip("/")
-                        for _cp_entry in _custom_providers:
-                            if isinstance(_cp_entry, dict):
-                                _cp_url = (_cp_entry.get("base_url") or "").rstrip("/")
-                                if _base_url and _cp_url == _base_url:
-                                    _provider_value = _cp_entry.get("name", "custom")
-                                    break
+                    _provider_value = _resolve_provider(_agent_ref_child)
                     card_sent_child = on_message_completed(
                         message_id=ctx["message_id"],
                         answer=result.get("final_response", ""),
@@ -471,19 +475,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                 cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
 
-                # 提取实际的 provider 名称（对 custom provider 解析实际名称）
-                _provider_value = getattr(_agent_ref, "provider", "") or ""
-                if _provider_value == "custom":
-                    # 从 _custom_providers 列表中根据 base_url 查找实际名称
-                    _custom_providers = getattr(_agent_ref, "_custom_providers", []) or []
-                    _base_url = getattr(_agent_ref, "base_url", "") or ""
-                    _base_url = _base_url.rstrip("/")
-                    for _cp_entry in _custom_providers:
-                        if isinstance(_cp_entry, dict):
-                            _cp_url = (_cp_entry.get("base_url") or "").rstrip("/")
-                            if _base_url and _cp_url == _base_url:
-                                _provider_value = _cp_entry.get("name", "custom")
-                                break
+                _provider_value = _resolve_provider(_agent_ref)
                 card_sent = on_message_completed(
                     message_id=ctx["message_id"],
                     answer=result.get("final_response", ""),
@@ -650,19 +642,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                     estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                     cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
 
-                    # 提取实际的 provider 名称（对 custom provider 解析实际名称）
-                    _provider_value = getattr(_agent_ref, "provider", "") or ""
-                    if _provider_value == "custom":
-                        # 从 _custom_providers 列表中根据 base_url 查找实际名称
-                        _custom_providers = getattr(_agent_ref, "_custom_providers", []) or []
-                        _base_url = getattr(_agent_ref, "base_url", "") or ""
-                        _base_url = _base_url.rstrip("/")
-                        for _cp_entry in _custom_providers:
-                            if isinstance(_cp_entry, dict):
-                                _cp_url = (_cp_entry.get("base_url") or "").rstrip("/")
-                                if _base_url and _cp_url == _base_url:
-                                    _provider_value = _cp_entry.get("name", "custom")
-                                    break
+                    _provider_value = _resolve_provider(_agent_ref)
                     card_sent = on_message_completed(
                         message_id=task_id,
                         answer=(result or {}).get("final_response", ""),
