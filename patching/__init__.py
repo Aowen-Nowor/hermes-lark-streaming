@@ -39,6 +39,9 @@ __all__ = [
     # FeishuAdapter patch helpers
     '_apply_feishu_adapter_patches',
     '_verify_feishu_patch_identity',
+    # v1.6.0: hook platform_registry.create_adapter — main-chain fix for deferred loading
+    '_wrap_platform_registry_create_adapter',
+    '_apply_create_adapter_hook',
     # From gateway
     '_wrap_handle_message',
     '_wrap_handle_message_with_agent',
@@ -331,6 +334,22 @@ def apply_patches() -> None:
     else:
         _logger.info("hermes-lark-streaming: FeishuAdapter not available via HermesCompat, patch skipped")
 
+    # v1.6.0: hook platform_registry.create_adapter — main-chain fix for
+    # hermes v0.17.0+ bundled platform deferred loading.  The FeishuAdapter
+    # class resolved above may be a "替身" (source-path class A) because the
+    # gateway's "真身" (hermes_plugins.feishu_platform.adapter class B) is not
+    # loaded yet at apply_patches() time.  v1.4.0 used 2s+10s timer repatch
+    # (赌时窗，治标); v1.5.0 replaced it with on-demand repatch inside
+    # _wrap_feishu_adapter_send (chicken-and-egg 死结: wrapper only installed
+    # on already-patched class, so unpatched 真身 never triggers it; and
+    # clarify goes through send_clarify not send, so even a working on-demand
+    # check on send cannot save clarify).  v1.6.0 hooks the single public
+    # adapter-creation entry — platform_registry.create_adapter — so every
+    # FeishuAdapter instance hermes ever creates (initial / reconnect / multiplex)
+    # has its class patched BEFORE it is handed to callers.  No timer, no
+    # chicken-and-egg, covers clarify (send_clarify) and all other methods.
+    create_adapter_hooked = _apply_create_adapter_hook()
+
     # ── Summary ──
     # v1.1.0: Record patch status in a structured dict for doctor command
     global _patch_status
@@ -342,17 +361,19 @@ def apply_patches() -> None:
         "cron_scheduler": "✓" if cron_patched else "n/a",
         "background_task": "✓" if gw_patched else ("pending" if gw_delayed else "n/a"),
         "feishu_adapter": "✓" if feishu_patched else "✗",
+        "create_adapter_hook": "✓" if create_adapter_hooked else "✗",
         "hermes_layout": layout,
     }
     _logger.info(
         "HLS: patch summary v%s — GatewayRunner=%s conversation_loop=%s "
-        "AIAgent=applied cron=%s background=%s FeishuAdapter=%s layout=%s",
+        "AIAgent=applied cron=%s background=%s FeishuAdapter=%s create_adapter_hook=%s layout=%s",
         __version__,
         _patch_status["gateway_runner"],
         _patch_status["conversation_loop"],
         _patch_status["cron_scheduler"],
         _patch_status["background_task"],
         _patch_status["feishu_adapter"],
+        _patch_status["create_adapter_hook"],
         layout,
     )
 
@@ -431,6 +452,119 @@ def _verify_feishu_patch_identity(adapter_instance: Any) -> bool:
         cls_id, sorted(_patched_feishu_classes),
     )
     return False
+
+
+def _wrap_platform_registry_create_adapter(orig_create_adapter: Callable) -> Callable:
+    """v1.6.0: wrap platform_registry.create_adapter so every adapter instance
+    hermes creates has its class patched BEFORE it reaches callers.
+
+    This is the main-chain fix for hermes v0.17.0+ bundled platform deferred
+    loading.  See _apply_create_adapter_hook docstring for the full rationale.
+    """
+
+    def _wrapped(name, config):
+        adapter = orig_create_adapter(name, config)
+        if adapter is None:
+            return adapter
+        # Only patch feishu adapters — other platforms (irc/telegram/...) are
+        # none of our business.  ``name`` is platform.value ("feishu"/"lark");
+        # also sniff the class module as a belt-and-suspenders match.
+        _is_feishu = False
+        if isinstance(name, str) and name.lower() in ("feishu", "lark"):
+            _is_feishu = True
+        else:
+            _cls_mod = getattr(type(adapter), "__module__", "") or ""
+            if "feishu" in _cls_mod.lower():
+                _is_feishu = True
+        if not _is_feishu:
+            return adapter
+        cls = type(adapter)
+        cls_id = id(cls)
+        if cls_id in _patched_feishu_classes:
+            return adapter
+        try:
+            _apply_feishu_adapter_patches(cls, is_repatch=True)
+            _logger.info(
+                "HLS: FeishuAdapter class patched at create_adapter hook "
+                "(class_id=%s, deferred loading intercepted, name=%s)",
+                cls_id, name,
+            )
+        except Exception as e:
+            _logger.warning(
+                "HLS: create_adapter hook patch failed (class_id=%s name=%s): %s",
+                cls_id, name, e,
+            )
+        return adapter
+
+    _wrapped._hls_create_adapter_wrapped = True  # type: ignore[attr-defined]
+    return _wrapped
+
+
+def _apply_create_adapter_hook() -> bool:
+    """v1.6.0: install the platform_registry.create_adapter hook.
+
+    Why this is the main-chain fix (not a fallback/compat shim):
+
+    - hermes v0.17.0+ loads bundled platforms (feishu/telegram/...) via a
+      *deferred loader*: the real FeishuAdapter class object is only created
+      when the gateway first asks for it, which happens AFTER the plugin's
+      apply_patches() runs at startup.  So apply_patches() sees only the
+      source-path "替身" class A, patches it, but the gateway later builds a
+      different "真身" class B object (same source, different module object →
+      different class object) and uses class B instances.  Class B is never
+      patched → clarify/delegate/cards fall back to hermes' plain-text
+      BasePlatformAdapter defaults.
+
+    - v1.4.0 fixed this with a 2s+10s timer that re-resolved & re-patched
+      class B.  That works but bets on a time window (fragile if hermes ever
+      loads slower) and is a "兜底" pattern, not a main-chain fix.
+
+    - v1.5.0 replaced the timer with an on-demand repatch inside
+      _wrap_feishu_adapter_send.  That has a chicken-and-egg deadlock: the
+      on-demand check is itself a wrapper installed only on already-patched
+      classes, so the unpatched 真身 never runs it; and clarify dispatches
+      through send_clarify (not send), so even a working on-demand check on
+      send cannot save clarify.
+
+    - v1.6.0 hooks the single PUBLIC adapter-creation entry,
+      platform_registry.create_adapter (gateway/platform_registry.py:278),
+      which ALL four adapter-creation paths (initial / reconnect / multiplex
+      start / multiplex reconnect) funnel through.  Every FeishuAdapter
+      instance hermes ever builds has its class patched before it is returned
+      to callers — no timer, no chicken-and-egg, covers send_clarify and
+      every other method.  platform_registry.py had ZERO commits between
+      hermes v0.17.0 and v0.19.0 (22 days, 2976 commits), so this hook point
+      is extremely stable.
+
+    Returns True if the hook was installed (or was already installed).
+    """
+    try:
+        from gateway.platform_registry import platform_registry as _pr
+    except (ImportError, AttributeError):
+        _logger.info(
+            "hermes-lark-streaming: platform_registry not available yet, "
+            "create_adapter hook deferred (will retry on next apply_patches)"
+        )
+        return False
+
+    _current = getattr(_pr, "create_adapter", None)
+    if _current is None:
+        _logger.info(
+            "hermes-lark-streaming: platform_registry.create_adapter missing, "
+            "create_adapter hook skipped"
+        )
+        return False
+
+    if getattr(_current, "_hls_create_adapter_wrapped", False):
+        return True  # already wrapped
+
+    _pr.create_adapter = _wrap_platform_registry_create_adapter(_current)
+    _logger.info(
+        "hermes-lark-streaming: platform_registry.create_adapter hooked ✓ "
+        "(main-chain deferred-loading fix — every FeishuAdapter instance gets "
+        "its class patched at creation)"
+    )
+    return True
 
 def _apply_direct_agent_patch() -> None:
     """Directly patch AIAgent.run_conversation as belt-and-suspenders."""
