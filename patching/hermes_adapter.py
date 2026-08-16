@@ -49,9 +49,25 @@ class HermesCompat:
         self.run_agent_module: Any | None = None
         
         # GatewayRunner
+        # NOTE (2026-08-16 deadlock fix): must NOT do a synchronous
+        # `from gateway.run import GatewayRunner` here. When the gateway
+        # boots, `gateway/run.py` top-level code (line ~2225) runs plugin
+        # discovery *while* `gateway.run` is still being imported by the
+        # main thread. A sync import in the plugin-discovery thread then
+        # blocks on the importlib module lock held by the main thread, and
+        # the main thread waits for plugin discovery to finish -> deadlock.
+        # Reading via sys.modules is lock-free: if the module is present and
+        # already fully executed (has the attribute), we get the class;
+        # otherwise we return None and the caller's delayed-poll path
+        # (apply_patches -> _delayed_gw_patch) picks it up later.
         try:
-            from gateway.run import GatewayRunner
-            self.gateway_runner_class = GatewayRunner
+            _gr_module = sys.modules.get("gateway.run")
+            if _gr_module is not None and hasattr(_gr_module, "GatewayRunner"):
+                self.gateway_runner_class = getattr(_gr_module, "GatewayRunner")
+            else:
+                _logger.debug(
+                    "HLS: GatewayRunner not available yet (gateway.run not fully loaded)"
+                )
         except (ImportError, AttributeError):
             _logger.debug("HLS: GatewayRunner not available yet")
         
