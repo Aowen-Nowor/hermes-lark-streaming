@@ -389,19 +389,21 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
 
     return children
 
-def build_unified_panel(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, show_reasoning: bool = True, expanded: bool = False, element_id: str | None = None, panel_events: list[tuple[str, int]] | None = None, max_tool_steps: int = 20, max_reasoning_rounds: int = 20) -> dict:
+def build_unified_panel(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, show_reasoning: bool = True, show_tool_use: bool = True, expanded: bool = False, element_id: str | None = None, panel_events: list[tuple[str, int]] | None = None, max_tool_steps: int = 20, max_reasoning_rounds: int = 20) -> dict:
     """Build full unified panel. Thin assembler over build_panel_header/children."""
+    # When show_tool_use=False, suppress tool steps display
+    effective_tool_steps = tool_steps if show_tool_use else []
     header = build_panel_header(
         reasoning_rounds=reasoning_rounds,
         current_reasoning_text=current_reasoning_text,
-        tool_steps=tool_steps,
+        tool_steps=effective_tool_steps,
         tool_elapsed_ms=tool_elapsed_ms,
         show_reasoning=show_reasoning,
     )
     children = build_panel_children(
         reasoning_rounds=reasoning_rounds,
         current_reasoning_text=current_reasoning_text,
-        tool_steps=tool_steps,
+        tool_steps=effective_tool_steps,
         show_reasoning=show_reasoning,
         panel_events=panel_events,
         max_tool_steps=max_tool_steps,
