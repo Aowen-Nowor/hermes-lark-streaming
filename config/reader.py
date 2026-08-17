@@ -218,6 +218,41 @@ class Config:
             return True
         return _to_bool(sec.get("gateway_cards", True), default=True)
 
+    @property
+    def width_mode(self) -> str:
+        """Card 宽度模式: default / compact / fill. 默认 default."""
+        sec = self._plugin_sec()
+        raw = str(sec.get("width_mode", "default") or "default").strip().lower()
+        if raw in {"default", "compact", "fill"}:
+            return raw
+        return "default"
+
+    @property
+    def header_enabled(self) -> bool:
+        """流式卡片和完成态卡片是否显示 header. 默认 False."""
+        sec = self._plugin_sec()
+        header = sec.get("header", {})
+        if not isinstance(header, dict):
+            return False
+        return _to_bool(header.get("enabled", False))
+
+    @property
+    def show_tool_use(self) -> bool:
+        """是否在卡片中展示工具调用面板.
+
+        优先级：display.platforms.feishu.show_tool_use → display.show_tool_use，
+        默认 True（保持向后兼容）。TTL 缓存读取以支持运行时切换。
+        """
+        display = self._reload_cached().get("display")
+        if not isinstance(display, dict):
+            return True
+        platforms = display.get("platforms")
+        if isinstance(platforms, dict):
+            feishu = platforms.get("feishu")
+            if isinstance(feishu, dict) and "show_tool_use" in feishu:
+                return _to_bool(feishu["show_tool_use"], default=True)
+        return _to_bool(display.get("show_tool_use", True), default=True)
+
     @staticmethod
     def _default_footer_fields() -> list[list[str]]:
         return [["status", "elapsed", "model", "cost", "compression_exhausted"]]

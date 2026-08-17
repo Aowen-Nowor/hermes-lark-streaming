@@ -39,7 +39,18 @@ class HermesCompat:
         _logger.info("HLS: Hermes version detected: %s", self.hermes_version)
     
     def _resolve_modules(self) -> None:
-        """Resolve all Hermes internal modules, recording what's available."""
+        """Resolve all Hermes internal modules, recording what's available.
+
+        CRITICAL: When this runs inside the gateway's plugin-loading phase
+        (called from ``register()`` during ``GatewayRunner.start()``), the
+        ``gateway.run`` module is mid-initialization — its ``start()`` method
+        is on the call stack.  A bare ``from gateway.run import GatewayRunner``
+        deadlocks on the import lock because Python re-enters the partially
+        initialized module.  We must use ``sys.modules`` lookups (which return
+        the in-progress module object without re-triggering the import
+        machinery) instead of ``import`` / ``from … import`` statements for
+        modules that are already on the stack.
+        """
         self.gateway_runner_class: Any | None = None
         self.aiagent_class: Any | None = None
         self.feishu_adapter_class: Any | None = None
@@ -47,32 +58,67 @@ class HermesCompat:
         self.conversation_loop_module: Any | None = None
         self.conversation_loop_func: Any | None = None
         self.run_agent_module: Any | None = None
-        
-        # GatewayRunner
-        try:
-            from gateway.run import GatewayRunner
-            self.gateway_runner_class = GatewayRunner
-        except (ImportError, AttributeError):
-            _logger.debug("HLS: GatewayRunner not available yet")
-        
-        # AIAgent
-        try:
-            from run_agent import AIAgent
-            self.aiagent_class = AIAgent
-            self.run_agent_module = sys.modules.get("run_agent")
-        except (ImportError, AttributeError):
-            _logger.debug("HLS: AIAgent not available yet")
+
+        # GatewayRunner — use sys.modules to avoid circular-import deadlock
+        # when register() is called from inside GatewayRunner.start().
+        _gw_mod = sys.modules.get("gateway.run")
+        if _gw_mod is not None:
+            _gr = getattr(_gw_mod, "GatewayRunner", None)
+            if _gr is not None:
+                self.gateway_runner_class = _gr
+                _logger.info("HLS: GatewayRunner resolved via sys.modules ✓")
+            else:
+                _logger.info(
+                    "HLS: gateway.run in sys.modules but GatewayRunner not yet "
+                    "defined (partial init) — delayed patch will retry"
+                )
+        else:
+            # Module not loaded at all — safe to import (no circular risk)
+            try:
+                from gateway.run import GatewayRunner  # noqa: F401
+                _gw_mod = sys.modules["gateway.run"]
+                self.gateway_runner_class = getattr(_gw_mod, "GatewayRunner", None)
+                if self.gateway_runner_class:
+                    _logger.info("HLS: GatewayRunner resolved via import ✓")
+            except (ImportError, AttributeError):
+                _logger.debug("HLS: GatewayRunner not available yet")
+
+        # AIAgent — same pattern: sys.modules first, then import
+        _ra_mod = sys.modules.get("run_agent")
+        if _ra_mod is not None:
+            _ai = getattr(_ra_mod, "AIAgent", None)
+            if _ai is not None:
+                self.aiagent_class = _ai
+                self.run_agent_module = _ra_mod
+                _logger.info("HLS: AIAgent resolved via sys.modules ✓")
+            else:
+                _logger.info("HLS: run_agent in sys.modules but AIAgent not yet defined")
+        else:
+            try:
+                from run_agent import AIAgent  # noqa: F401
+                _ra_mod = sys.modules["run_agent"]
+                self.aiagent_class = getattr(_ra_mod, "AIAgent", None)
+                self.run_agent_module = _ra_mod
+                if self.aiagent_class:
+                    _logger.info("HLS: AIAgent resolved via import ✓")
+            except (ImportError, AttributeError):
+                _logger.debug("HLS: AIAgent not available yet")
         
         # FeishuAdapter — 抽取到 _resolve_feishu_adapter()，
         # 便于 resolve_feishu_adapter_class_fresh() 复用（v1.4.0: fix deferred loading patch miss）
         self.feishu_adapter_class = self._resolve_feishu_adapter()
-        
-        # Cron scheduler
+
+        # Cron scheduler — use sys.modules first to avoid triggering imports
+        # that could deadlock during plugin loading.
         for mod_name in ("cron.scheduler", "gateway.cron.scheduler"):
+            _mod = sys.modules.get(mod_name)
+            if _mod is not None and hasattr(_mod, "_deliver_result"):
+                self.cron_scheduler_module = _mod
+                break
             try:
-                mod = importlib.import_module(mod_name)
-                if hasattr(mod, "_deliver_result"):
-                    self.cron_scheduler_module = mod
+                _mod = importlib.import_module(mod_name)
+                if hasattr(_mod, "_deliver_result"):
+                    self.cron_scheduler_module = _mod
                     break
             except ImportError:
                 continue
@@ -119,14 +165,12 @@ class HermesCompat:
                 _logger.debug("HLS: conversation_loop resolved via sys.modules")
                 return
         
-        # Strategy 2: Anchor-based discovery
+        # Strategy 2: Anchor-based discovery — use sys.modules only to avoid
+        # circular imports during plugin loading.
         for anchor_name in ("gateway.run", "run_agent"):
             anchor = sys.modules.get(anchor_name)
             if anchor is None:
-                try:
-                    anchor = importlib.import_module(anchor_name)
-                except ImportError:
-                    continue
+                continue  # Don't trigger import — avoids circular deadlock
             anchor_file = getattr(anchor, "__file__", None)
             if not anchor_file:
                 continue

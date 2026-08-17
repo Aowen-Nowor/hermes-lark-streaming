@@ -59,7 +59,7 @@ class ControllerMixin:
         _logger.info("cron _do_cron_deliver: chat=%s content_len=%d", chat_id[:12], len(content))
         await self._ensure_init()
         assert self._client is not None
-        card = build_cron_card(content)
+        card = build_cron_card(content, width_mode=self._cfg.width_mode)
         await self._client.send_card_to_chat(chat_id, card)
 
     async def _do_gateway_deliver(
@@ -76,6 +76,7 @@ class ControllerMixin:
             card = build_gateway_card(
                 content,
                 category=category,
+                width_mode=self._cfg.width_mode,
             )
             # Use send_card_to_chat which returns card_msg_id
             card_msg_id = await self._client.send_card_to_chat(chat_id, card)
@@ -105,7 +106,7 @@ class ControllerMixin:
         try:
             await self._ensure_init()
             assert self._client is not None
-            card = build_gateway_card(content, category=category)
+            card = build_gateway_card(content, category=category, width_mode=self._cfg.width_mode)
 
             if card_id:
                 # CardKit container — update via cardkit_update
@@ -146,6 +147,7 @@ class ControllerMixin:
                 category=category,
                 status_label=status_label,
                 status_emoji=emoji,
+                width_mode=self._cfg.width_mode,
             )
             if card_id:
                 await self._client.cardkit_update(card_id, card)

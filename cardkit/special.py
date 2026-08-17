@@ -82,11 +82,11 @@ def normalize_clarify_choices(choices: list[str] | None) -> list[str]:
             normalized.append(n)
     return normalized
 
-def build_cron_card(content: str) -> dict[str, Any]:
+def build_cron_card(content: str, *, width_mode: str = "default") -> dict[str, Any]:
     """Cron 推送用的极简静态卡片 — schema 2.0，仅 markdown 内容."""
     card: dict[str, Any] = {
         "schema": "2.0",
-        "config": {"locales": _LOCALES},
+        "config": {"locales": _LOCALES, "width_mode": width_mode},
         "body": {"elements": []},
     }
     if not content.strip():
@@ -99,7 +99,7 @@ def build_cron_card(content: str) -> dict[str, Any]:
             card["body"]["elements"].append({"tag": "markdown", "content": chunk})
     return card
 
-def build_gateway_card(content: str, *, category: str = "", status_label: str = "", status_emoji: str = "") -> dict[str, Any]:
+def build_gateway_card(content: str, *, category: str = "", status_label: str = "", status_emoji: str = "", width_mode: str = "default") -> dict[str, Any]:
     """Gateway-internal message card — lightweight, static, no streaming. For slash
     command replies, auth, session, errors. category retained for reaction routing."""
     elements: list[dict] = []
@@ -122,7 +122,7 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
 
     card: dict[str, Any] = {
         "schema": "2.0",
-        "config": {"locales": _LOCALES},
+        "config": {"locales": _LOCALES, "width_mode": width_mode},
         "body": {"elements": elements},
     }
 

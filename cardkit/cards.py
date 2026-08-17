@@ -27,11 +27,35 @@ if TYPE_CHECKING:
 __all__ = [
     'build_streaming_card_v2',
     '_enforce_card_element_limit',
+    '_build_card_header',
 ]
 
 # Feishu Card 2.0 element limit — every JSON object with a ``tag`` key
 # counts toward this limit at all nesting levels.
 _FEISHU_ELEMENT_LIMIT = 200
+
+# ── Card header ──────────────────────────────────────────────────────
+
+_HEADER_STATES: dict[str, dict[str, str]] = {
+    "streaming": {"template": "blue", "i18n_key": "processing_prefix"},
+    "completed": {"template": "green", "i18n_key": "status_completed"},
+    "error": {"template": "red", "i18n_key": "status_error"},
+    "stopped": {"template": "red", "i18n_key": "status_stopped"},
+}
+
+
+def _build_card_header(status: str = "completed") -> dict[str, Any]:
+    """构建卡片级 header — 流式蓝 / 完成绿 / 停止红."""
+    cfg = _HEADER_STATES.get(status, _HEADER_STATES["completed"])
+    en_text, zh_text = _T[cfg["i18n_key"]]
+    return {
+        "title": {
+            "tag": "plain_text",
+            "content": en_text,
+            "i18n_content": _i18n(en_text, zh_text),
+        },
+        "template": cfg["template"],
+    }
 
 _ELEMENT_LIMIT_MARGIN = 5
 
@@ -141,6 +165,8 @@ def build_streaming_card_v2(
     include_unified_panel: bool = True,
     include_loading_hint: bool = True,
     include_answer_element: bool = True,
+    width_mode: str = "default",
+    header_enabled: bool = False,
 ) -> dict[str, Any]:
     """Card lifecycle (v1.0.2+):"""
     elements: list[dict] = []
@@ -163,6 +189,7 @@ def build_streaming_card_v2(
     card: dict[str, Any] = {
         "schema": "2.0",
         "config": {
+            "width_mode": width_mode,
             "streaming_mode": True,
             "streaming_config": {
                 "print_frequency_ms": {"default": 70},
@@ -177,4 +204,6 @@ def build_streaming_card_v2(
         },
         "body": {"elements": elements},
     }
+    if header_enabled:
+        card["header"] = _build_card_header("streaming")
     return card
