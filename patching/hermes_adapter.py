@@ -71,24 +71,44 @@ class HermesCompat:
         except (ImportError, AttributeError):
             _logger.debug("HLS: GatewayRunner not available yet")
         
-        # AIAgent
-        try:
-            from run_agent import AIAgent
-            self.aiagent_class = AIAgent
-            self.run_agent_module = sys.modules.get("run_agent")
-        except (ImportError, AttributeError):
-            _logger.debug("HLS: AIAgent not available yet")
+        # AIAgent — 同 GatewayRunner：sys.modules 优先（避免启动期 import 死锁）
+        # v1.6.2 (from PR #17): run_agent 可能正在初始化中，裸 import 会锁死。
+        _ra_mod = sys.modules.get("run_agent")
+        if _ra_mod is not None:
+            _ai = getattr(_ra_mod, "AIAgent", None)
+            if _ai is not None:
+                self.aiagent_class = _ai
+                self.run_agent_module = _ra_mod
+                _logger.debug("HLS: AIAgent resolved via sys.modules")
+            else:
+                _logger.debug("HLS: run_agent in sys.modules but AIAgent not yet defined")
+        else:
+            # 模块完全未加载时才安全（无 circular 风险）
+            try:
+                from run_agent import AIAgent  # noqa: F401
+                _ra_mod = sys.modules["run_agent"]
+                self.aiagent_class = _ai = getattr(_ra_mod, "AIAgent", None)
+                self.run_agent_module = _ra_mod
+                if self.aiagent_class:
+                    _logger.debug("HLS: AIAgent resolved via import")
+            except (ImportError, AttributeError):
+                _logger.debug("HLS: AIAgent not available yet")
         
         # FeishuAdapter — 抽取到 _resolve_feishu_adapter()，
         # 便于 resolve_feishu_adapter_class_fresh() 复用（v1.4.0: fix deferred loading patch miss）
         self.feishu_adapter_class = self._resolve_feishu_adapter()
         
-        # Cron scheduler
+        # Cron scheduler — sys.modules 优先，避免插件加载期触发 import 死锁
+        # (v1.6.2 from PR #17)
         for mod_name in ("cron.scheduler", "gateway.cron.scheduler"):
+            _mod = sys.modules.get(mod_name)
+            if _mod is not None and hasattr(_mod, "_deliver_result"):
+                self.cron_scheduler_module = _mod
+                break
             try:
-                mod = importlib.import_module(mod_name)
-                if hasattr(mod, "_deliver_result"):
-                    self.cron_scheduler_module = mod
+                _mod = importlib.import_module(mod_name)
+                if hasattr(_mod, "_deliver_result"):
+                    self.cron_scheduler_module = _mod
                     break
             except ImportError:
                 continue
@@ -135,14 +155,12 @@ class HermesCompat:
                 _logger.debug("HLS: conversation_loop resolved via sys.modules")
                 return
         
-        # Strategy 2: Anchor-based discovery
+        # Strategy 2: Anchor-based discovery — 只查 sys.modules，不再触发 import
+        # (v1.6.2 from PR #17: 插件加载期 import_module 会死锁，直接跳过)
         for anchor_name in ("gateway.run", "run_agent"):
             anchor = sys.modules.get(anchor_name)
             if anchor is None:
-                try:
-                    anchor = importlib.import_module(anchor_name)
-                except ImportError:
-                    continue
+                continue
             anchor_file = getattr(anchor, "__file__", None)
             if not anchor_file:
                 continue
