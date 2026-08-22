@@ -1,0 +1,801 @@
+"""StreamCardController — 流式卡片主控制器（单例）.
+
+与 openclaw-lark 对齐：
+- UnavailableGuard 消息不可用保护
+- 修复的 FlushController（wait_for_flush, card_message_ready）
+- TextState 回复边界检测 + reasoning 处理
+- 工具状态预回答更新
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import Callable, Coroutine
+from concurrent.futures import Future as ConcurrentFuture
+from typing import TYPE_CHECKING, Any
+
+from ..config import Config
+from .linear_mixin import LinearControllerMixin
+from .mixin import (
+    _TERMINAL,
+    ABORTED,
+    COMPLETED,
+    COMPLETING,
+    FAILED,
+    IDLE,
+    ControllerMixin,
+)
+from ..feishu import (
+    FeishuClient,
+    FeishuClientConfig,
+)
+from ..state.text import TextState, split_reasoning_text, strip_reasoning_tags
+from ..state.tooluse import ToolUseTracker
+
+_logger = logging.getLogger("hermes_lark_streaming")
+
+
+from ..state.session import CardSession  # noqa: F401 — re-exported for backward compatibility
+
+
+class StreamCardController(ControllerMixin, LinearControllerMixin):
+    """流式卡片控制器 — 管理多条消息的卡片生命周期."""
+
+    def __init__(self) -> None:
+        self._cfg = Config()
+        self._client: FeishuClient | None = None
+        self._sessions: dict[str, CardSession] = {}
+        self._interrupt_map: dict[str, str] = {}
+        self._initialized = False
+        self._init_lock = asyncio.Lock()
+        self._session_ttl = self._cfg.card_duration_sec
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._cfg.enabled and bool(self._cfg.feishu_app_id or self._cfg.env_app_id)
+
+    async def _ensure_init(self) -> None:
+        if self._initialized:
+            return
+        async with self._init_lock:
+            if self._initialized:
+                return
+            app_id = self._cfg.feishu_app_id or self._cfg.env_app_id
+            app_secret = self._cfg.feishu_app_secret or self._cfg.env_app_secret
+            if not app_id or not app_secret:
+                _logger.error(
+                    "FeishuClient init failed: credentials not configured "
+                    "(app_id=%s, env_app_id=%s)",
+                    bool(app_id),
+                    bool(self._cfg.env_app_id),
+                )
+                raise RuntimeError("feishu credentials not configured")
+            self._client = FeishuClient(
+                FeishuClientConfig(
+                    app_id=app_id,
+                    app_secret=app_secret,
+                    base_url=self._cfg.feishu_base_url,
+                )
+            )
+            self._initialized = True
+            _logger.info(
+                "FeishuClient initialized: app_id=%s base_url=%s",
+                app_id[:8] + "..." if len(app_id) > 8 else app_id,
+                self._cfg.feishu_base_url,
+            )
+
+    def _client_ok(self) -> bool:
+        return self._initialized and self._client is not None
+
+    def _get_loop(self) -> asyncio.AbstractEventLoop | None:
+        """获取事件循环，缓存以便跨线程复用."""
+        try:
+            loop = asyncio.get_running_loop()
+            self._loop = loop
+            return loop
+        except RuntimeError:
+            pass
+        if self._loop is not None and not self._loop.is_closed():
+            return self._loop
+        try:
+            loop = asyncio.get_event_loop()
+            self._loop = loop
+            return loop
+        except RuntimeError:
+            return None
+
+    def _get_active_session(self, message_id: str) -> CardSession | None:
+        """获取非终态的活跃 session，不存在或已终态返回 None."""
+        session = self._sessions.get(message_id)
+        if session is None or session.state in _TERMINAL:
+            return None
+        return session
+
+    def _fire_and_forget(self, coro: Coroutine[Any, Any, Any], loop: asyncio.AbstractEventLoop) -> None:
+        try:
+            loop.create_task(coro)
+        except RuntimeError:
+            try:
+                fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                fut.add_done_callback(self._on_bg_task_done)
+            except Exception:
+                _logger.debug("fire_and_forget failed", exc_info=True)
+
+    def on_message_started(
+        self,
+        *,
+        message_id: str | None,
+        chat_id: str,
+        anchor_id: str | None = None,
+    ) -> None:
+        """消息处理开始 — 创建会话 + 发占位卡片."""
+        if not self.enabled:
+            return
+        if not message_id:
+            _logger.warning("on_message_started: missing message_id, chat=%s", chat_id[:12])
+            return
+        if message_id in self._sessions:
+            return
+
+        self._prune_stale_sessions()
+
+        loop = self._get_loop()
+        if loop is None:
+            _logger.warning("no event loop available, skipping: msg=%s", (message_id or "?")[:12])
+            return
+        session = CardSession(message_id, chat_id, loop)
+        self._sessions[message_id] = session
+        if anchor_id and anchor_id != message_id:
+            session.anchor_id = anchor_id
+            self._sessions[anchor_id] = session
+        _logger.info("session created: msg=%s chat=%s anchor=%s", (message_id or "?")[:12], chat_id[:12], (anchor_id or "")[:12])
+
+        if self._cfg.linear:
+            self._fire_and_forget(self._do_create_linear_card(session), loop)
+        else:
+            self._fire_and_forget(self._do_create_card(session), loop)
+
+    def on_thinking(self, *, message_id: str, text: str) -> None:
+        """思考内容增量."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_thinking"):
+            return
+
+        if session.linear and session.unified_state:
+            self._linear_on_thinking(session, text)
+            return
+
+        split = split_reasoning_text(text)
+
+        if split.get("reasoning_text") and not split.get("answer_text"):
+            session.reasoning_text = split["reasoning_text"] or ""
+            session.reasoning_dirty = True
+            if not session.reasoning_start:
+                session.reasoning_start = time.time()
+        elif split.get("answer_text"):
+            if split.get("reasoning_text"):
+                session.reasoning_text = split["reasoning_text"] or ""
+                session.reasoning_dirty = True
+                if not session.reasoning_start:
+                    session.reasoning_start = time.time()
+            # ── Dedup: skip answer text already delivered via stream_delta_callback ──
+            # When streaming is active, answer text arrives via on_answer
+            # (from stream_delta_callback). The interim_assistant_callback also
+            # delivers the same text. Appending it here would duplicate because
+            # session.text.on_partial() appends.
+            # Only push answer text when no streamed answer exists yet
+            # (non-streaming fallback where stream_delta_callback is absent).
+            if not session.text.accumulated:
+                session.text.on_partial(split["answer_text"] or "")
+
+        self._schedule_card_update(session)
+
+    def on_reasoning(self, *, message_id: str, text: str) -> None:
+        """Native model reasoning delta (incremental append)."""
+        if not self.enabled:
+            return
+        if not self._cfg.show_reasoning:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_reasoning"):
+            return
+
+        if session.linear and session.unified_state:
+            session.unified_state.on_reasoning_delta(text)
+            self._schedule_linear_flush(session)
+            return
+
+        if not session.reasoning_start:
+            session.reasoning_start = time.time()
+            _logger.info("reasoning started: msg=%s", (message_id or "?")[:12])
+
+        session.reasoning_text += text
+        session.reasoning_dirty = True
+
+        if session.use_cardkit and session.card_id:
+            self._schedule_reasoning_update(session)
+        else:
+            self._schedule_card_update(session)
+
+    def on_tool_update(
+        self,
+        *,
+        message_id: str,
+        tool_name: str,
+        status: str,
+        detail: str = "",
+    ) -> None:
+        """工具调用事件."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_tool_update"):
+            return
+
+        if status in ("running", "started", "tool.started"):
+            session.tool_use.record_start(tool_name, detail)
+        else:
+            is_error = status in ("error", "failed")
+            session.tool_use.record_end(
+                tool_name,
+                error=detail if is_error else "",
+                output="" if is_error else detail,
+            )
+
+        if session.linear and session.unified_state:
+            is_new_tool = status in ("running", "started", "tool.started")
+            session.unified_state.on_tool_event(is_new_tool=is_new_tool)
+            self._schedule_linear_flush(session)
+            return
+
+        if session.use_cardkit and session.card_id:
+            self._schedule_tool_use_status_update(session)
+        else:
+            self._schedule_card_update(session)
+
+    def on_answer(self, *, message_id: str, text: str) -> None:
+        """答案文本增量（流式）."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_answer"):
+            return
+
+        # ── TTFB: 首字到达时间 ──
+        if session._first_answer_time == 0.0:
+            session._first_answer_time = time.monotonic()
+            _logger.debug(
+                "perf: first_answer msg=%s ttfb=%.0fms",
+                (message_id or "?")[:12],
+                (session._first_answer_time - session.created_at) * 1000,
+            )
+
+        if session.linear and session.unified_state:
+            answer_text = strip_reasoning_tags(text)
+            if answer_text:
+                session.unified_state.on_answer_delta(answer_text)
+                self._schedule_linear_flush(session)
+            return
+
+        split = split_reasoning_text(text)
+        if split.get("reasoning_text"):
+            session.reasoning_text = split["reasoning_text"] or ""
+            if not session.reasoning_start:
+                session.reasoning_start = time.time()
+
+        answer_text = split.get("answer_text") or strip_reasoning_tags(text)
+        if not answer_text:
+            return
+
+        session.text.on_partial(answer_text)
+        self._schedule_card_update(session)
+
+    def on_aborted(self, *, message_id: str) -> None:
+        """用户 /stop 导致消息被中断."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None:
+            return
+
+        session.state = ABORTED
+        session.flush.mark_completed()
+        _logger.info("on_aborted: msg=%s state=ABORTED", (message_id or "?")[:12])
+
+        self._complete_session(session)
+
+    def on_interrupted(
+        self,
+        *,
+        old_message_id: str,
+        new_message_id: str,
+        chat_id: str,
+        anchor_id: str | None = None,
+    ) -> None:
+        """用户发送新消息导致前一条消息被中断 — abort A + create B.
+
+        竞态保护：如果旧 session 正在 _do_linear_flush/_do_linear_split
+        中（flush_in_progress=True），先异步等待当前 flush 完成（带超时），
+        再标记 ABORTED 并封卡，避免并发操作 session.card_id 导致
+        旧卡被封两次或新卡变成孤儿。
+        """
+        if not self.enabled:
+            return
+
+        old_session = self._get_active_session(old_message_id)
+        if old_session is not None:
+            old_session._was_aborted = True
+            old_session.error_message = "Interrupted by new message"
+
+            # ── 竞态保护：等待当前 flush 完成 ──
+            # 如果 session 正在 _do_linear_split 中（已封旧卡、正在创建新卡），
+            # 需要等 split 完成后再标记 ABORTED，否则并发操作 session.card_id
+            # 可能导致：旧卡被封两次 / 新卡变成孤儿 / sequence conflict。
+            if old_session.flush._flush_in_progress:
+                loop = self._get_loop()
+                if loop is not None:
+                    async def _wait_and_abort():
+                        try:
+                            await asyncio.wait_for(
+                                old_session.flush.wait_for_flush(),
+                                timeout=3.0,
+                            )
+                        except (asyncio.TimeoutError, Exception):
+                            _logger.debug(
+                                "on_interrupted: flush wait timed out, proceeding with abort: msg=%s",
+                                old_message_id[:12],
+                            )
+                        old_session.state = ABORTED
+                        old_session.flush.mark_completed()
+                        _logger.info(
+                            "on_interrupted: abort old msg=%s (after flush wait)",
+                            old_message_id[:12],
+                        )
+                        self._complete_session(old_session)
+                    self._fire_and_forget(_wait_and_abort(), loop)
+                else:
+                    # No loop — immediate abort (best effort)
+                    old_session.state = ABORTED
+                    old_session.flush.mark_completed()
+                    _logger.info(
+                        "on_interrupted: abort old msg=%s (no loop, immediate)",
+                        old_message_id[:12],
+                    )
+                    self._complete_session(old_session)
+            else:
+                # No flush in progress — immediate abort
+                old_session.state = ABORTED
+                old_session.flush.mark_completed()
+                _logger.info(
+                    "on_interrupted: abort old msg=%s",
+                    old_message_id[:12],
+                )
+                self._complete_session(old_session)
+
+        if new_message_id not in self._sessions:
+            loop = self._get_loop()
+            if loop is not None:
+                reply_anchor_id = anchor_id if anchor_id and anchor_id != new_message_id else None
+                session = CardSession(new_message_id, chat_id, loop)
+                session.anchor_id = reply_anchor_id
+                self._sessions[new_message_id] = session
+                if reply_anchor_id:
+                    self._sessions[reply_anchor_id] = session
+                _logger.info(
+                    "on_interrupted: create new msg=%s chat=%s anchor=%s",
+                    new_message_id[:12],
+                    chat_id[:12],
+                    (reply_anchor_id or new_message_id)[:12],
+                )
+                if self._cfg.linear:
+                    self._fire_and_forget(self._do_create_linear_card(session), loop)
+                else:
+                    self._fire_and_forget(self._do_create_card(session), loop)
+
+        self._interrupt_map[old_message_id] = new_message_id
+        for key, val in list(self._interrupt_map.items()):
+            if val == old_message_id:
+                self._interrupt_map[key] = new_message_id
+
+    def on_completed(
+        self,
+        *,
+        message_id: str | None,
+        answer: str = "",
+        duration: float = 0.0,
+        model: str = "",
+        tokens: dict | None = None,
+        context: dict | None = None,
+        api_calls: int = 0,
+        history_offset: int = 0,
+        compression_exhausted: bool = False,
+        aborted: bool = False,
+        error_message: str = "",
+        reasoning_tokens: int = 0,
+        estimated_cost_usd: float = 0.0,
+        cost_status: str = "unknown",
+    ) -> bool:
+        """消息处理完成 — 构建终端卡片.
+
+        状态机守卫：hermes 可能双调 on_completed（_process_message_background
+        的 finally + pop_post_delivery_callback），竞态窗口内两次调用会触发
+        300317 sequence 冲突。通过 COMPLETING 状态在 await 之前同步转移，
+        防止双调竞态；300317 错误在 complete 方法中视为幂等成功。
+        """
+        if not self.enabled:
+            return False
+
+        # ── message_id 空值守卫 ──
+        # 部分飞书事件（如系统消息、reaction 等）可能不携带 message_id，
+        # 导致 message_id=None，后续 message_id[:12] 会触发 TypeError。
+        if not message_id:
+            _logger.warning("on_completed: missing message_id, skipping")
+            return False
+
+        # ── 状态机幂等守卫 ──
+        # 先做直接查找（绕过 _TERMINAL 过滤），检查是否已在完成中/已完成。
+        # COMPLETING: 完成流程已启动，另一条路径的 on_completed 正在执行
+        # COMPLETED: 完成流程已结束
+        direct_session = self._sessions.get(message_id)
+        if direct_session is not None and direct_session.state in (COMPLETING, COMPLETED):
+            _logger.info(
+                "on_completed: idempotent, msg=%s state=%s",
+                (message_id or "?")[:12],
+                direct_session.state,
+            )
+            return True
+
+        session = self._get_active_session(message_id)
+        if session is None:
+            redirected_id = self._interrupt_map.pop(message_id, None)
+            if redirected_id is not None:
+                # 也检查重定向的 session 是否已在完成中
+                redir_session = self._sessions.get(redirected_id)
+                if redir_session is not None and redir_session.state in (COMPLETING, COMPLETED):
+                    _logger.info(
+                        "on_completed: idempotent (redirected), msg=%s -> %s state=%s",
+                        (message_id or "?")[:12],
+                        redirected_id[:12],
+                        redir_session.state,
+                    )
+                    return True
+                session = self._get_active_session(redirected_id)
+                _logger.info(
+                    "on_completed: redirect msg=%s -> msg=%s",
+                    (message_id or "?")[:12],
+                    redirected_id[:12],
+                )
+            if session is None:
+                return False
+            message_id = redirected_id or message_id
+
+        # 卡片创建失败 → 交回 gateway 正常回复
+        if session.state == FAILED:
+            _logger.info("on_completed: msg=%s state=FAILED, yielding to gateway", (message_id or "?")[:12])
+            self._cleanup(message_id)
+            return False
+
+        _logger.info(
+            "on_completed: msg=%s has_card=%s state=%s use_cardkit=%s",
+            (message_id or "?")[:12],
+            bool(session.card_msg_id),
+            session.state,
+            session.use_cardkit,
+        )
+
+        if answer:
+            session.text.on_deliver(answer)
+
+        # ── 保存错误/中断消息 ──
+        # 用于在卡片正文中展示（而非仅页脚）
+        if error_message:
+            session.error_message = error_message
+
+        # ── 中断标记 ──
+        # 当 monkey_patch 检测到 interrupted/partial 时传入 aborted=True，
+        # 保存到 _was_aborted 以便完成方法在 COMPLETING 状态下仍能获取该标记。
+        if aborted:
+            session._was_aborted = True
+
+        # ── Fallback: if tokens/context/api_calls are missing/zero, try agent's
+        # session-level accumulators (always populated by conversation_loop).
+        _agent_ref = None
+        try:
+            from .patching import _get_thread_local_ctx
+            _ctx = _get_thread_local_ctx()
+            _agent_ref = (_ctx or {}).get("_agent_ref")
+        except Exception:
+            pass
+        if _agent_ref is not None:
+            try:
+                _sess_in = getattr(_agent_ref, "session_input_tokens", 0) or 0
+                _sess_out = getattr(_agent_ref, "session_output_tokens", 0) or 0
+                _sess_cacr = getattr(_agent_ref, "session_cache_read_tokens", 0) or 0
+                _sess_cacw = getattr(_agent_ref, "session_cache_write_tokens", 0) or 0
+                _sess_apic = getattr(_agent_ref, "session_api_calls", 0) or 0
+                _sess_hist = getattr(_agent_ref, "session_history_offset", 0) or 0
+                # Only overwrite when the source value is missing/zero
+                if tokens:
+                    if not tokens.get("input_tokens") and _sess_in:
+                        tokens["input_tokens"] = _sess_in
+                    if not tokens.get("output_tokens") and _sess_out:
+                        tokens["output_tokens"] = _sess_out
+                    if not tokens.get("cache_read_tokens") and _sess_cacr:
+                        tokens["cache_read_tokens"] = _sess_cacr
+                    if not tokens.get("cache_write_tokens") and _sess_cacw:
+                        tokens["cache_write_tokens"] = _sess_cacw
+                if not api_calls and _sess_apic:
+                    api_calls = _sess_apic
+                if not history_offset and _sess_hist:
+                    history_offset = _sess_hist
+            except Exception as _exc:
+                _logger.warning("FOOTER_DEBUG agent-fallback failed: %r", _exc)
+
+        session.footer = {
+            "duration": duration,
+            "model": model,
+            **({"input_tokens": tokens.get("input_tokens")} if tokens else {}),
+            **({"output_tokens": tokens.get("output_tokens")} if tokens else {}),
+            **({"cache_read_tokens": tokens.get("cache_read_tokens")} if tokens and tokens.get("cache_read_tokens") else {}),
+            **({"cache_write_tokens": tokens.get("cache_write_tokens")} if tokens and tokens.get("cache_write_tokens") else {}),
+            **({"context_used": context.get("used_tokens")} if context else {}),
+            **({"context_max": context.get("max_tokens")} if context else {}),
+            **({"api_calls": api_calls} if api_calls else {}),
+            **({"history_offset": history_offset} if history_offset else {}),
+            **({"compression_exhausted": compression_exhausted} if compression_exhausted else {}),
+            **({"reasoning_tokens": reasoning_tokens} if reasoning_tokens else {}),
+            **({"estimated_cost_usd": estimated_cost_usd} if estimated_cost_usd else {}),
+            **({"cost_status": cost_status} if cost_status and cost_status != "unknown" else {}),
+        }
+
+        # ── 状态转移: → COMPLETING ──
+        # 在 _complete_session 的 await 之前同步设置，防止 hermes 双调竞态。
+        # COMPLETING 不在 _TERMINAL 中：on_answer/on_thinking 等回调在
+        # COMPLETING 期间仍可更新 unified_state（确保迟到的内容不被丢弃），
+        # 但 _schedule_linear_flush 会拒绝调度新 flush（drain 负责排空）。
+        session.state = COMPLETING
+
+        self._complete_session(session)
+        return True
+
+    async def on_cron_deliver_async(
+        self,
+        *,
+        chat_id: str,
+        content: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Cron 推送 — 包装为静态卡片发送，成功返回 True.
+
+        异步版本：直接 await 协程，避免 run_coroutine_threadsafe 在事件循环线程中死锁。
+        """
+        if not self.enabled or not content or not chat_id:
+            return False
+        try:
+            await self._do_cron_deliver(chat_id, content)
+            _logger.info("cron card delivered: chat=%s len=%d", chat_id[:12], len(content))
+            return True
+        except Exception:
+            _logger.warning("cron card delivery failed", exc_info=True)
+            return False
+
+    def on_cron_deliver(
+        self,
+        *,
+        chat_id: str,
+        content: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Cron 推送（同步兼容接口）— 从非事件循环线程调用时使用.
+
+        如果在事件循环线程内调用此方法会导致死锁（最多阻塞 30 秒后超时），
+        请改用 on_cron_deliver_async。
+        """
+        if not self.enabled or not content or not chat_id:
+            return False
+        future = asyncio.run_coroutine_threadsafe(
+            self._do_cron_deliver(chat_id, content), loop
+        )
+        try:
+            future.result(timeout=30)
+            _logger.info("cron card delivered: chat=%s len=%d", chat_id[:12], len(content))
+            return True
+        except Exception:
+            _logger.warning("cron card delivery failed", exc_info=True)
+            return False
+
+    def defer_background_review(
+        self,
+        *,
+        message_id: str,
+        text: str,
+        sender: Callable[[str], Any],
+    ) -> bool:
+        """将后台审查消息推入卡片面板（如果在线性模式），否则暂存等卡片收尾后发送."""
+        if not self.enabled or not text or not callable(sender):
+            return False
+        session = self._get_active_session(message_id)
+        if session is None:
+            return False
+
+        # Try to push into linear state for real-time card display
+        if session.linear and session.unified_state:
+            session.unified_state.on_background_review(text)
+            self._schedule_linear_flush(session)
+            return True  # Consumed by card, suppress plain text
+
+        # Non-linear mode: defer as before
+        with session.deferred_background_review_lock:
+            if session.deferred_background_review_closed:
+                return False
+            session.deferred_background_reviews.append((text, sender))
+        return True
+
+    def _flush_deferred_background_reviews(self, session: CardSession) -> None:
+        lock = getattr(session, "deferred_background_review_lock", None)
+        reviews = getattr(session, "deferred_background_reviews", None)
+        if lock is None or reviews is None:
+            return
+        with lock:
+            session.deferred_background_review_closed = True
+            pending = list(reviews)
+            reviews.clear()
+        for text, sender in pending:
+            try:
+                sender(text)
+            except Exception:
+                _logger.debug("background review sender failed", exc_info=True)
+
+    def _schedule_card_update(self, session: CardSession) -> None:
+        if session.state == IDLE or session.state in _TERMINAL or session.state == COMPLETING:
+            return
+        if session.guard.should_skip("_schedule_card_update"):
+            return
+
+        session.flush.schedule_update(lambda: self._do_update_card(session))
+
+    def _schedule_tool_use_status_update(self, session: CardSession) -> None:
+        if not session.use_cardkit or not session.card_id:
+            return
+        now = time.time()
+        if now - session.last_tool_use_update < 1.5:
+            return
+        session.last_tool_use_update = now
+        session.flush.schedule_update(lambda: self._do_tool_use_status_update(session))
+
+    def _schedule_reasoning_update(self, session: CardSession) -> None:
+        if not session.use_cardkit or not session.card_id:
+            return
+        if not session.reasoning_dirty:
+            return
+        session.flush.schedule_update(lambda: self._do_reasoning_update(session))
+
+    def _cleanup(self, message_id: str) -> None:
+        session = self._sessions.pop(message_id, None)
+        if session is None:
+            return
+        anchor = getattr(session, "anchor_id", None)
+        if anchor and self._sessions.get(anchor) is session:
+            del self._sessions[anchor]
+        stale_keys = [k for k, v in self._interrupt_map.items() if v == message_id]
+        for k in stale_keys:
+            del self._interrupt_map[k]
+        session.flush.mark_completed()
+
+    def _release_session_data(self, session: CardSession) -> None:
+        """完成后释放重数据，仅保留最小元数据供 TTL 追踪.
+
+        在 complete 流程完成后调用，释放 segments、text、tool_use
+        等占用的内存。session 仍保留 message_id、
+        state、created_at 等元数据直到 _cleanup 清除。
+        """
+        session.unified_state = None
+        if session.text is not None:
+            session.text = TextState()  # type: ignore[assignment]
+        session.tool_use = ToolUseTracker()  # type: ignore[assignment]
+        session.reasoning_text = ""
+        session.reasoning_dirty = False
+        session.footer = {}
+
+    def _complete_session(self, session: CardSession) -> None:
+        """根据 session 线性/非线性选择完成路径.
+
+        Note: We intentionally do NOT call session.flush.mark_completed() here.
+        That call cancels any pending flush timer, which would drop the
+        last chunk of answer text that hasn't been flushed yet.  Instead,
+        the completion methods (_do_linear_complete / _do_complete) handle
+        mark_completed() themselves after draining remaining dirty data.
+        """
+        if session.linear and session.unified_state:
+            self._fire_and_forget(self._do_linear_complete_with_fallback(session), session._loop)
+        else:
+            self._fire_and_forget(self._do_complete_with_fallback(session), session._loop)
+
+    async def _do_linear_complete_with_fallback(self, session: CardSession) -> None:
+        """线性模式完成，卡片不可用时回退为文本回复."""
+        try:
+            result = await self._do_linear_complete(session)
+            if not result:
+                await self._send_text_fallback(session)
+        except Exception:
+            _logger.warning(
+                "linear complete with fallback failed: msg=%s",
+                (session.message_id or "?")[:12],
+                exc_info=True,
+            )
+            await self._send_text_fallback(session)
+
+    async def _do_complete_with_fallback(self, session: CardSession) -> None:
+        """非线性模式完成，卡片不可用时回退为文本回复."""
+        try:
+            result = await self._do_complete(session)
+            if not result:
+                await self._send_text_fallback(session)
+        except Exception:
+            _logger.warning(
+                "complete with fallback failed: msg=%s",
+                (session.message_id or "?")[:12],
+                exc_info=True,
+            )
+            await self._send_text_fallback(session)
+
+    async def _send_text_fallback(self, session: CardSession) -> None:
+        """卡片不可用时，通过飞书 API 发送文本回复作为兜底.
+
+        当卡片创建失败或完成流程异常时，网关文本回复已被 card_sent=True 抑制。
+        此方法确保用户至少能看到回复内容，避免"什么都看不到"的情况。
+        """
+        if not self._client:
+            return
+        try:
+            # 优先显示错误消息，其次显示回答内容
+            text = session.error_message or session.text.display_text or ""
+            if not text.strip():
+                return
+            # 限制长度避免过长
+            if len(text) > 4000:
+                text = text[:4000] + "..."
+            from ..cardkit.md import optimize_markdown_style
+            content = optimize_markdown_style(text) or text
+            reply_id = session.anchor_id or session.message_id
+            await self._client.reply_text(reply_id, content)
+            _logger.info(
+                "text fallback sent: msg=%s len=%d",
+                (session.message_id or "?")[:12],
+                len(content),
+            )
+        except Exception:
+            _logger.debug(
+                "text fallback failed: msg=%s",
+                (session.message_id or "?")[:12],
+                exc_info=True,
+            )
+
+    def _prune_stale_sessions(self) -> None:
+        now = time.time()
+        stale = [mid for mid, s in self._sessions.items() if mid is not None and now - s.created_at > self._session_ttl]
+        for mid in stale:
+            _logger.warning("pruning stale session: msg=%s", mid[:12])
+            self._cleanup(mid)
+
+    @staticmethod
+    def _on_bg_task_done(fut: ConcurrentFuture) -> None:
+        try:
+            fut.result()
+        except Exception:
+            _logger.warning("background task failed", exc_info=True)
+
+
+_controller: StreamCardController | None = None
+
+
+def get_controller() -> StreamCardController:
+    global _controller
+    if _controller is None:
+        _controller = StreamCardController()
+    return _controller

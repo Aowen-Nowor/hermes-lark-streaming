@@ -23,19 +23,6 @@ def _wrap_handle_message(orig: Callable) -> Callable:
 
     @functools.wraps(orig)
     async def wrapper(self, event, *args, **kwargs):
-        # v1.6.1-fix: platform guard — only Feishu messages may enter the
-        # Feishu card pipeline. Telegram/Discord/etc. use numeric message ids
-        # that Feishu's CardKit API rejects ("Invalid ids"), which caused card
-        # creation to fail and the reply to degrade into chopped-up plain text.
-        try:
-            _src = getattr(event, "source", None)
-            _p = getattr(_src, "platform", None)
-            _plat = getattr(_p, "value", _p) or ""
-            _plat = str(_plat).lower()
-            if _plat and _plat != "feishu":
-                return await orig(self, event, *args, **kwargs)
-        except Exception:
-            _logger.debug("HLS: platform guard probe failed", exc_info=True)
         # NORMALIZE hook — fires before any message processing
         try:
             from .hooks import on_feishu_normalize
@@ -84,19 +71,6 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
     @functools.wraps(orig)
     async def wrapper(self, event, source, *args, **kwargs):
-        # v1.6.1-fix: platform guard — only Feishu messages may enter the
-        # Feishu card pipeline. Telegram/Discord/etc. use numeric message ids
-        # that Feishu's CardKit API rejects ("Invalid ids"); without this guard
-        # their messages created Feishu cards, the API call failed, and the
-        # reply degraded to chopped-up plain text ("一段一段").
-        try:
-            _p = getattr(source, "platform", None)
-            _plat = getattr(_p, "value", _p) or ""
-            _plat = str(_plat).lower()
-            if _plat and _plat != "feishu":
-                return await orig(self, event, source, *args, **kwargs)
-        except Exception:
-            _logger.debug("HLS: platform guard probe failed", exc_info=True)
         mid = event.message_id
         anchor_id = self._reply_anchor_for_event(event)
         chat_id = source.chat_id if hasattr(source, "chat_id") else ""

@@ -108,6 +108,7 @@ CARDKIT_STREAMING_CLOSED = 300309  # 卡片流式模式已关闭
 CARDKIT_SEQUENCE_CONFLICT = 300317  # sequence 冲突
 CARDKIT_ELEMENT_NOT_FOUND = 300313  # 元素不存在（add_elements 后服务端尚未持久化时的竞态）
 CARDKIT_ELEMENT_NOT_FOUND_ALT = 300314  # delete_elements 不存在的元素
+CARDKIT_OVER_MAX_SIZE = 200860  # 卡片体积超限（card over max size）— 与元素数量超限(300305/11310)不同
 MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
 
 # v1.3.1 fix: 300315 错误码有两种含义：
@@ -135,6 +136,17 @@ def is_element_limit_error(e: "FeishuAPIError") -> bool:
         e.code == CARDKIT_ELEMENT_LIMIT_DIRECT
         or (e.code == CARDKIT_CONTENT_FAILED and e.extract_sub_code() == CARDKIT_ELEMENT_LIMIT)
     )
+
+def is_card_over_max_error(e: "FeishuAPIError") -> bool:
+    """v1.6.2: 判断 FeishuAPIError 是否为卡片体积超限错误 (200860 card over max size).
+
+    此错误表示卡片 JSON 整体超过飞书上限 — 无论重试多少次都不会成功，必须降级。
+    """
+    if e.code == CARDKIT_OVER_MAX_SIZE:
+        return True
+    # 兜底：部分 SDK 版本可能把错误码放在 message 里
+    msg = str(e)
+    return "card over max size" in msg.lower() or "over max size" in msg.lower()
 
 def is_schema_error(e: "FeishuAPIError") -> bool:
     """判断 FeishuAPIError 是否为卡片 Schema 非法属性错误。"""
