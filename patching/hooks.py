@@ -199,7 +199,6 @@ def on_message_interrupted(
         chat_id=chat_id,
         anchor_id=anchor_id,
     )
-
 async def on_cron_deliver(
     *,
     chat_id: str,

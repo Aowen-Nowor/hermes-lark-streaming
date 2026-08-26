@@ -14,6 +14,7 @@ from . import (
     _started_msg_ids_lock,
     _thread_local_ctx,
     _logger,
+    _send_result_ok,
 )
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
@@ -641,7 +642,13 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
             return result
         finally:
             if original_send and adapter:
-                adapter.send = original_send
+                # v1.7.0 (R1-08): restore only what WE installed. With two
+                # concurrent background tasks on one adapter, task A's old
+                # `adapter.send = original_send` clobbered task B's still-live
+                # wrapper mid-flight (B's interception silently died). Only
+                # restore when our wrapper is still the active attribute.
+                if getattr(adapter, "send", None) is _intercepting_send:
+                    adapter.send = original_send
                 # v1.3.2 fix (B3-06): default to 0 (not 1) for consistency —
                 # a counter should never default to 1 when decrementing.
                 adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 0) - 1
@@ -676,6 +683,31 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
             pass
 
         if feishu_adapter is None:
+            # v1.7.0 (P1 RELAY fix): relay-fronted deployment — there is no
+            # native FeishuAdapter in ``adapters`` (the connector process owns
+            # the credentials). Cron cards are handled by the class-level
+            # RelayAdapter.send_for_platform wrapper, which detects hermes'
+            # cron delivery metadata (job_id) and redirects to the cron card
+            # (see patching/adapter.py _dispatch_feishu_outbound). Just log
+            # and pass through to hermes' normal delivery.
+            try:
+                from gateway.config import Platform as _Platform
+
+                _relay = adapters.get(_Platform.RELAY) if adapters else None
+                if (
+                    _relay is not None
+                    and callable(getattr(_relay, "fronts_platform", None))
+                    and _relay.fronts_platform("feishu")
+                ):
+                    _logger.info(
+                        "hermes-lark-streaming v%s: cron delivery on RELAY lane "
+                        "(no native feishu adapter; card redirect happens at "
+                        "RelayAdapter.send_for_platform, job=%s)",
+                        __version__,
+                        job.get("id", "?")[:12],
+                    )
+            except Exception:
+                _logger.debug("HLS: relay lane detection failed", exc_info=True)
             return orig(job, content, adapters=adapters, loop=loop, **kwargs)
 
         _logger.info(
@@ -712,13 +744,16 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
                     )
                     # Return a success result so the original _deliver_result
                     # thinks the send succeeded
-                    try:
-                        from gateway.platforms.base import SendResult
-                        return SendResult(success=True)
-                    except (ImportError, AttributeError):
-                        return None
+                    return _send_result_ok()
             except Exception:
-                pass
+                # v1.7.0: was a bare `pass` — a failed cron card silently fell
+                # back to plain text with zero log evidence.
+                _logger.warning(
+                    "cron _card_sending_send: card delivery failed, falling "
+                    "back to plain text chat=%s",
+                    (chat_id or "?")[:12],
+                    exc_info=True,
+                )
 
             # Fallback: send plain text via the original adapter
             return await original_send(chat_id, content, **send_kwargs)
@@ -729,7 +764,11 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
         try:
             return orig(job, content, adapters=adapters, loop=loop, **kwargs)
         finally:
-            feishu_adapter.send = original_send
+            # v1.7.0 (R1-08): same conditional-restore as the bg-task wrapper —
+            # concurrent cron deliveries on one adapter must not clobber each
+            # other's interception.
+            if getattr(feishu_adapter, "send", None) is _card_sending_send:
+                feishu_adapter.send = original_send
             # v1.3.2 fix (B3-06): default to 0 (not 1) for consistency.
             feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 0) - 1
 

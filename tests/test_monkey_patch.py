@@ -271,13 +271,13 @@ class TestImageInterception:
         """_wrap_feishu_adapter_send_image_file was deleted (2026-06-09 zombie cleanup)."""
         import pytest
         with pytest.raises(ImportError):
-            from hermes_lark_streaming.patching import _wrap_feishu_adapter_send_image_file
+            from hermes_lark_streaming.patching.adapter import _dispatch_feishu_outbound_image_file
 
     def test_send_image_wrapper_deleted(self) -> None:
         """_wrap_feishu_adapter_send_image was deleted (2026-06-09 zombie cleanup)."""
         import pytest
         with pytest.raises(ImportError):
-            from hermes_lark_streaming.patching import _wrap_feishu_adapter_send_image
+            from hermes_lark_streaming.patching.adapter import _dispatch_feishu_outbound_image
 
     def test_send_image_file_not_monkey_patched(self) -> None:
         """v0.15.4: send_image_file should NOT be monkey-patched anymore.
@@ -312,17 +312,19 @@ class TestImageInterception:
         is passed through as standalone messages — the only code path for
         non-string content is to call orig_send directly.
         """
-        from hermes_lark_streaming.patching import _wrap_feishu_adapter_send
+        from hermes_lark_streaming.patching.adapter import _dispatch_feishu_outbound
         import inspect
 
-        source = inspect.getsource(_wrap_feishu_adapter_send)
+        source = inspect.getsource(_dispatch_feishu_outbound)
         # Find the "not isinstance(content, str)" block
         # After the fix, non-string content should have a single return path
         # to orig_send, without any card_sent checks or suppression logic.
         assert "not isinstance(content, str)" in source, \
             "Non-string content check not found in _wrap_feishu_adapter_send"
-        # The non-string block should return orig_send directly
+        # The non-string block should pass through directly
         # (not via a SendResult suppression or _try_add_image_to_session)
+        # v1.7.0: orig_send calls became passthrough() closures after the
+        # relay-mode refactor (_dispatch_feishu_outbound).
         lines = source.split('\n')
         in_non_string_block = False
         found_orig_send_in_block = False
@@ -330,7 +332,7 @@ class TestImageInterception:
             if 'not isinstance(content, str)' in line:
                 in_non_string_block = True
             elif in_non_string_block:
-                if 'orig_send' in line:
+                if 'passthrough()' in line or 'orig_send' in line:
                     found_orig_send_in_block = True
                     break
                 # If we hit the string content section, stop
@@ -367,10 +369,10 @@ class TestCardSessionExistenceCheck:
 
     def test_card_session_existence_check_in_feishu_adapter_send(self) -> None:
         """_wrap_feishu_adapter_send should check controller._sessions when card_sent=False."""
-        from hermes_lark_streaming.patching import _wrap_feishu_adapter_send
+        from hermes_lark_streaming.patching.adapter import _dispatch_feishu_outbound
         import inspect
 
-        source = inspect.getsource(_wrap_feishu_adapter_send)
+        source = inspect.getsource(_dispatch_feishu_outbound)
         # The fix adds a check in the Agent path when card_sent is False:
         # query controller session store for a session with card_msg_id.
         # v1.3.0: access changed from direct _sessions.get to thread-safe _sess_get.
@@ -379,10 +381,10 @@ class TestCardSessionExistenceCheck:
 
     def test_feishu_adapter_send_session_check_sets_card_sent(self) -> None:
         """When a card session is found, card_sent should be set to True."""
-        from hermes_lark_streaming.patching import _wrap_feishu_adapter_send
+        from hermes_lark_streaming.patching.adapter import _dispatch_feishu_outbound
         import inspect
 
-        source = inspect.getsource(_wrap_feishu_adapter_send)
+        source = inspect.getsource(_dispatch_feishu_outbound)
         # In the agent path, after finding a session with card_msg_id,
         # the fix sets ctx["card_sent"] = True and returns SendResult(success=True)
         lines = source.split('\n')

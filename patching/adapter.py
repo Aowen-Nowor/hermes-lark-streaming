@@ -16,6 +16,7 @@ from . import (
     _logger,
     _get_config,
     _patched_feishu_classes,
+    _send_result_ok,
 )
 
 # ── FeishuAdapter interception layer (Phase 1: gateway message cards) ─
@@ -38,182 +39,325 @@ def _classify_gateway_message(content: str) -> str:
         return "slash"
     return "system"
 
+def _is_cron_delivery_metadata(metadata: Any) -> bool:
+    """Detect hermes cron delivery — cron/scheduler.py stamps ``job_id`` into
+    the delivery metadata (route_metadata = {"job_id": ...}), which survives
+    through DeliveryRouter._deliver_to_platform → transport.send → adapter."""
+    return isinstance(metadata, dict) and bool(metadata.get("job_id"))
+
+
+async def _dispatch_feishu_outbound(
+    adapter: Any,
+    chat_id: str,
+    content,
+    passthrough: Callable[[], Any],
+    *,
+    metadata: Any = None,
+):
+    """Shared interception for ALL feishu-bound plain-text sends (v1.7.0).
+
+    Used by the native FeishuAdapter.send wrapper AND the RELAY wrappers
+    (RelayAdapter.send / send_for_platform) so relay-fronted deployments get
+    identical behavior: turn-final suppression, /stop detection, cron cards,
+    gateway message cards. ``passthrough`` invokes the original send with the
+    original arguments (built by the caller as a closure).
+    """
+    # ── EphemeralReply passthrough (v1.3.1 fix) ──
+    # NOT duplicate agent replies. They must NEVER be suppressed by the
+    try:
+        from gateway.platforms.base import EphemeralReply
+        if isinstance(content, EphemeralReply):
+            return await passthrough()
+    except (ImportError, AttributeError):
+        pass  # EphemeralReply not available in this Hermes version
+
+    if not isinstance(content, str):
+        return await passthrough()
+
+    # ── Guard: skip empty content ──
+    if not content.strip():
+        return await passthrough()
+
+    _text_content = content
+
+    if getattr(adapter, "_hls_cron_sending", 0) or getattr(adapter, "_hls_bg_sending", 0):
+        return await passthrough()
+
+    # ── Cron delivery lane (v1.7.0 RELAY fix, P1) ──
+    # In relay-fronted deployments _wrap_cron_deliver finds no native
+    # FeishuAdapter in ``adapters`` (the connector owns the credentials), so
+    # cron pushes arrive HERE via RelayAdapter.send_for_platform carrying
+    # hermes' delivery metadata (job_id). Route them to the cron card exactly
+    # like the native-mode instance replacement does. Must run BEFORE the
+    # agent-ctx check: a cron push during an active agent turn must never be
+    # mistaken for that turn's text reply.
+    if _is_cron_delivery_metadata(metadata):
+        try:
+            from ..controller import get_controller
+            _ctrl = get_controller()
+            if _ctrl and _ctrl.enabled and str(content).strip():
+                _logger.info(
+                    "hermes-lark-streaming v%s: relay cron lane — redirecting "
+                    "cron delivery to card, chat=%s job=%s content_len=%d",
+                    __version__,
+                    (chat_id or "?")[:12],
+                    str(metadata.get("job_id"))[:12],
+                    len(content),
+                )
+                await _ctrl._do_cron_deliver(chat_id, str(content).strip())
+                return _send_result_ok()
+        except Exception:
+            _logger.warning(
+                "relay cron card delivery failed, falling back to plain text "
+                "chat=%s",
+                (chat_id or "?")[:12],
+                exc_info=True,
+            )
+        # cron card failed → fall through to plain-text passthrough below
+
+    # ── Agent path: suppress duplicate text reply ──
+    ctx = _msg_ctx.get(None)
+    if ctx is not None:
+        eid = ctx.get("event_message_id", "")
+        if eid:
+            # We're inside an agent message pipeline.
+            # If card was already sent, suppress the gateway's text reply.
+            if ctx.get("card_sent"):
+                return _send_result_ok()
+            else:
+                try:
+                    from ..controller import get_controller
+                    _ctrl = get_controller()
+                    if _ctrl and _ctrl.enabled:
+                        _sess = _ctrl._sess_get(eid)
+                        if _sess and _sess.card_msg_id:
+                            _logger.info(
+                                "feishu_adapter_send: suppressing text reply "
+                                "(card exists for msg=%s, state=%s, card_sent=%s)",
+                                eid[:12], _sess.state, ctx.get("card_sent"),
+                            )
+                            ctx["card_sent"] = True
+                            return _send_result_ok()
+                except Exception:
+                    _logger.debug("HLS: suppressed exception", exc_info=True)
+                # Agent still running, card not yet sent — don't interfere
+                return await passthrough()
+
+    # v1.3.2 fix (B3-04): the previous detection used a bare substring
+    # v1.7.0 (R3-07): keyword set + length aligned with the hermes locale
+    # contract (locales/{zh,en}.yaml stop.*: "⚡ 已停止。你可以继续此会话。" /
+    # "⚡ Stopped. You can continue this session.") and broadened
+    # defensively so a locale tweak degrades to a duplicate gateway card
+    # instead of silently breaking /stop card aborts.
+    _stripped = content.strip()
+    _is_stop_response = (
+        len(_stripped) < 80  # /stop responses stay short (headroom for locales)
+        and _stripped.startswith("⚡")
+        and any(
+            kw in _stripped
+            for kw in ("已停止", "已中断", "stopped", "Stopped", "Interrupted")
+        )
+    )
+    if _is_stop_response:
+        try:
+            from ..controller import get_controller
+            _ctrl = get_controller()
+            if _ctrl and _ctrl.enabled:
+                # Find an active streaming session in this chat
+                for _sess in _ctrl._sess_values_snapshot():
+                    if (
+                        _sess.chat_id == chat_id
+                        and _sess.state in ("streaming", "creating", "idle")
+                        and _sess.card_msg_id
+                    ):
+                        _logger.info(
+                            "gateway_send: /stop response detected, aborting "
+                            "streaming card for msg=%s (state=%s)",
+                            (_sess.message_id or "?")[:12],
+                            _sess.state,
+                        )
+                        try:
+                            from .hooks import on_message_aborted
+                            on_message_aborted(message_id=_sess.message_id)
+                        except Exception:
+                            _logger.debug("HLS: suppressed exception", exc_info=True)
+                        # Suppress the "⚡ 已停止" gateway card —
+                        # the streaming card will show the stopped state.
+                        return _send_result_ok()
+        except Exception:
+            _logger.debug("HLS: suppressed exception", exc_info=True)
+    _logger.info(
+        "gateway_send: entering gateway-internal path, chat=%s content_len=%d",
+        chat_id[:12] if chat_id else "?",
+        len(content),
+    )
+    try:
+        from ..controller import get_controller
+        ctrl = get_controller()
+        if ctrl and ctrl.enabled:
+            # Check if gateway_cards feature is enabled
+            cfg = _get_config()
+            if not cfg.gateway_cards:
+                _logger.info("gateway_send: gateway_cards disabled, falling back to plain text")
+                return await passthrough()
+
+            cleaned = _text_content
+            if not cleaned.strip():
+                cleaned = content
+            if not cleaned.strip():
+                return await passthrough()
+
+            category = _classify_gateway_message(cleaned or content)
+            card_msg_id, card_id = await ctrl._do_gateway_deliver(
+                chat_id, cleaned.strip() if cleaned.strip() else content,
+                category=category,
+            )
+            if card_msg_id:
+                # Register the card so edit_message can update it later
+                _register_gateway_card(
+                    card_msg_id,
+                    chat_id=chat_id,
+                    card_id=card_id,
+                    category=category,
+                )
+                _logger.info(
+                    "hermes-lark-streaming v%s: gateway message card sent: "
+                    "chat=%s category=%s content_len=%d card_id=%s",
+                    __version__,
+                    chat_id[:12] if chat_id else "?",
+                    category,
+                    len(content),
+                    (card_id or "?")[:12],
+                )
+                return _send_result_ok(card_msg_id)
+        else:
+            _logger.info(
+                "gateway_send: controller not enabled (ctrl=%s), falling back to plain text",
+                bool(ctrl),
+            )
+    except Exception:
+        _logger.info(
+            "hermes-lark-streaming v%s: gateway card delivery failed, "
+            "falling back to plain text",
+            __version__,
+            exc_info=True,
+        )
+
+    # ── Fallback: original plain text send ──
+    _logger.info(
+        "gateway_send: plain text fallback, chat=%s content_len=%d",
+        chat_id[:12] if chat_id else "?",
+        len(content),
+    )
+    return await passthrough()
+
+
 def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
-    """Intercept ``FeishuAdapter.send()`` — convert text to gateway cards."""
+    """Intercept ``FeishuAdapter.send()`` — convert text to gateway cards.
+
+    v1.7.0: interception body moved to _dispatch_feishu_outbound (shared
+    with the RELAY wrappers). This wrapper binds the original method.
+    """
     async def _intercepted_send(self_feishu, chat_id, content, reply_to=None, metadata=None, **kwargs):
         # On-demand repatch: if this adapter instance's class isn't patched yet
-        # (deferred loading edge case), patch it now. O(1) set lookup.
+        # (deferred loading edge case), patch it now. O(1) lookup.
+        # v1.7.0 (R1-06): sentinel attr is the PRIMARY check — id() values can
+        # be reused after GC (hot module reload), which previously made the
+        # dedupe set skip a fresh class. The id set stays as a mirror for
+        # compatibility with existing tests.
         _cls = type(self_feishu)
-        if id(_cls) not in _patched_feishu_classes:
+        if not getattr(_cls, "_hls_patched", False) and id(_cls) not in _patched_feishu_classes:
             from . import _apply_feishu_adapter_patches
             _apply_feishu_adapter_patches(_cls, is_repatch=True)
 
-        # ── EphemeralReply passthrough (v1.3.1 fix) ──
-        # NOT duplicate agent replies. They must NEVER be suppressed by the
-        try:
-            from gateway.platforms.base import EphemeralReply
-            if isinstance(content, EphemeralReply):
-                return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
-        except (ImportError, AttributeError):
-            pass  # EphemeralReply not available in this Hermes version
-
-        if not isinstance(content, str):
-            return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
-
-        # ── Guard: skip empty content ──
-        if not content.strip():
-            return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
-
-        _text_content = content
-
-        if getattr(self_feishu, "_hls_cron_sending", 0) or getattr(self_feishu, "_hls_bg_sending", 0):
-            return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
-
-        # ── Agent path: suppress duplicate text reply ──
-        ctx = _msg_ctx.get(None)
-        if ctx is not None:
-            eid = ctx.get("event_message_id", "")
-            if eid:
-                # We're inside an agent message pipeline.
-                # If card was already sent, suppress the gateway's text reply.
-                if ctx.get("card_sent"):
-                    try:
-                        from gateway.platforms.base import SendResult
-                        return SendResult(success=True)
-                    except (ImportError, AttributeError):
-                        return None
-                else:
-                    try:
-                        from ..controller import get_controller
-                        _ctrl = get_controller()
-                        if _ctrl and _ctrl.enabled:
-                            _sess = _ctrl._sess_get(eid)
-                            if _sess and _sess.card_msg_id:
-                                _logger.info(
-                                    "feishu_adapter_send: suppressing text reply "
-                                    "(card exists for msg=%s, state=%s, card_sent=%s)",
-                                    eid[:12], _sess.state, ctx.get("card_sent"),
-                                )
-                                ctx["card_sent"] = True
-                                try:
-                                    from gateway.platforms.base import SendResult
-                                    return SendResult(success=True)
-                                except (ImportError, AttributeError):
-                                    return None
-                    except Exception:
-                        _logger.debug("HLS: suppressed exception", exc_info=True)
-                    # Agent still running, card not yet sent — don't interfere
-                    return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
-
-        # v1.3.2 fix (B3-04): the previous detection used a bare substring
-        _stripped = content.strip()
-        _is_stop_response = (
-            len(_stripped) < 50  # /stop response is always short
-            and _stripped.startswith("⚡")
-            and any(kw in _stripped for kw in ("已停止", "stopped", "Stopped"))
+        return await _dispatch_feishu_outbound(
+            self_feishu,
+            chat_id,
+            content,
+            lambda: orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs),
+            metadata=metadata,
         )
-        if _is_stop_response:
-            try:
-                from ..controller import get_controller
-                _ctrl = get_controller()
-                if _ctrl and _ctrl.enabled:
-                    # Find an active streaming session in this chat
-                    for _sess in _ctrl._sess_values_snapshot():
-                        if (
-                            _sess.chat_id == chat_id
-                            and _sess.state in ("streaming", "creating", "idle")
-                            and _sess.card_msg_id
-                        ):
-                            _logger.info(
-                                "gateway_send: /stop response detected, aborting "
-                                "streaming card for msg=%s (state=%s)",
-                                (_sess.message_id or "?")[:12],
-                                _sess.state,
-                            )
-                            try:
-                                from .hooks import on_message_aborted
-                                on_message_aborted(message_id=_sess.message_id)
-                            except Exception:
-                                _logger.debug("HLS: suppressed exception", exc_info=True)
-                            # Suppress the "⚡ 已停止" gateway card —
-                            # the streaming card will show the stopped state.
-                            try:
-                                from gateway.platforms.base import SendResult
-                                return SendResult(success=True)
-                            except (ImportError, AttributeError):
-                                return None
-            except Exception:
-                _logger.debug("HLS: suppressed exception", exc_info=True)
-        _logger.info(
-            "gateway_send: entering gateway-internal path, chat=%s content_len=%d",
-            chat_id[:12] if chat_id else "?",
-            len(content),
-        )
-        try:
-            from ..controller import get_controller
-            ctrl = get_controller()
-            if ctrl and ctrl.enabled:
-                # Check if gateway_cards feature is enabled
-                cfg = _get_config()
-                if not cfg.gateway_cards:
-                    _logger.info("gateway_send: gateway_cards disabled, falling back to plain text")
-                    return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
-
-                cleaned = _text_content
-                if not cleaned.strip():
-                    cleaned = content
-                if not cleaned.strip():
-                    return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
-
-                category = _classify_gateway_message(cleaned or content)
-                card_msg_id, card_id = await ctrl._do_gateway_deliver(
-                    chat_id, cleaned.strip() if cleaned.strip() else content,
-                    category=category,
-                )
-                if card_msg_id:
-                    # Register the card so edit_message can update it later
-                    _register_gateway_card(
-                        card_msg_id,
-                        chat_id=chat_id,
-                        card_id=card_id,
-                        category=category,
-                    )
-                    _logger.info(
-                        "hermes-lark-streaming v%s: gateway message card sent: "
-                        "chat=%s category=%s content_len=%d card_id=%s",
-                        __version__,
-                        chat_id[:12] if chat_id else "?",
-                        category,
-                        len(content),
-                        (card_id or "?")[:12],
-                    )
-                    try:
-                        from gateway.platforms.base import SendResult
-                        return SendResult(success=True, message_id=card_msg_id)
-                    except (ImportError, AttributeError):
-                        return None
-            else:
-                _logger.info(
-                    "gateway_send: controller not enabled (ctrl=%s), falling back to plain text",
-                    bool(ctrl),
-                )
-        except Exception:
-            _logger.info(
-                "hermes-lark-streaming v%s: gateway card delivery failed, "
-                "falling back to plain text",
-                __version__,
-                exc_info=True,
-            )
-
-        # ── Fallback: original plain text send ──
-        _logger.info(
-            "gateway_send: plain text fallback, chat=%s content_len=%d",
-            chat_id[:12] if chat_id else "?",
-            len(content),
-        )
-        return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
-
     return _intercepted_send
+
+
+# ── RELAY mode (v1.7.0): relay-fronted Feishu deployments ──────────
+#
+# hermes v0.20.5 can front Feishu through a RelayAdapter: the connector
+# process owns the Feishu credentials and the gateway holds none, so
+# ``adapters`` has NO Feishu entry and every Feishu-bound send flows through
+# the single RelayAdapter instance:
+#   * interactive / follow-up finals → RelayAdapter.send() (platform learned
+#     from inbound traffic via _platform_by_chat, or forced via metadata
+#     key "_relay_logical_platform")
+#   * cron / scheduled / persisted-home lane → DeliveryTransport.send() →
+#     RelayAdapter.send_for_platform(logical_platform, ...) with the platform
+#     as an explicit argument (gateway/delivery.py:83)
+# The plugin's FeishuAdapter patches never fire in that deployment — cron
+# pushes degraded to plain text and gateway-internal messages lost their
+# cards. These wrappers route Feishu-bound relay sends through the SAME
+# _dispatch_feishu_outbound logic (P1 RELAY fix).
+
+def _resolve_relay_logical_platform(adapter: Any, chat_id: Any, metadata: Any) -> str:
+    """Best-effort logical platform for one relay send ("" when unknown)."""
+    if isinstance(metadata, dict):
+        explicit = metadata.get("_relay_logical_platform")
+        if explicit:
+            return str(getattr(explicit, "value", explicit)).lower()
+    platform_map = getattr(adapter, "_platform_by_chat", None)
+    if isinstance(platform_map, dict):
+        return str(platform_map.get(str(chat_id), "") or "").lower()
+    return ""
+
+
+def _is_relay_interim_send(metadata: Any) -> bool:
+    """Consumer-declared interim send (commentary / tail flush) — NOT the
+    turn-final. Same posture as native mode's "agent still running"
+    passthrough: never convert interim frames into cards."""
+    return isinstance(metadata, dict) and bool(metadata.get("_interim_send"))
+
+
+def _wrap_relay_adapter_send(orig_send: Callable) -> Callable:
+    """Intercept ``RelayAdapter.send()`` for relay-fronted Feishu chats."""
+    async def _intercepted_relay_send(self_relay, chat_id, content, reply_to=None, metadata=None, **kwargs):
+        try:
+            _platform = _resolve_relay_logical_platform(self_relay, chat_id, metadata)
+        except Exception:
+            _platform = ""
+        if _platform not in ("feishu", "lark"):
+            # Relay fronts N platforms — anything not Feishu/Lark passes through.
+            return await orig_send(self_relay, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
+        if _is_relay_interim_send(metadata):
+            return await orig_send(self_relay, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
+        _logger.debug(
+            "relay_send: feishu-bound relay send intercepted chat=%s content_len=%d",
+            (chat_id or "?")[:12], len(content) if isinstance(content, str) else -1,
+        )
+        return await _dispatch_feishu_outbound(
+            self_relay,
+            chat_id,
+            content,
+            lambda: orig_send(self_relay, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs),
+            metadata=metadata,
+        )
+    return _intercepted_relay_send
+
+
+def _wrap_relay_adapter_send_for_platform(orig_sfp: Callable) -> Callable:
+    """Intercept ``RelayAdapter.send_for_platform()`` — cron/scheduled lane."""
+    async def _intercepted_relay_sfp(self_relay, logical_platform, chat_id, content, reply_to=None, metadata=None, **kwargs):
+        _platform_value = getattr(logical_platform, "value", logical_platform)
+        if str(_platform_value or "").lower() not in ("feishu", "lark"):
+            return await orig_sfp(self_relay, logical_platform, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
+        if _is_relay_interim_send(metadata):
+            return await orig_sfp(self_relay, logical_platform, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
+        return await _dispatch_feishu_outbound(
+            self_relay,
+            chat_id,
+            content,
+            lambda: orig_sfp(self_relay, logical_platform, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs),
+            metadata=metadata,
+        )
+    return _intercepted_relay_sfp
 
 def _register_gateway_card(card_msg_id: str, *, chat_id: str, card_id: str | None, category: str) -> None:
     """Register a gateway card so edit_message can update it later."""
@@ -298,7 +442,13 @@ def _wrap_feishu_adapter_edit(orig_edit: Callable) -> Callable:
 
 # ── Reaction → card status indicator (Phase 3) ─────────────────────
 
-# Map Feishu reaction emojis to human-readable status labels
+# Map Feishu reaction emoji codes to human-readable status labels.
+# Two spelling families exist across hermes revisions:
+#   * unicode emoji (older revisions)
+#   * Feishu-internal codes "Typing" / "CrossMark" (hermes v0.20.5,
+#     plugins/platforms/feishu/adapter.py _FEISHU_REACTION_IN_PROGRESS /
+#     _FEISHU_REACTION_FAILURE) — v1.7.0 added: the unicode keys never
+#     matched those, so the card-status feature could not fire at all.
 _REACTION_STATUS_MAP: dict[str, str] = {
     "👀": "Reading",
     "👍": "Done",
@@ -307,6 +457,8 @@ _REACTION_STATUS_MAP: dict[str, str] = {
     "✅": "Completed",
     "🔄": "Refreshing",
     "📝": "Composing",
+    "Typing": "Processing",
+    "CrossMark": "Error",
 }
 
 def _wrap_feishu_adapter_add_reaction(orig_add_reaction: Callable) -> Callable:
@@ -663,15 +815,19 @@ async def _schedule_confirm_card(*, cid: str) -> None:
             (cid or "?")[:12],
             (card_msg_id or "?")[:12],
         )
+        # v1.7.0 (R3-05): cleanup ONLY after a successful confirm update. The
+        # submitted card (with its retry button) is still showing when
+        # update_card fails — keeping _clarify_selections alive means the
+        # retry button keeps working instead of silently dying; TTL pruning
+        # (_CLARIFY_TTL_SEC) reaps anything left over.
+        _cleanup()
     except Exception:
         _logger.warning(
-            "clarify card: server-side confirm update failed for clarify_id=%s",
+            "clarify card: server-side confirm update failed for clarify_id=%s "
+            "(stored selection KEPT so the retry button still works)",
             (cid or "?")[:12],
             exc_info=True,
         )
-    finally:
-        # Always cleanup stored data after confirm attempt
-        _cleanup()
 
 def _handle_clarify_card_action(
     adapter_instance,
@@ -697,9 +853,13 @@ def _handle_clarify_card_action(
         if P2CardActionTriggerResponse is None or CallBackCard is None:
             return _empty_response()
         from ..cardkit import build_clarify_submitted_card
+        # v1.7.0: build_clarify_submitted_card has NO `choices` parameter —
+        # the old call passed one and raised TypeError on EVERY clarify
+        # select/input/retry action (caught + logged upstream, but the
+        # submitted-state response was never built and the log noise made
+        # every clarify click look like a failure).
         card_data = build_clarify_submitted_card(
-            question=q, selected=selected_text,
-            choices=choices_list, clarify_id=cid,
+            question=q, selected=selected_text, clarify_id=cid,
         )
         response = P2CardActionTriggerResponse()
         card = CallBackCard()
@@ -720,17 +880,31 @@ def _handle_clarify_card_action(
     )
 
     # ── Authorization check ──
+    # v1.7.0 (R3-06): fail-closed. Previously an adapter without the
+    # _is_interactive_operator_authorized method (old hermes) fell straight
+    # through, letting ANY group member click clarify cards as the original
+    # author. hermes v0.20.5 ships the method
+    # (plugins/platforms/feishu/adapter.py:2771) so the closed path only
+    # affects genuinely old installs.
     event = getattr(data, "event", None)
     operator = getattr(event, "operator", None)
     open_id = str(getattr(operator, "open_id", "") or "")
-    if hasattr(adapter_instance, "_is_interactive_operator_authorized"):
-        if not adapter_instance._is_interactive_operator_authorized(open_id):
-            _logger.warning(
-                "clarify card: unauthorized click by %s for clarify_id=%s",
-                open_id or "<unknown>",
-                (clarify_id or "?")[:12],
-            )
-            return _empty_response()
+    _authz = getattr(adapter_instance, "_is_interactive_operator_authorized", None)
+    if not callable(_authz):
+        _logger.warning(
+            "clarify card: adapter lacks _is_interactive_operator_authorized "
+            "(old hermes?) — failing CLOSED for clarify_id=%s operator=%s",
+            (clarify_id or "?")[:12],
+            open_id or "<unknown>",
+        )
+        return _empty_response()
+    if not _authz(open_id):
+        _logger.warning(
+            "clarify card: unauthorized click by %s for clarify_id=%s",
+            open_id or "<unknown>",
+            (clarify_id or "?")[:12],
+        )
+        return _empty_response()
 
     # v1.3.0: snapshot question + choices atomically (used by all action branches)
     with _clarify_lock:
@@ -794,12 +968,23 @@ def _handle_clarify_card_action(
         # Predefined choice selected → resolve
         with _clarify_lock:
             choices_list = list(_clarify_choices.get(clarify_id, []))
+        # v1.7.0 (R3-09): the option VALUE contract is owned by
+        # cardkit/special.py ("value": str(i) — plain index strings). Parse
+        # defensively: accept an index string first, then an exact
+        # choice-text match, so a future value-format change degrades to a
+        # text lookup instead of silently swallowing the user's click.
+        choice_text = ""
         try:
-            idx = int(selected_option)
-            choice_text = choices_list[idx]
-        except (ValueError, IndexError):
+            _idx = int(selected_option)
+            if 0 <= _idx < len(choices_list):
+                choice_text = choices_list[_idx]
+        except (ValueError, TypeError):
+            choice_text = ""
+        if not choice_text and selected_option and selected_option in choices_list:
+            choice_text = selected_option
+        if not choice_text:
             _logger.warning(
-                "clarify card: invalid option index '%s' for clarify_id=%s (choices=%s)",
+                "clarify card: invalid option value '%s' for clarify_id=%s (choices=%s)",
                 selected_option,
                 (clarify_id or "?")[:12],
                 choices_list,

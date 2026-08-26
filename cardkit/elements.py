@@ -46,6 +46,7 @@ __all__ = [
     'build_panel_header',
     'build_panel_children',
     '_count_tag_objects',
+    '_is_collapse_hint_child',
 ]
 
 _IMG_MD_PATTERN = re.compile(r"!\[([^\]]*)\]\((img_[^)\s]+)\)")
@@ -244,12 +245,30 @@ def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = 
 
 _REASONING_DISPLAY_LIMIT = 2000  # 单条推理文本最大显示字数
 
+def _is_collapse_hint_child(child: Any) -> bool:
+    """Whether a panel child is the collapsed-items hint (bilingual-safe).
+
+    Matches BOTH hint spellings — the seal format ("⚡ 还有 N 项已折叠" /
+    "⚡ N items collapsed") and the panel-builder format ("⚡ 还有 X 轮早期推理、
+    Y 步早期操作已折叠"). Length-guarded so a real reasoning round that merely
+    mentions collapse words is never mistaken for the hint.
+    """
+    if not isinstance(child, dict):
+        return False
+    content = child.get("content", "")
+    if not isinstance(content, str) or not content.startswith("⚡") or len(content) > 80:
+        return False
+    return "已折叠" in content or "collapse" in content.lower()
+
 def _truncate_reasoning(text: str) -> str:
     """截断过长推理文本至 _REASONING_DISPLAY_LIMIT."""
     if len(text) <= _REASONING_DISPLAY_LIMIT:
         return text
-    suffix = "\n\n... (已截断，共 {} 字)".format(len(text))
-    return text[:_REASONING_DISPLAY_LIMIT - len(suffix)] + suffix
+    # v1.7.0 (R4): suffix was zh-hardcoded ("已截断，共 N 字") — bilingual now.
+    en_suffix, zh_suffix = _T["truncated_suffix"]
+    suffix = zh_suffix.format(len(text))
+    truncated = text[:_REASONING_DISPLAY_LIMIT - len(suffix)] + suffix
+    return truncated
 
 def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], show_reasoning: bool = True, panel_events: list[tuple[str, int]] | None = None, max_tool_steps: int = 20, max_reasoning_rounds: int = 20) -> list[dict]:
     """Build child elements for unified panel body. Renders chronologically (panel_events)
@@ -284,15 +303,25 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
     children: list[dict] = []
 
     if trimmed_rounds > 0 or trimmed_tools > 0:
-        collapse_parts: list[str] = []
+        # v1.7.0 (R4): collapse hint was zh-hardcoded — bilingual now. Digit
+        # groups in BOTH spellings sum to the collapsed total, which the
+        # seal-time re-trim in linear_mixin relies on.
+        en_parts: list[str] = []
+        zh_parts: list[str] = []
         if trimmed_rounds > 0:
-            collapse_parts.append(f"{trimmed_rounds} 轮早期推理")
+            en_r, zh_r = _T["collapse_rounds"]
+            en_parts.append(en_r.format(trimmed_rounds))
+            zh_parts.append(zh_r.format(trimmed_rounds))
         if trimmed_tools > 0:
-            collapse_parts.append(f"{trimmed_tools} 步早期操作")
-        collapse_text = "⚡ 还有 " + "、".join(collapse_parts) + "已折叠"
+            en_t, zh_t = _T["collapse_tools"]
+            en_parts.append(en_t.format(trimmed_tools))
+            zh_parts.append(zh_t.format(trimmed_tools))
+        en_hint = _T["collapse_hint_full"][0].format(", ".join(en_parts))
+        zh_hint = _T["collapse_hint_full"][1].format("、".join(zh_parts))
         children.append({
             "tag": "markdown",
-            "content": collapse_text,
+            "content": zh_hint,
+            "i18n_content": _i18n(en_hint, zh_hint),
             "text_size": "notation",
         })
 
@@ -549,8 +578,18 @@ def _build_error_panel(error_message: str, *, is_aborted: bool = False, expanded
     if is_aborted:
         en_label, zh_label = _T["interrupt_panel"]
         border_color = "orange"
-        body_content = error_message
-        body_i18n = None  # 中断消息无需 i18n
+        # v1.7.0 (R4): known interrupt reasons render bilingually — the raw
+        # hermes/hermes-lark-streaming message stays as the content default.
+        _interrupt_msg_map = {
+            _T["interrupt_by_new_message"][0]: _T["interrupt_by_new_message"],
+        }
+        _known = _interrupt_msg_map.get(error_message)
+        if _known is not None:
+            body_content = _known[1]
+            body_i18n = _i18n(_known[0], _known[1])
+        else:
+            body_content = error_message
+            body_i18n = None  # 未知中断消息不做猜测翻译
     else:
         en_label, zh_label = _T["error_panel"]
         border_color = "red"
