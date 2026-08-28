@@ -12,3 +12,4 @@ tests/samples/
 .ruff_cache/
 .deps/
 .hermes-last-release
+worklog.md

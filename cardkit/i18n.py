@@ -48,6 +48,14 @@ _T: dict[str, tuple[str, str]] = {
     "rounds": ("{} rounds", "{} 轮"),
     "tools_count": ("{} tools", "{} 个工具"),
     "round_n": ("Round {}", "第 {} 轮"),
+    # ── v1.7.0 (R4): collapse hints + truncation suffix (were zh-hardcoded) ──
+    "collapse_hint_count": ("⚡ {} items collapsed", "⚡ 还有 {} 项已折叠"),
+    "collapse_rounds": ("{} rounds of reasoning", "{} 轮早期推理"),
+    "collapse_tools": ("{} tool steps", "{} 步早期操作"),
+    "collapse_hint_full": ("⚡ Collapsed: {}", "⚡ 还有 {}已折叠"),
+    "truncated_suffix": ("\n\n... (truncated, {} chars total)", "\n\n... (已截断，共 {} 字)"),
+    # v1.7.0 (R4): known interrupt reasons (core.py error_message) → bilingual
+    "interrupt_by_new_message": ("Interrupted by new message", "被新消息中断"),
 }
 
 def _i18n(en: str, zh: str) -> dict[str, str]:

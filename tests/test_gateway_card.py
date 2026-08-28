@@ -61,8 +61,11 @@ class TestBuildGatewayCard:
         card = build_gateway_card("")
         assert card["schema"] == "2.0"
         elements = card["body"]["elements"]
-        # No emoji header, no content — elements list is empty
-        assert len(elements) == 0
+        # v1.7.0 (R4-10, E2E T7): Feishu Card 2.0 rejects empty body.elements
+        # (230099/200621) — the builder now emits a valid placeholder.
+        assert len(elements) == 1
+        assert elements[0]["tag"] == "markdown"
+        assert elements[0]["content"] == " "
 
     def test_summary_generated(self):
         card = build_gateway_card("This is a long message that should have a summary")

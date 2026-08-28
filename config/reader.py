@@ -161,6 +161,21 @@ class Config:
         return self.flush_interval_ms / 1000.0
 
     @property
+    def answer_flush_interval_ms(self) -> float:
+        """answer-only 流式刷新间隔 (ms). 默认 150.
+
+        v1.7.0 (R2-09): previously hardcoded as _ANSWER_FAST_STREAM_MS=150 in
+        controller/linear_mixin.py with no way to tune it apart from the
+        general flush_interval_ms (which also gates panel updates)."""
+        sec = self._plugin_sec()
+        ms = _to_float(sec.get("answer_flush_interval_ms", 150), default=150.0)
+        return max(70.0, min(2000.0, ms))
+
+    @property
+    def answer_flush_interval_sec(self) -> float:
+        return self.answer_flush_interval_ms / 1000.0
+
+    @property
     def show_reasoning(self) -> bool:
         """TTL 缓存读取 (/reasoning 命令运行时修改配置)."""
         display = self._reload_cached().get("display")

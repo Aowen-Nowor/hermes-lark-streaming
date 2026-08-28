@@ -158,7 +158,14 @@ class FlushController:
         # 如果 flush 期间又有新数据 → 立即重刷
         if self._needs_reflush and not self._completed:
             self._needs_reflush = False
-            self._get_loop().call_soon(self._create_flush_task, do_flush)
+            # v1.7.0 (R1-05): guard the call_soon — when the loop is already
+            # closed this raised a bare RuntimeError that escaped _do_flush
+            # and surfaced as "Task exception was never retrieved" noise in
+            # production logs.
+            try:
+                self._get_loop().call_soon(self._create_flush_task, do_flush)
+            except RuntimeError:
+                pass  # event loop closed — nothing left to schedule
 
     def _cancel_timer(self) -> None:
         if self._pending_timer is not None:
