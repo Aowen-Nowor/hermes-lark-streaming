@@ -253,13 +253,12 @@ class TestBuildClarifySubmittedCard:
     def test_retry_button_present(self) -> None:
         card = build_clarify_submitted_card(question="Q", selected="A", clarify_id="cid_retry")
         elements = card["body"]["elements"]
-        # Fourth element: action with retry button
-        assert elements[3]["tag"] == "action"
-        actions = elements[3]["actions"]
-        assert len(actions) == 1
-        assert actions[0]["tag"] == "button"
-        assert actions[0]["type"] == "primary"
-        behaviors = actions[0]["behaviors"]
+        # v1.7.0 (E2E T8b→A3): the "action" container is REMOVED in Card 2.0
+        # (230099/200861 unsupported tag action) — the retry button is now a
+        # TOP-LEVEL element (fix verified against real Feishu).
+        assert elements[3]["tag"] == "button"
+        assert elements[3]["type"] == "primary"
+        behaviors = elements[3]["behaviors"]
         assert behaviors[0]["value"]["hermes_clarify_action"] == "retry_submit"
         assert behaviors[0]["value"]["clarify_id"] == "cid_retry"
 

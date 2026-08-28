@@ -61,6 +61,13 @@ _SECRET_FLAG_RE = re.compile(
     r'((?:^|[\s"\'`])(--?[A-Za-z0-9][A-Za-z0-9-]*)(=|\s+)("(?:[^"]*)"|\'(?:[^\']*)\'|[^\s"\'`]+))'
 )
 
+# v1.7.0 (R2-05): precompiled — previously inline re.sub/re.findall patterns
+# that leaned on the re module's internal cache; also duplicates of the
+# already-precompiled _RE_BACKTICK_RUN in cardkit/elements.py.
+_RE_HTML_TAG = re.compile(r"<[^>]+>")
+_RE_BACKTICK_RUN_TOOLUSE = re.compile(r"`+")
+_RE_PATH_REDACT = re.compile(r'(^|[\s=\'"()])([~./][^\s\'"()]+)')
+
 def redact_inline_secrets(value: str) -> str:
     """脱敏 key=secret、Authorization header、--flag secret 模式."""
 
@@ -85,7 +92,7 @@ def _sanitize_detail(text: str, sanitizer: str | None) -> str:
     """根据 sanitizer 类型清洗 detail 文本."""
     if not text or not sanitizer:
         return text
-    cleaned = re.sub(r"<[^>]+>", "", text).strip()
+    cleaned = _RE_HTML_TAG.sub("", text).strip()
     if not cleaned:
         return text
     if sanitizer == "command":
@@ -103,8 +110,7 @@ def _sanitize_detail(text: str, sanitizer: str | None) -> str:
 
 def _redact_paths(text: str) -> str:
     """命令中路径只保留 basename."""
-    return re.sub(
-        r'(^|[\s=\'"()])([~./][^\s\'"()]+)',
+    return _RE_PATH_REDACT.sub(
         lambda m: f"{m.group(1)}{os.path.basename(m.group(2))}",
         text,
     )
@@ -213,7 +219,8 @@ def _build_display_block(
     return _fenced_block("text", normalized) if normalized else None
 
 def _fenced_block(language: str, content: str) -> dict[str, Any]:
-    fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", content)), default=0) + 1)
+    # v1.7.0 (R2-05): precompiled backtick-run regex
+    fence = "`" * max(3, max((len(m) for m in _RE_BACKTICK_RUN_TOOLUSE.findall(content)), default=0) + 1)
     return {"language": language, "content": content, "fenced": f"{fence}{language}\n{content}\n{fence}"}
 
 class ToolUseTracker:
@@ -260,6 +267,12 @@ class ToolUseTracker:
                 elif output:
                     step.result_block = _build_display_block(output, "json", sanitizer=sanitizer)
                 return
+        # v1.7.0 (R2-03): the fallback append previously bypassed _max_steps —
+        # when record_start had silently dropped steps at the cap, every
+        # record_end for those tools appended an UNCAPPED new step, so the
+        # 128-step cap was decorative in long tool-heavy sessions.
+        if len(self._session.steps) >= self._max_steps:
+            return
         self._session.steps.append(
             ToolStep(
                 name=name,

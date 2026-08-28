@@ -200,20 +200,8 @@ def on_message_interrupted(
         anchor_id=anchor_id,
     )
 
-async def on_cron_deliver(
-    *,
-    chat_id: str,
-    content: str,
-    loop: Any = None,
-) -> bool:
-    """[注入点 10] cron 推送 — 包装为飞书卡片发送."""
-    if loop is None:
-        return False
-    try:
-        ctrl = get_controller()
-        if not ctrl.enabled:
-            return False
-        return bool(await ctrl.on_cron_deliver_async(chat_id=chat_id, content=content, loop=loop))
-    except Exception as exc:
-        _logger.warning("on_cron_deliver error: %s", exc, exc_info=True)
-        return False
+
+# v1.7.0: on_cron_deliver hook removed (dead code, cross-verified — zero
+# callers repo-wide, not in hermes VALID_HOOKS, and its target
+# ctrl.on_cron_deliver_async was deleted; live cron path is
+# _wrap_cron_deliver -> ctrl._do_cron_deliver, see patching/gateway.py).

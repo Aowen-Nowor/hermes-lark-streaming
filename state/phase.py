@@ -34,6 +34,10 @@ class TerminalReason:
     ABORT = "abort"                # Explicitly cancelled by user
     UNAVAILABLE = "unavailable"    # Source message was deleted/recalled
     CREATION_FAILED = "creation_failed"  # Card creation failed
+    # v1.7.0 (R3-04): session superseded by a continuation card (the old
+    # card's streaming was closed server-side mid-turn and a new card took
+    # over the remaining output).
+    SUPERSEDED = "superseded"
 
 PHASE_TRANSITIONS: dict[str, frozenset[str]] = {
     CardPhase.IDLE: frozenset({CardPhase.CREATING, CardPhase.ABORTED, CardPhase.TERMINATED}),

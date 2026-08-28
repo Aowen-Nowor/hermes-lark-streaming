@@ -29,6 +29,11 @@ __all__ = [
     '_patch_status',
     # v1.4.0: FeishuAdapter patched-class registry (deferred loading fix)
     '_patched_feishu_classes',
+    # v1.7.0: RelayAdapter patched-class registry (RELAY-fronted deployments)
+    '_apply_relay_adapter_patches',
+    '_wrap_relay_adapter_send',
+    '_wrap_relay_adapter_send_for_platform',
+    '_send_result_ok',
     # Functions
     '_get_config',
     '_get_event_message_id',
@@ -80,7 +85,6 @@ __all__ = [
     'on_background_review_message',
     'on_message_aborted',
     'on_message_interrupted',
-    'on_cron_deliver',
     '_safe_hook',
 ]
 
@@ -124,6 +128,20 @@ def _get_event_message_id() -> str | None:
 def _get_thread_local_ctx() -> dict | None:
     return getattr(_thread_local_ctx, "data", None)
 
+def _send_result_ok(message_id: str | None = None):
+    """v1.7.0: Build a success SendResult, import-tolerant for old hermes.
+
+    Lives here (not in patching/adapter.py) so both gateway.py and adapter.py
+    can import it from the package without circular imports."""
+    try:
+        from gateway.platforms.base import SendResult
+        if message_id:
+            return SendResult(success=True, message_id=message_id)
+        return SendResult(success=True)
+    except (ImportError, AttributeError):
+        return None
+
+
 # These imports must come AFTER shared state is defined to avoid circular
 
 from .gateway import (  # noqa: E402
@@ -155,6 +173,9 @@ from .adapter import (  # noqa: E402
     _clarify_selections,
     _clarify_answers,
     _clarify_card_info,
+    _send_result_ok,
+    _wrap_relay_adapter_send,
+    _wrap_relay_adapter_send_for_platform,
 )
 from .hooks import (  # noqa: E402
     on_feishu_normalize,
@@ -167,7 +188,6 @@ from .hooks import (  # noqa: E402
     on_background_review_message,
     on_message_aborted,
     on_message_interrupted,
-    on_cron_deliver,
     _safe_hook,
 )
 
@@ -350,6 +370,20 @@ def apply_patches() -> None:
     # chicken-and-egg, covers clarify (send_clarify) and all other methods.
     create_adapter_hooked = _apply_create_adapter_hook()
 
+    # v1.7.0 (P1 RELAY fix): best-effort direct patch of the RelayAdapter
+    # class. The create_adapter hook above is the main chain (relay adapters
+    # are built via platform_registry.create_adapter("relay", config)); this
+    # direct import covers a gateway that already imported gateway.relay
+    # before plugin registration. Missing module → not a relay deployment.
+    relay_patched = False
+    try:
+        from gateway.relay.adapter import RelayAdapter as _RelayAdapter
+        relay_patched = _apply_relay_adapter_patches(_RelayAdapter)
+    except ImportError:
+        relay_patched = False
+    except Exception:
+        _logger.debug("hermes-lark-streaming: direct RelayAdapter patch failed", exc_info=True)
+
     # ── Summary ──
     # v1.1.0: Record patch status in a structured dict for doctor command
     global _patch_status
@@ -362,11 +396,12 @@ def apply_patches() -> None:
         "background_task": "✓" if gw_patched else ("pending" if gw_delayed else "n/a"),
         "feishu_adapter": "✓" if feishu_patched else "✗",
         "create_adapter_hook": "✓" if create_adapter_hooked else "✗",
+        "relay_adapter": "✓" if relay_patched else "n/a (hook-covered)",
         "hermes_layout": layout,
     }
     _logger.info(
         "HLS: patch summary v%s — GatewayRunner=%s conversation_loop=%s "
-        "AIAgent=applied cron=%s background=%s FeishuAdapter=%s create_adapter_hook=%s layout=%s",
+        "AIAgent=applied cron=%s background=%s FeishuAdapter=%s create_adapter_hook=%s relay=%s layout=%s",
         __version__,
         _patch_status["gateway_runner"],
         _patch_status["conversation_loop"],
@@ -374,6 +409,7 @@ def apply_patches() -> None:
         _patch_status["background_task"],
         _patch_status["feishu_adapter"],
         _patch_status["create_adapter_hook"],
+        _patch_status["relay_adapter"],
         layout,
     )
 
@@ -385,8 +421,11 @@ def _apply_feishu_adapter_patches(FeishuAdapter, *, is_repatch: bool = False) ->
     if FeishuAdapter is None:
         return False
 
-    cls_id = id(FeishuAdapter)
-    if cls_id in _patched_feishu_classes:
+    # v1.7.0 (R1-06): the sentinel attr is the PRIMARY dedupe — id() values
+    # can be reused after GC (hermes hot module reload), which previously
+    # made this id-only set skip a freshly reloaded class. The id set stays
+    # as a mirror for compatibility with existing tests / doctor output.
+    if getattr(FeishuAdapter, "_hls_patched", False) or id(FeishuAdapter) in _patched_feishu_classes:
         if is_repatch:
             pass
         return True
@@ -426,15 +465,67 @@ def _apply_feishu_adapter_patches(FeishuAdapter, *, is_repatch: bool = False) ->
 
         # Record this class as patched AFTER successful patch (only on success,
         # so a failed attempt can be retried later in the deferred stage).
-        _patched_feishu_classes.add(cls_id)
+        # v1.7.0 (R1-06): sentinel attr first (GC-safe), id set kept as mirror.
+        try:
+            FeishuAdapter._hls_patched = True  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass  # e.g. built-in/extension classes — id mirror still set below
+        _patched_feishu_classes.add(id(FeishuAdapter))
         _logger.info(
             "hermes-lark-streaming: FeishuAdapter.send/edit/reaction/image/clarify patched ✓ "
             "(gateway message cards enabled, class_id=%s)",
-            cls_id,
+            id(FeishuAdapter),
         )
         return True
     except AttributeError as e:
         _logger.info("hermes-lark-streaming: FeishuAdapter patch skipped (%s)", e)
+        return False
+
+def _apply_relay_adapter_patches(RelayAdapter, *, is_repatch: bool = False) -> bool:
+    """v1.7.0: Apply RELAY-mode patches to the RelayAdapter class (P1 fix).
+
+    In relay-fronted deployments hermes routes ALL Feishu-bound sends through
+    the single RelayAdapter (DeliveryTransport.send → send_for_platform for
+    the cron/scheduled lane; RelayAdapter.send for interactive traffic). The
+    plugin's FeishuAdapter patches never fire there, so cron pushes degraded
+    to plain text. Wrapping RelayAdapter.send / send_for_platform routes
+    Feishu-bound relay sends through the SAME _dispatch_feishu_outbound logic
+    (turn-final suppression, /stop detection, cron cards, gateway cards).
+
+    Dedupe uses a GC-safe sentinel attr (same rationale as R1-06); the id set
+    is only a mirror. Non-Feishu platforms pass through untouched — the
+    per-send platform check lives in the wrappers.
+    """
+    if RelayAdapter is None:
+        return False
+
+    if getattr(RelayAdapter, "_hls_relay_patched", False):
+        return True
+
+    try:
+        RelayAdapter.send = _wrap_relay_adapter_send(RelayAdapter.send)
+        try:
+            RelayAdapter.send_for_platform = _wrap_relay_adapter_send_for_platform(
+                RelayAdapter.send_for_platform
+            )
+        except AttributeError:
+            _logger.debug(
+                "hermes-lark-streaming: RelayAdapter.send_for_platform not found "
+                "(older hermes relay) — relay cron lane skipped, send lane still patched"
+            )
+        try:
+            RelayAdapter._hls_relay_patched = True  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
+        _logger.info(
+            "hermes-lark-streaming: RelayAdapter.send/send_for_platform patched ✓ "
+            "(RELAY-fronted Feishu deployments — cron/gateway cards via relay lane, "
+            "class_id=%s)",
+            id(RelayAdapter),
+        )
+        return True
+    except AttributeError as e:
+        _logger.info("hermes-lark-streaming: RelayAdapter patch skipped (%s)", e)
         return False
 
 def _verify_feishu_patch_identity(adapter_instance: Any) -> bool:
@@ -442,14 +533,14 @@ def _verify_feishu_patch_identity(adapter_instance: Any) -> bool:
     if adapter_instance is None:
         return False
     cls = type(adapter_instance)
-    cls_id = id(cls)
-    if cls_id in _patched_feishu_classes:
+    # v1.7.0 (R1-06): sentinel attr first (GC-safe), id set as mirror.
+    if getattr(cls, "_hls_patched", False) or id(cls) in _patched_feishu_classes:
         return True
     _logger.error(
         "HLS: FeishuAdapter identity mismatch! adapter instance class id=%s "
         "not in patched classes %s. Clarify/delegate cards will fall back to "
         "text. Run /aowen doctor.",
-        cls_id, sorted(_patched_feishu_classes),
+        id(cls), sorted(_patched_feishu_classes),
     )
     return False
 
@@ -476,24 +567,45 @@ def _wrap_platform_registry_create_adapter(orig_create_adapter: Callable) -> Cal
             _cls_mod = getattr(type(adapter), "__module__", "") or ""
             if "feishu" in _cls_mod.lower():
                 _is_feishu = True
-        if not _is_feishu:
+        if _is_feishu:
+            cls = type(adapter)
+            # v1.7.0 (R1-06): sentinel attr is primary; id set is a mirror.
+            if getattr(cls, "_hls_patched", False) or id(cls) in _patched_feishu_classes:
+                return adapter
+            try:
+                _apply_feishu_adapter_patches(cls, is_repatch=True)
+                _logger.info(
+                    "HLS: FeishuAdapter class patched at create_adapter hook "
+                    "(class_id=%s, deferred loading intercepted, name=%s)",
+                    id(cls), name,
+                )
+            except Exception as e:
+                _logger.warning(
+                    "HLS: create_adapter hook patch failed (class_id=%s name=%s): %s",
+                    id(cls), name, e,
+                )
             return adapter
-        cls = type(adapter)
-        cls_id = id(cls)
-        if cls_id in _patched_feishu_classes:
-            return adapter
-        try:
-            _apply_feishu_adapter_patches(cls, is_repatch=True)
-            _logger.info(
-                "HLS: FeishuAdapter class patched at create_adapter hook "
-                "(class_id=%s, deferred loading intercepted, name=%s)",
-                cls_id, name,
-            )
-        except Exception as e:
-            _logger.warning(
-                "HLS: create_adapter hook patch failed (class_id=%s name=%s): %s",
-                cls_id, name, e,
-            )
+
+        # v1.7.0 (P1 RELAY fix): relay adapters front N logical platforms and
+        # are created through the SAME platform_registry.create_adapter entry
+        # (gateway/relay/__init__.py register_relay_adapter registers a
+        # factory). Patching the class here means relay-fronted Feishu
+        # deployments get cron/gateway cards through the relay lane.
+        _is_relay = False
+        if isinstance(name, str) and name.lower() == "relay":
+            _is_relay = True
+        else:
+            _cls_mod = getattr(type(adapter), "__module__", "") or ""
+            if _cls_mod.startswith("gateway.relay"):
+                _is_relay = True
+        if _is_relay:
+            try:
+                _apply_relay_adapter_patches(type(adapter), is_repatch=True)
+            except Exception as e:
+                _logger.warning(
+                    "HLS: create_adapter hook relay patch failed (name=%s): %s",
+                    name, e,
+                )
         return adapter
 
     _wrapped._hls_create_adapter_wrapped = True  # type: ignore[attr-defined]

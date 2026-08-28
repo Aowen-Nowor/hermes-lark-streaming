@@ -31,7 +31,18 @@ class UnifiedLinearState:
         "bg_review_messages",
         "_panel_events",
         "_tool_count",
+        # v1.7.0 (R2-01): incremental escape cache for answer_text
+        "_escaped_cache",
+        "_escaped_src_len",
     )
+
+    # v1.7.0 (R2-02): storage caps. Display already trims to max=20 at render
+    # time; storage keeps headroom for the seal summary (uses the latest
+    # round). Unbounded lists previously grew forever on marathon sessions
+    # (sub-agent chains, long chained reasoning, review floods).
+    _MAX_REASONING_ROUNDS_STORED = 50
+    _MAX_PANEL_EVENTS_STORED = 100
+    _MAX_BG_REVIEW_MESSAGES_STORED = 20
 
     def __init__(self) -> None:
         # Reasoning tracking
@@ -58,6 +69,10 @@ class UnifiedLinearState:
 
         self._panel_events: list[tuple[str, int]] = []
         self._tool_count: int = 0
+
+        # v1.7.0 (R2-01): escaped-answer cache (see escaped_answer_view)
+        self._escaped_cache: str | None = None
+        self._escaped_src_len: int = 0
 
     def on_reasoning_delta(self, text: str) -> None:
         """Reasoning text increment. Starts a new round if not already in one."""
@@ -95,6 +110,61 @@ class UnifiedLinearState:
         self.answer_text += text
         self.answer_dirty = True
 
+    def reset_escape_cache(self) -> None:
+        """v1.7.0 (R2-01): invalidate the escaped-answer cache — call after
+        DIRECTLY replacing answer_text (e.g. on_completed's MISMATCH branch)."""
+        self._escaped_cache = None
+        self._escaped_src_len = 0
+
+    def escaped_answer_view(self) -> str:
+        """v1.7.0 (R2-01): escaped answer_text with an incremental cache.
+
+        The stream_element API is "set full content" semantics — every flush
+        re-sent the ENTIRE answer through escape_markdown_asterisks (5 regex
+        passes over ever-growing text). The cache appends only the new delta
+        when it is provably safe:
+
+        * the cached prefix is unchanged (append-only stream), and
+        * the delta contains no '*' and no '`' — escape_markdown_asterisks is
+          the identity on such text, and none of its regexes can pair across
+          the boundary (every relevant pattern needs one of those two chars on
+          BOTH sides), and
+        * the cached tail is not mid-placeholder (no '\x00').
+
+        Anything else falls back to a full recompute, so worst case equals the
+        old behavior — the fast path can never produce a different escape.
+        """
+        src = self.answer_text
+        if not src:
+            return src
+        cache = self._escaped_cache
+        cached_len = self._escaped_src_len
+        if cache is not None and cached_len == len(src):
+            # No new content since the last escape — cached value is current.
+            return cache
+        if (
+            cache is not None
+            and 0 < cached_len < len(src)
+            and "\x00" not in cache
+            and not cache.endswith(("*", "`", "\\"))
+        ):
+            # v1.7.0: the endswith guard closes the cross-boundary lookahead
+            # hazard — a trailing UNESCAPED '*' in the cached prefix was left
+            # unescaped precisely because nothing followed it; a plain delta
+            # then supplies the follower and the full recompute escapes it
+            # (found by test_v170_fixes.TestEscapeCache).
+            new_part = src[cached_len:]
+            if "*" not in new_part and "`" not in new_part:
+                cache = cache + new_part
+                self._escaped_cache = cache
+                self._escaped_src_len = len(src)
+                return cache
+        from ..cardkit.md import escape_markdown_asterisks
+        cache = escape_markdown_asterisks(src)
+        self._escaped_cache = cache
+        self._escaped_src_len = len(src)
+        return cache
+
     def on_tool_event(self, is_new_tool: bool = True) -> None:
         """Tool call event. Finalizes any in-progress reasoning first."""
         self._finalize_current_reasoning()
@@ -104,10 +174,16 @@ class UnifiedLinearState:
         self.tool_steps_dirty = True
         self.panel_dirty = True
         self.panel_visible = True
+        self._enforce_storage_caps()
 
     def on_background_review(self, message: str) -> None:
         """Background review message (e.g. quality check, memory update)."""
         self.bg_review_messages.append(message)
+        # v1.7.0 (R2-02): review floods are capped too (kept newest).
+        if len(self.bg_review_messages) > self._MAX_BG_REVIEW_MESSAGES_STORED:
+            self.bg_review_messages = self.bg_review_messages[
+                -self._MAX_BG_REVIEW_MESSAGES_STORED:
+            ]
 
     def _finalize_current_reasoning(self) -> None:
         """Finalize the current reasoning round, moving it to :attr:`reasoning_rounds`."""
@@ -125,6 +201,30 @@ class UnifiedLinearState:
         self._panel_events.append(("reasoning", len(self.reasoning_rounds) - 1))
         self._current_reasoning = ""
         self._reasoning_start = 0.0
+        self._enforce_storage_caps()
+
+    def _enforce_storage_caps(self) -> None:
+        """v1.7.0 (R2-02): bound in-memory growth (see _MAX_* constants).
+        Dropping the oldest reasoning rounds re-indexes the reasoning entries
+        of _panel_events so the timeline stays consistent with storage."""
+        dropped_rounds = 0
+        while len(self.reasoning_rounds) > self._MAX_REASONING_ROUNDS_STORED:
+            self.reasoning_rounds.pop(0)
+            dropped_rounds += 1
+        if dropped_rounds:
+            kept: list[tuple[str, int]] = []
+            for kind, idx in self._panel_events:
+                if kind == "reasoning":
+                    if idx >= dropped_rounds:
+                        kept.append((kind, idx - dropped_rounds))
+                    # else: event pointed at a dropped round — discard
+                else:
+                    kept.append((kind, idx))
+            self._panel_events = kept
+        if len(self._panel_events) > self._MAX_PANEL_EVENTS_STORED:
+            self._panel_events = self._panel_events[-self._MAX_PANEL_EVENTS_STORED:]
+        if len(self.bg_review_messages) > self._MAX_BG_REVIEW_MESSAGES_STORED:
+            self.bg_review_messages = self.bg_review_messages[-self._MAX_BG_REVIEW_MESSAGES_STORED:]
 
     def finalize(self) -> None:
         """Finalize any in-progress reasoning (called at message completion)."""

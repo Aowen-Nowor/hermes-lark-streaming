@@ -32,6 +32,17 @@ except Exception:
 
 # ── 从环境变量读取配置 ──
 
+# v1.7.0 (R5-08): friendly validation — raw os.environ[...] raised a bare
+# KeyError with no hint about WHICH variable is missing or where to set it.
+_missing_env = [
+    _name for _name in ("FEISHU_WEBHOOK", "FEISHU_SECRET")
+    if not os.environ.get(_name, "").strip()
+]
+if _missing_env:
+    raise SystemExit(
+        f"[notify_feishu] missing required env var(s): {', '.join(_missing_env)}. "
+        "Set them in the workflow/CI secrets before calling this script."
+    )
 FEISHU_WEBHOOK = os.environ["FEISHU_WEBHOOK"]
 FEISHU_SECRET = os.environ["FEISHU_SECRET"]
 TEST_EXIT_CODE = os.environ.get("TEST_EXIT_CODE", "")
