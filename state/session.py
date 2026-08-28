@@ -36,6 +36,7 @@ class CardSession:
 
     __slots__ = (
         "_card_ready",
+        "_card_over_max",
         "_continuation_reactivation_count",
         "_create_epoch_snap",
         "_creation_stages",
@@ -83,6 +84,9 @@ class CardSession:
         self.message_id = message_id
         self.anchor_id: str | None = None
         self.chat_id = chat_id
+        # v1.6.2: 卡片体积超限(200860)降级标记 — 置 True 后所有卡片写入跳过，
+        # 完成时改走纯文本兜底。
+        self._card_over_max: bool = False
         self.state: str = IDLE
         self.card_msg_id: str | None = None
         self.card_id: str | None = None

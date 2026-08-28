@@ -33,6 +33,7 @@ from ..feishu import (
     CARDKIT_SEQUENCE_CONFLICT,
     CARDKIT_STREAMING_CLOSED,
     FeishuAPIError,
+    is_card_over_max_error,
     is_element_not_found_error,
     is_schema_error,
     is_terminal_api_code,
@@ -538,11 +539,33 @@ class UnifiedControllerMixin:
                     session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
                     # 保留 panel_dirty / tool_steps_dirty 以便下轮 flush 重试
                     return
+                if is_card_over_max_error(e):
+                    # v1.6.2 fix (P0): 200860 card over max size — 卡片体积永久超限，
+                    # 重试不可能成功。立即降级：标记 session，后续所有卡片写入跳过，
+                    # 由 _do_linear_complete_with_fallback 发送纯文本兜底。
+                    _logger.error(
+                        "unified flush CARD OVER MAX SIZE (200860) — card=%s — "
+                        "falling back to text message. panel_dirty=%s answer_dirty=%s",
+                        session.card_id[:12], state.panel_dirty, state.answer_dirty,
+                    )
+                    session._card_over_max = True
+                    state.panel_dirty = False
+                    state.tool_steps_dirty = False
+                    state.answer_dirty = False
+                    return
                 _logger.warning("unified flush batch_update failed: %s", e)
                 return
 
         # Note: skip markdown optimization during streaming for performance;
         if state.answer_dirty and "answer" in session._creation_stages:
+            if getattr(session, "_card_over_max", False):
+                # v1.6.2: 已标记体积超限 — 跳过一切卡片写入，交给文本兜底
+                _logger.debug(
+                    "unified flush: card over max flagged, skipping answer flush card=%s",
+                    session.card_id[:12] if session.card_id else "-",
+                )
+                state.answer_dirty = False
+                return
             # v1.7.0 (R2-01): incremental escape cache (was full-text escape).
             content = state.escaped_answer_view() or " "
             session.sequence += 1
@@ -552,6 +575,16 @@ class UnifiedControllerMixin:
                 )
                 state.answer_dirty = False
             except FeishuAPIError as e:
+                if is_card_over_max_error(e):
+                    # v1.6.2 fix (P0): 流式 answer 也遇到体积超限 → 标记降级
+                    _logger.error(
+                        "unified stream CARD OVER MAX SIZE (200860) — card=%s — "
+                        "falling back to text message",
+                        session.card_id[:12],
+                    )
+                    session._card_over_max = True
+                    state.answer_dirty = False
+                    return
                 if e.code == CARDKIT_STREAMING_CLOSED:
                     if session._streaming_closed_logged:
                         pass
@@ -623,6 +656,16 @@ class UnifiedControllerMixin:
         assert self._client is not None
         card_id = session.card_id
         assert card_id is not None
+
+        # v1.6.2 fix (P0): 卡片体积已超限(200860) — 无需再做任何卡片写操作，
+        # 直接返回 False 走文本兜底（_do_linear_complete_with_fallback）。
+        if getattr(session, "_card_over_max", False):
+            _logger.error(
+                "preservative seal: card over max flagged earlier — "
+                "skipping seal, falling back to text, card=%s",
+                card_id[:12],
+            )
+            return False
 
         try:
             # Before closing streaming, we MUST flush any remaining dirty
@@ -921,6 +964,16 @@ class UnifiedControllerMixin:
             return True
 
         except FeishuAPIError as e:
+            if is_card_over_max_error(e):
+                # v1.6.2 fix (P0): seal 时卡片已体积超限(200860) — 永远不可能成功。
+                # 立即标记降级并返回 False，_do_linear_complete_with_fallback 会发文本兜底。
+                _logger.error(
+                    "preservative seal CARD OVER MAX SIZE (200860) — card=%s — "
+                    "falling back to text message",
+                    card_id[:12],
+                )
+                session._card_over_max = True
+                return False
             if e.code == CARDKIT_SEQUENCE_CONFLICT:
                 _logger.warning(
                     "preservative seal: sequence conflict, retrying... card=%s seq=%d",
@@ -1149,6 +1202,15 @@ class UnifiedControllerMixin:
                         )
                         if ok:
                             state.answer_dirty = False
+                    elif is_card_over_max_error(e):
+                        # v1.6.2 fix (P0): drain 阶段卡片体积超限 — 标记降级，文本兜底
+                        _logger.error(
+                            "HLS: drain answer CARD OVER MAX SIZE (200860) — msg=%s — "
+                            "falling back to text message",
+                            (session.message_id or "?")[:12],
+                        )
+                        session._card_over_max = True
+                        state.answer_dirty = False
                     else:
                         _logger.warning("HLS: drain answer failed: %s", e)
 

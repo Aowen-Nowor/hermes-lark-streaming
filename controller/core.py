@@ -983,7 +983,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             await self._send_text_fallback(session, fallback_text=_fallback_text)
 
     async def _send_text_fallback(self, session: CardSession, *, fallback_text: str = "") -> None:
-        """卡片不可用时，通过飞书 API 发送文本回复作为兜底."""
+        """卡片不可用时，通过飞书 API 发送文本回复作为兜底.
+
+        v1.6.2 fix (P0): 移除 4000 字符硬截断 — 改为按段落切块逐条回复，
+        保证长答案在卡片超限(200860)降级时也能 100% 送达。
+        """
         if not self._client:
             return
         try:
@@ -992,17 +996,22 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             text = fallback_text or session.error_message or (session.text.display_text if session.text else "") or ""
             if not text.strip():
                 return
-            # 限制长度避免过长
-            if len(text) > 4000:
-                text = text[:4000] + "..."
+            from ..cardkit.md import _split_long_text, _MAX_CHUNK_CHARS
             from ..cardkit.md import optimize_markdown_style
-            content = optimize_markdown_style(text) or text
+            # v1.6.2: 分段发送（与卡片元素一致的分块策略），不再截断丢内容
+            chunks = _split_long_text(text, limit=_MAX_CHUNK_CHARS)
             reply_id = session.anchor_id or session.message_id
-            await self._client.reply_text(reply_id, content)
+            sent = 0
+            for chunk in chunks:
+                if not chunk.strip():
+                    continue
+                content = optimize_markdown_style(chunk) or chunk
+                await self._client.reply_text(reply_id, content)
+                sent += 1
             _logger.info(
-                "text fallback sent: msg=%s len=%d",
+                "text fallback sent: msg=%s len=%d chunks=%d",
                 (session.message_id or "?")[:12],
-                len(content),
+                len(text), sent,
             )
         except Exception:
             pass
