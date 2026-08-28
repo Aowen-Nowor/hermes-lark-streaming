@@ -547,22 +547,33 @@ class TestMonkeyPatchTargets:
         self, hermes_src: Path, module_path: str, class_name: str, method_name: str,
     ) -> None:
         """Optional class method — warn if missing, but don't fail."""
-        # Try import
-        try:
-            mod = __import__(module_path, fromlist=[class_name])
-            cls = getattr(mod, class_name, None)
-            if cls is not None and hasattr(cls, method_name):
-                return  # Found, all good
-        except (ImportError, AttributeError):
-            pass
-        # Fallback: AST
-        tree = _parse_ast(hermes_src, module_path)
-        if tree is not None and _ast_class_has_method(tree, class_name, method_name):
-            return  # Found via AST
+        # v1.7.0: FeishuAdapter targets try ALL candidate module paths — the
+        # legacy gateway.platforms.feishu path was deleted in hermes v0.20.5
+        # (Feishu lives at plugins.platforms.feishu.adapter / hermes_plugins
+        # namespace), which previously made every reaction target misreport
+        # skip even though _add_reaction/_remove_reaction exist.
+        if module_path in _FEISHU_ADAPTER_MODULE_CANDIDATES:
+            candidate_paths = list(_FEISHU_ADAPTER_MODULE_CANDIDATES)
+        else:
+            candidate_paths = [module_path]
+
+        for candidate in candidate_paths:
+            # Try import
+            try:
+                mod = __import__(candidate, fromlist=[class_name])
+                cls = getattr(mod, class_name, None)
+                if cls is not None and hasattr(cls, method_name):
+                    return  # Found, all good
+            except (ImportError, AttributeError):
+                pass
+            # Fallback: AST
+            tree = _parse_ast(hermes_src, candidate)
+            if tree is not None and _ast_class_has_method(tree, class_name, method_name):
+                return  # Found via AST
         # Not found — issue a warning (not a failure)
         pytest.skip(
-            f"Optional target {class_name}.{method_name} not found in {module_path} "
-            f"— plugin feature will be degraded but not broken"
+            f"Optional target {class_name}.{method_name} not found in "
+            f"{candidate_paths} — plugin feature will be degraded but not broken"
         )
 
 

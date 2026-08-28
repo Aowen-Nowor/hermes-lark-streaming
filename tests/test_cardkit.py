@@ -477,7 +477,13 @@ class TestBuildCronCard:
         from hermes_lark_streaming.cardkit import build_cron_card
 
         card = build_cron_card("")
-        assert card["body"]["elements"] == []
+        # v1.7.0 (R4-10, E2E T7): empty body.elements is REJECTED by Feishu
+        # Card 2.0 (230099/200621) — the builder now guarantees a valid
+        # placeholder element instead of an empty list.
+        elements = card["body"]["elements"]
+        assert len(elements) == 1
+        assert elements[0]["tag"] == "markdown"
+        assert not card["config"].get("summary")
 
     def test_table_content_preserved(self) -> None:
         from hermes_lark_streaming.cardkit import build_cron_card

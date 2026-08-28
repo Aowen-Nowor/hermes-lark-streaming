@@ -204,9 +204,6 @@ class FeishuClient:
         if domain and domain != "https://open.feishu.cn":
             builder = builder.domain(domain)
         self._client = builder.build()
-        self._use_async_stream_element = callable(
-            getattr(self._client.cardkit.v1.card_element, 'acontent', None)
-        )
 
     async def _retry_transient(
         self,
@@ -286,8 +283,9 @@ class FeishuClient:
                     log_id = err.get("log_id", "") or ""
                 elif isinstance(err, str):
                     # error 可能是 JSON 字符串或含 log_id 的文本
-                    import re as _re
-                    m = _re.search(r'log_id["\']?\s*[:=]\s*["\']?([A-Za-z0-9]{20,})', err)
+                    # v1.7.0 (R1-13): removed the redundant function-level
+                    # `import re as _re` — module-level import at the top.
+                    m = re.search(r'log_id["\']?\s*[:=]\s*["\']?([A-Za-z0-9]{20,})', err)
                     if m:
                         log_id = m.group(1)
             # v1.1.0: Record API error metrics
@@ -428,13 +426,15 @@ class FeishuClient:
                 .build()
             )
             t0 = _time.monotonic()
-            if self._use_async_stream_element:
-                resp = await self._client.cardkit.v1.card_element.acontent(request)
-            else:
-                resp = await asyncio.to_thread(
-                    self._client.cardkit.v1.card_element.content,
-                    request,
-                )
+            # v1.7.0 (R2-11 dead-code removal): the asyncio.to_thread fallback
+            # for SDKs without card_element.acontent is gone — cross-verified
+            # against every published lark-oapi: 1.4.0 has NO async cardkit
+            # methods at all (acreate/aupdate/abatch_update/asettings missing →
+            # the plugin cannot even initialize its API surface), while
+            # 1.4.24+ ships the full async set INCLUDING acontent. So any SDK
+            # new enough to run this plugin always has acontent; the fallback
+            # was unreachable. pyproject now requires lark-oapi>=1.4.24.
+            resp = await self._client.cardkit.v1.card_element.acontent(request)
             elapsed_ms = (_time.monotonic() - t0) * 1000
             if elapsed_ms > 200:
                 pass
@@ -444,9 +444,20 @@ class FeishuClient:
         for attempt in range(_ELEMENT_NOT_FOUND_MAX_RETRIES + 1):
             try:
                 await self._retry_transient("cardkit_stream_element", _do)
-                # 成功时打 DEBUG 日志（降级自 INFO — 流式输出期间每 70ms 一次，
-                # 单次会话可产生数十条 INFO 日志，生产环境日志爆炸）
+                # 成功时静默（流式输出期间每 70ms 一次，INFO 会爆炸）
                 return
+            except _NETWORK_ERROR_BASES:
+                # v1.7.0 (R1-10): _retry_transient already exhausted its 3
+                # network retries — surface the persistent failure at WARNING
+                # (previously it propagated to the flush controller and was
+                # swallowed at DEBUG, so sustained network outages silently
+                # dropped answer text with zero diagnosable log evidence).
+                _logger.warning(
+                    "HLS: stream_element network failure after retries card=%s el=%s",
+                    card_id[:12], element_id[:16],
+                    exc_info=True,
+                )
+                raise
             except FeishuAPIError as e:
                 if not is_element_not_found_error(e):
                     raise
@@ -463,6 +474,7 @@ class FeishuClient:
                 raise
         if last_error:
             raise last_error  # unreachable
+
 
     async def cardkit_update(
         self,
