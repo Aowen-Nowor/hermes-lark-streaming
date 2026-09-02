@@ -163,6 +163,15 @@ display:
   show_reasoning: true  # 在统一面板中显示推理内容
 ```
 
+### 工具调用过渡文字
+
+工具调用前的过渡文字（interim 文本，如"我先查一下…"）默认**不写入**卡片正文，最终答案通过独立的 stream 通道正常显示：
+
+```yaml
+hermes_lark_streaming:
+  interim_to_answer: false  # true 时恢复旧行为：过渡文字作为答案追加进正文
+```
+
 ### 统一面板超限压缩
 
 飞书卡片2.0 **硬性限制200个元素/组件**，超出会报错 `300305 (element exceeds the limit)`，导致卡片封口失败并触发文本兜底（内容重复）。

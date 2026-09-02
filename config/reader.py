@@ -162,6 +162,16 @@ class Config:
         return self.flush_interval_ms / 1000.0
 
     @property
+    def interim_to_answer(self) -> bool:
+        """interim 文本（工具调用前过渡文字）是否作为答案写入卡片正文。
+
+        默认 False = 过渡文字不进入正文（最终答案仍走 stream 通道正常显示）。
+        设 True 恢复旧行为（interim 文本的 answer 部分追加进正文）。
+        """
+        sec = self._plugin_sec()
+        return _to_bool(sec.get("interim_to_answer", False))
+
+    @property
     def show_reasoning(self) -> bool:
         """TTL 缓存读取 (/reasoning 命令运行时修改配置)."""
         display = self._reload_cached().get("display")

@@ -569,10 +569,13 @@ class UnifiedControllerMixin:
         reasoning = split.get("reasoning_text")
         answer = split.get("answer_text")
 
+        # v1.7.0 (interim_to_answer): interim 文本（工具调用前的过渡文字）
+        # 默认不再写入卡片正文——最终答案走 stream_delta_callback 通道，
+        # 与 interim 通道独立。设 interim_to_answer=True 恢复旧行为。
         _reasoning_already_tracked = bool(state._current_reasoning)
         if reasoning and self._cfg.show_reasoning and not _reasoning_already_tracked:
             state.on_reasoning_delta(reasoning)
-        if answer:
+        if answer and self._cfg.interim_to_answer:
             # each interim call contains the full text so far. We must:
             _existing_len = len(state.answer_text)
             if _existing_len == 0:
@@ -590,7 +593,7 @@ class UnifiedControllerMixin:
                     )
                     state.on_answer_delta(_new_part)
             # else: text is same length or shorter - already captured, skip
-        if (reasoning and self._cfg.show_reasoning and not _reasoning_already_tracked) or answer:
+        if (reasoning and self._cfg.show_reasoning and not _reasoning_already_tracked) or (answer and self._cfg.interim_to_answer):
             self._schedule_linear_flush(session)
 
     async def _preservative_seal(

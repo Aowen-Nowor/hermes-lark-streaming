@@ -1,3 +1,14 @@
+## v1.8.0 (2026-08-16)
+
+工具调用过渡文字不再污染卡片正文 — interim 文本（工具调用前的过渡叙述，如"我先查一下…"）默认不写入答案正文，卡片只显示最终答案。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| ✨ Feature | 新增 `interim_to_answer` 配置项（默认 `false`） | Hermes 的 `interim_assistant_callback`（工具调用前过渡文字）与 `stream_delta_callback`（最终答案）是两条独立通道。旧逻辑把 interim 文本的 answer 部分也追加进卡片正文，导致用户在工具调用间隙看到"我先查一下…"等过渡文字混入最终答案 | `_linear_on_thinking` 中 answer 分支受 `interim_to_answer` 控制：`false`（默认）时跳过，卡片正文纯最终答案；`true` 时恢复旧行为。reasoning 部分仍由 `show_reasoning` 独立控制，不受影响 (`controller/linear_mixin.py`, `config/reader.py`) |
+| 🧪 Test | 新增 4 个 `TestLinearOnThinkingInterimToAnswer` 单元测试 | 旧测试 `test_dedup_with_mixed_reasoning_and_answer` 依赖旧行为（interim answer 写入正文），新默认值下会失败 | 新增测试覆盖：默认 false 跳过、true 接受、false 时 reasoning 仍处理、true 时保留增量追加去重。旧测试显式开启 `interim_to_answer=True` 保留原意图。870 passed，5 个失败为环境预存问题（真实配置覆盖 + venv 缺 setuptools），与本次改动无关（git stash 验证） |
+
+---
+
 ## v1.6.0 (2026-07-21)
 
 Clarify 卡片失效复发修复 — hermes v0.19.0 升级后 clarify 退回纯文本（"❓ 问题 / 编号列表 / Reply with the number..."）。三路调研（插件代码 + hermes v0.19.0 源码 + 服务器日志）确认根因不在 hermes（v0.17.0→v0.19.0 clarify dispatch / deferred loading / 纯文本格式零改动），而在插件 v1.5.0 误删 v1.4.0 的 deferred loading 修复。
