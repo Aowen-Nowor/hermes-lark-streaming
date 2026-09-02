@@ -28,7 +28,7 @@
     * Gitee API 会在创建 Release 时自动创建对应的 tag（如果不存在）
 
 版本号从 plugin.yaml 提取（grep + sed，不依赖 PyYAML）。
-CHANGELOG.md 内容作为 Release body（顶部加完整更新日志链接，用户点击可跳转）。
+Release body 只放完整更新日志链接（v1.7.0 勘误：此前描述与 build_release_body 实现矛盾——不再把 CHANGELOG.md 全文塞进 body，用户点击链接查看）。
 """
 
 from __future__ import annotations

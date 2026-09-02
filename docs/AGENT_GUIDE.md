@@ -1,7 +1,7 @@
 # hermes-lark-streaming 安装指南
 
 > 高信息密度参考文档，专为 Agent 自动解析设计
-> 最后更新: 2026-07-21 (v1.6.0)
+> 最后更新: 2026-08-26 (v1.7.0)
 
 ## 快速概览
 
@@ -196,7 +196,8 @@ display:
 - `on_reasoning_delta` - 推理增量更新
 - `on_tool_updated` - 工具调用更新
 - `on_background_review_message` - 后台审查消息
-- `on_cron_deliver` - 定时任务交付
+
+> v1.7.0：`on_cron_deliver` 已删除（死代码，从未被调用——cron 卡片由 `_wrap_cron_deliver` 直接驱动；RELAY 部署由 `RelayAdapter.send_for_platform` 包装器驱动）。
 
 ## 故障排查
 

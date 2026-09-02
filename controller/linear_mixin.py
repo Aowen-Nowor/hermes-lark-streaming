@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
+import re as _re
 import time as _time
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
@@ -22,7 +22,11 @@ from ..cardkit import (
     build_preservative_seal_actions,
     _count_tag_objects,
     _enforce_card_element_limit,
+    # v1.7.0 (R2-12/R4): shared collapse-hint detection (bilingual-safe)
+    _is_collapse_hint_child,
 )
+# v1.7.0 (R4): bilingual collapse hint / truncation strings
+from ..cardkit.i18n import _T, _i18n
 from ..cardkit.md import _downgrade_tables, escape_markdown_asterisks, optimize_markdown_style
 from ..state.linear import UnifiedLinearState
 from ..state.text import split_reasoning_text
@@ -112,11 +116,19 @@ async def _process_media_images(client: Any, text: str) -> str:
     return result
 
 # NOTE: This is the *server-side flush interval* (how often we send
-_ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 70ms 上调）
 # MEDIA 路径匹配正则 - 用于 _process_media_images
 # 注意：这里用 IMG: 而非 MEDIA:，因为 MEDIA: 会被 Hermes 平台层拦截发送为独立附件
 # IMG: 只在插件内生效，不会被平台处理
-_IMG_PATH_RE = re.compile(r'IMG:([^\s\n]+)')
+_IMG_PATH_RE = _re.compile(r'IMG:([^\s\n]+)')
+
+# v1.7.0 (R2-09): the answer-only fast-lane interval is configurable via
+# hermes_lark_streaming.answer_flush_interval_ms (default 150ms) — was the
+# hardcoded _ANSWER_FAST_STREAM_MS.
+def _answer_fast_stream_sec(cfg: Any) -> float:
+    try:
+        return cfg.answer_flush_interval_sec
+    except Exception:
+        return 0.150
 
 class UnifiedControllerMixin:
     """Unified panel linear mode — phased card lifecycle."""
@@ -258,7 +270,7 @@ class UnifiedControllerMixin:
 
         _answer_only = state.answer_dirty and not state.panel_dirty and not state.tool_steps_dirty
         if _answer_only:
-            session.flush.set_throttle(_ANSWER_FAST_STREAM_MS)
+            session.flush.set_throttle(_answer_fast_stream_sec(self._cfg))
         else:
             session.flush.set_throttle(self._cfg.flush_interval_sec)
 
@@ -357,6 +369,32 @@ class UnifiedControllerMixin:
                         state.panel_dirty = False
                         state.answer_dirty = False
                         state.tool_steps_dirty = False
+                        # v1.7.0 (R1-03): the add_elements that would have
+                        # replaced the loading hint was rejected PERMANENTLY.
+                        # Previously the dirty flags were cleared and nothing
+                        # else happened: the card kept animating its loading
+                        # hint and the whole answer was silently dropped.
+                        # Close streaming NOW so the card leaves the loading
+                        # state (close_streaming is idempotent and batch_update
+                        # still works after close — verified E2E), and let
+                        # _do_linear_complete deliver the answer via text
+                        # fallback (answer element never created → see the
+                        # R1-03 branch in _do_linear_complete).
+                        if not session._streaming_closed:
+                            try:
+                                session.sequence += 1
+                                await self._client.cardkit_close_streaming(
+                                    session.card_id,
+                                    sequence=session.sequence,
+                                    summary="",
+                                )
+                                session._streaming_closed = True
+                            except FeishuAPIError:
+                                _logger.debug(
+                                    "schema-error close_streaming failed card=%s",
+                                    session.card_id[:12],
+                                    exc_info=True,
+                                )
                         return
                     elif is_element_not_found_error(e):
                         _logger.warning(
@@ -394,8 +432,10 @@ class UnifiedControllerMixin:
                     return
 
             # Note: skip markdown optimization during streaming for performance;
+            # v1.7.0 (R2-01): escaped_answer_view caches the escape incrementally
+            # (was: full-text escape on every flush).
             if state.answer_dirty:
-                content = escape_markdown_asterisks(state.answer_text or " ")
+                content = state.escaped_answer_view() or " "
                 session.sequence += 1
                 try:
                     await self._client.cardkit_stream_element(
@@ -530,7 +570,8 @@ class UnifiedControllerMixin:
 
         # Note: skip markdown optimization during streaming for performance;
         if state.answer_dirty and "answer" in session._creation_stages:
-            content = escape_markdown_asterisks(state.answer_text or " ")
+            # v1.7.0 (R2-01): incremental escape cache (was full-text escape).
+            content = state.escaped_answer_view() or " "
             session.sequence += 1
             try:
                 await self._client.cardkit_stream_element(
@@ -668,7 +709,8 @@ class UnifiedControllerMixin:
 
                 # ── Flush remaining answer text ──
                 if state.answer_dirty and "answer" in session._creation_stages and not session._streaming_closed:
-                    content = escape_markdown_asterisks(state.answer_text or " ")
+                    # v1.7.0 (R2-01): incremental escape cache (was full-text escape).
+                    content = state.escaped_answer_view() or " "
                     try:
                         session.sequence += 1
                         _logger.info(
@@ -811,42 +853,51 @@ class UnifiedControllerMixin:
                     if hint_idx is None:
                         total_count += 1
                     trimmed_count = 0
+                    # v1.7.0 (R2-12): cache per-child tag counts — the old loop
+                    # re-counted every removed subtree on every pop.
+                    child_tag_counts = [_count_tag_objects([_c]) for _c in children]
                     while total_count > threshold and len(children) > 1:
-                        # Skip the collapse hint (first child if it contains "已折叠")
-                        remove_idx = 1 if children[0].get("content", "").endswith("已折叠") else 0
-                        removed = children.pop(remove_idx)
-                        total_count -= _count_tag_objects([removed])
+                        # Skip the collapse hint (first child when it is one)
+                        remove_idx = 1 if _is_collapse_hint_child(children[0]) else 0
+                        children.pop(remove_idx)
+                        total_count -= child_tag_counts.pop(remove_idx)
                         trimmed_count += 1
                     if trimmed_count > 0:
                         # Update or add collapse hint
                         # Re-find hint_idx (may have shifted due to removals)
                         hint_idx = None
                         for i, child in enumerate(children):
-                            if isinstance(child.get("content"), str) and "已折叠" in child["content"]:
+                            if _is_collapse_hint_child(child):
                                 hint_idx = i
                                 break
+                        _en_hint, _zh_hint = _T["collapse_hint_count"]
                         if hint_idx is not None:
-                            old_hint = children[hint_idx]["content"]
-                            # Parse existing trimmed count, then add new count
-                            # (same logic as _enforce_card_element_limit in cards.py)
-                            existing_count = 0
-                            _idx = old_hint.find("项")
-                            if _idx > 0:
-                                # Walk backwards skipping whitespace, then collect digits
-                                _end = _idx
-                                while _end > 0 and old_hint[_end - 1] == ' ':
-                                    _end -= 1
-                                _start = _end
-                                while _start > 0 and old_hint[_start - 1].isdigit():
-                                    _start -= 1
-                                if _start < _end:
-                                    existing_count = int(old_hint[_start:_end])
+                            old_hint = str(children[hint_idx].get("content", ""))
+                            # v1.7.0 (R4): sum ALL digit groups so both hint
+                            # formats count correctly — the seal format
+                            # "⚡ 还有 N 项已折叠" (one group) and the panel
+                            # builder format "⚡ 还有 X 轮早期推理、Y 步早期操作
+                            # 已折叠" (two groups whose SUM is the collapsed
+                            # total). The old "项"-anchored parser only
+                            # understood the seal format and silently dropped
+                            # the panel builder's already-collapsed count.
+                            existing_count = sum(
+                                int(_n) for _n in _re.findall(r"\d+", old_hint)
+                            )
                             total_trimmed = existing_count + trimmed_count
-                            children[hint_idx]["content"] = f"⚡ 还有 {total_trimmed} 项已折叠"
+                            children[hint_idx]["content"] = _zh_hint.format(total_trimmed)
+                            children[hint_idx]["i18n_content"] = _i18n(
+                                _en_hint.format(total_trimmed),
+                                _zh_hint.format(total_trimmed),
+                            )
                         else:
                             children.insert(0, {
                                 "tag": "markdown",
-                                "content": f"⚡ 还有 {trimmed_count} 项已折叠",
+                                "content": _zh_hint.format(trimmed_count),
+                                "i18n_content": _i18n(
+                                    _en_hint.format(trimmed_count),
+                                    _zh_hint.format(trimmed_count),
+                                ),
                                 "text_size": "notation",
                             })
                         # Update panel's elements
@@ -1026,6 +1077,16 @@ class UnifiedControllerMixin:
                 session._streaming_closed = True
             return False
         except Exception:
+            # v1.7.0 (R1-02): was a silent `return False` — any non-FeishuAPIError
+            # exception (network error after retries, programming error) left
+            # zero log evidence while the session was still marked
+            # CREATION_FAILED by the caller.
+            _logger.warning(
+                "preservative seal failed unexpectedly card=%s — session will "
+                "be marked CREATION_FAILED",
+                (card_id or "?")[:12],
+                exc_info=True,
+            )
             return False
 
     async def _do_linear_complete(self, session: CardSession) -> bool:
@@ -1108,7 +1169,8 @@ class UnifiedControllerMixin:
 
             # ── Drain answer text ──
             if state.answer_dirty and "answer" in session._creation_stages:
-                content = escape_markdown_asterisks(state.answer_text or " ")
+                # v1.7.0 (R2-01): incremental escape cache (was full-text escape).
+                content = state.escaped_answer_view() or " "
                 try:
                     session.sequence += 1
                     _logger.info(
@@ -1148,7 +1210,15 @@ class UnifiedControllerMixin:
                         _logger.warning("HLS: drain answer failed: %s", e)
 
             if _drain_round < _MAX_DRAIN_ROUNDS - 1:
-                await asyncio.sleep(_DRAIN_YIELD_SEC)
+                # v1.7.0 (R2-07): yield ONLY when another round is actually
+                # needed — a clean drain used to pay a pointless 20ms sleep
+                # on every round (and up to 8 sleeps on the happy path where
+                # round 1 already cleared everything).
+                if (
+                    state is not None
+                    and (state.answer_dirty or state.panel_dirty or state.tool_steps_dirty)
+                ):
+                    await asyncio.sleep(_DRAIN_YIELD_SEC)
 
         # ── Final drain check: log warning if dirty data remains ──
         if state is not None and (state.answer_dirty or state.panel_dirty or state.tool_steps_dirty):
@@ -1211,14 +1281,50 @@ class UnifiedControllerMixin:
             # v1.3.4 fix (P1): 如果会话已被 on_aborted 标记为 ABORTED，
             if session._was_aborted:
                 session.state = ABORTED
+                # v1.7.0 (R3-01): record terminal reason/source + bump epoch
+                # on the most common terminal path (previously only
+                # CREATION_FAILED/TERMINATED called enter_terminal).
+                session.enter_terminal(
+                    reason=TerminalReason.ABORT,
+                    source="_do_linear_complete",
+                )
             else:
                 session.state = COMPLETED
+                session.enter_terminal(
+                    reason=TerminalReason.NORMAL,
+                    source="_do_linear_complete",
+                )
+            # v1.7.0 (R1-03): if the answer element was never created (Phase 2
+            # SCHEMA ERROR mid-stream), the card shows no answer at all —
+            # snapshot the text BEFORE releasing state and deliver it as a
+            # plain text reply so the user still gets the response.
+            _lost_answer = ""
+            if (
+                state is not None
+                and state.answer_text
+                and "answer" not in session._creation_stages
+            ):
+                _lost_answer = state.answer_text
             # v1.1.1: 释放重数据（unified_state/text/tool_use），减少内存占用
             # session 留最小元数据等 _prune_stale_sessions 清理
             try:
                 self._release_session_data(session)
             except Exception:
                 _logger.debug("HLS: release session data failed", exc_info=True)
+            if _lost_answer:
+                _logger.warning(
+                    "linear complete: answer element never created (schema "
+                    "error?) — delivering answer via text fallback msg=%s len=%d",
+                    (session.message_id or "?")[:12], len(_lost_answer),
+                )
+                try:
+                    await self._send_text_fallback(session, fallback_text=_lost_answer)
+                except Exception:
+                    _logger.warning(
+                        "linear complete: lost-answer text fallback failed msg=%s",
+                        (session.message_id or "?")[:12],
+                        exc_info=True,
+                    )
             # v1.1.0: Record metrics
             try:
                 from ..aowen import record_card_completed

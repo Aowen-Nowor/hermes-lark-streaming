@@ -14,7 +14,6 @@ from hermes_lark_streaming.patching.hooks import (
     _safe_hook,
     on_answer_delta,
     on_background_review_message,
-    on_cron_deliver,
     on_feishu_normalize,
     on_message_aborted,
     on_message_completed,
@@ -519,89 +518,6 @@ class TestOnMessageInterrupted:
 
         assert result is None
         ctrl.on_interrupted.assert_not_called()
-
-
-# ── on_cron_deliver (async) ──
-
-
-class TestOnCronDeliver:
-    """on_cron_deliver: async, loop check, enabled check, exception handling."""
-
-    @pytest.mark.asyncio
-    async def test_returns_false_when_loop_is_none(self) -> None:
-        """When loop is None, return False immediately."""
-        result = await on_cron_deliver(chat_id="c1", content="hello", loop=None)
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_returns_false_when_controller_disabled(self) -> None:
-        ctrl = _make_ctrl(enabled=False)
-
-        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
-            result = await on_cron_deliver(
-                chat_id="c1", content="hello", loop=MagicMock()
-            )
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_returns_true_on_successful_call(self) -> None:
-        ctrl = _make_ctrl(enabled=True)
-        ctrl.on_cron_deliver_async = AsyncMock(return_value=True)
-
-        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
-            result = await on_cron_deliver(
-                chat_id="c1", content="hello", loop=MagicMock()
-            )
-
-        assert result is True
-        ctrl.on_cron_deliver_async.assert_called_once_with(
-            chat_id="c1", content="hello", loop=ctrl.on_cron_deliver_async.call_args[1]["loop"]
-        )
-
-    @pytest.mark.asyncio
-    async def test_returns_bool_of_result(self) -> None:
-        ctrl = _make_ctrl(enabled=True)
-        ctrl.on_cron_deliver_async = AsyncMock(return_value="truthy_value")
-
-        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
-            result = await on_cron_deliver(
-                chat_id="c1", content="hello", loop=MagicMock()
-            )
-
-        assert result is True  # bool("truthy_value") is True
-
-    @pytest.mark.asyncio
-    async def test_returns_false_on_exception(self) -> None:
-        ctrl = _make_ctrl(enabled=True)
-        ctrl.on_cron_deliver_async = AsyncMock(side_effect=RuntimeError("fail"))
-
-        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
-            result = await on_cron_deliver(
-                chat_id="c1", content="hello", loop=MagicMock()
-            )
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_is_async_function(self) -> None:
-        """on_cron_deliver should be an async function (uses await)."""
-        import inspect
-
-        assert inspect.iscoroutinefunction(on_cron_deliver)
-
-    @pytest.mark.asyncio
-    async def test_passes_loop_to_on_cron_deliver_async(self) -> None:
-        ctrl = _make_ctrl(enabled=True)
-        ctrl.on_cron_deliver_async = AsyncMock(return_value=True)
-        loop = MagicMock()
-
-        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
-            await on_cron_deliver(chat_id="c1", content="hello", loop=loop)
-
-        ctrl.on_cron_deliver_async.assert_called_once_with(
-            chat_id="c1", content="hello", loop=loop
-        )
 
 
 # ── on_feishu_normalize ──

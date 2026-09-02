@@ -89,14 +89,19 @@ def build_cron_card(content: str) -> dict[str, Any]:
         "config": {"locales": _LOCALES},
         "body": {"elements": []},
     }
-    if not content.strip():
-        return card
-    summary = content[:120].replace("\n", " ").replace("```", "").strip()
-    if summary:
-        card["config"]["summary"] = {"content": summary}
-    for chunk in _split_long_text(_downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES)):
-        if chunk.strip():
-            card["body"]["elements"].append({"tag": "markdown", "content": chunk})
+    if content.strip():
+        summary = content[:120].replace("\n", " ").replace("```", "").strip()
+        if summary:
+            card["config"]["summary"] = {"content": summary}
+        for chunk in _split_long_text(_downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES)):
+            if chunk.strip():
+                card["body"]["elements"].append({"tag": "markdown", "content": chunk})
+    # v1.7.0 (R4-10, E2E T7 铁证): body.elements=[] 被飞书 Card 2.0 直接拒绝
+    # （230099/200621 "parse card json err"）。空内容的 cron 推送以前必产生
+    # 一张非法卡 + 一次必败 API + 静默降级纯文本。单个空格 markdown 与
+    # loading hint 占位符同构，schema 合法且渲染为空。
+    if not card["body"]["elements"]:
+        card["body"]["elements"].append({"tag": "markdown", "content": " "})
     return card
 
 def build_gateway_card(content: str, *, category: str = "", status_label: str = "", status_emoji: str = "") -> dict[str, Any]:
@@ -129,6 +134,12 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
     summary = content[:120].replace("\n", " ").replace("```", "").strip() if content.strip() else ""
     if summary:
         card["config"]["summary"] = {"content": summary}
+
+    # v1.7.0 (R4-10, E2E T7): same empty-body guard as build_cron_card —
+    # status-only updates (no status_label, no content) previously produced
+    # a schema-invalid card.
+    if not card["body"]["elements"]:
+        card["body"]["elements"].append({"tag": "markdown", "content": " "})
 
     return card
 
@@ -274,22 +285,23 @@ def build_clarify_submitted_card(*, question: str, selected: str, clarify_id: st
             },
         },
         {
-            "tag": "action",
-            "actions": [{
-                "tag": "button",
-                "text": {
-                    "tag": "plain_text",
-                    "content": en_retry,
-                    "i18n_content": _i18n(en_retry, zh_retry),
+            # v1.7.0 (E2E T8b→A3 铁证): "action" 容器在 Card 2.0 已废弃
+            # （230099/200861 "cards of schema V2 no longer support this
+            # capability; unsupported tag action"）— button 必须是顶层元素。
+            # 修复后的结构已经真飞书 E2E 验证通过（A3 SUCCESS）。
+            "tag": "button",
+            "text": {
+                "tag": "plain_text",
+                "content": en_retry,
+                "i18n_content": _i18n(en_retry, zh_retry),
+            },
+            "type": "primary",
+            "behaviors": [{
+                "type": "callback",
+                "value": {
+                    "hermes_clarify_action": "retry_submit",
+                    "clarify_id": clarify_id,
                 },
-                "type": "primary",
-                "behaviors": [{
-                    "type": "callback",
-                    "value": {
-                        "hermes_clarify_action": "retry_submit",
-                        "clarify_id": clarify_id,
-                    },
-                }],
             }],
         },
     ]

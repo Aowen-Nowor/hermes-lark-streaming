@@ -10,7 +10,7 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 1.6.0 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
+| 版本 | 1.7.0 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
 
 ---
 
@@ -27,7 +27,7 @@
             ├─ reasoning_callback ──── [Hook 6: on_reasoning_delta]
             ├─ tool_progress_callback [Hook 3: on_tool_updated]
             └─ background_review_cb ── [Hook 7: on_background_review]
-Cron: _deliver_result ── [Hook 10: on_cron_deliver] (async)
+Cron: _deliver_result ── (v1.7.0: 无 hook —— _wrap_cron_deliver 直接调 ctrl._do_cron_deliver；RELAY 部署走 RelayAdapter.send_for_platform 包装器)
 Background: _run_background_task ── [Hook 1/2]
 ```
 
@@ -230,11 +230,15 @@ v1.5.0 删除 IM 降级路径（生产从未触发）。CardKit v2 创建失败�
 
 ```yaml
 hermes_lark_streaming:
+  enabled: true                    # v1.7.0 文档化：插件总开关（默认 true）
+  linear: true                     # v1.7.0 文档化：线性模式（默认 true，唯一支持的路径，保留以兼容旧配置）
+  gateway_cards: true              # v1.7.0 文档化：gateway 内部消息转卡片（默认 true；false 时退纯文本）
   panel_expanded: false
   streaming_panel_expanded: false
   print_strategy: delay            # "fast" 或 "delay"
   print_step: 4                    # 打字机每次渲染字符数（默认4，范围1~10，需飞书7.23+）
-  flush_interval_ms: 200           # 插件发送间隔（默认200ms）
+  flush_interval_ms: 200           # 面板+答案混合刷新间隔（默认200ms，范围70~2000）
+  answer_flush_interval_ms: 150    # v1.7.0 新增：answer-only 快车道刷新间隔（默认150ms，原硬编码）
   card_ttl_sec: 600
   max_tool_steps: 20               # 范围 1~100
   max_reasoning_rounds: 20         # 范围 1~100
@@ -250,9 +254,16 @@ display:
   show_reasoning: true
 ```
 
+**凭据环境变量**（v1.7.0 文档化，优先于 config.yaml 的 feishu 节）：
+`FEISHU_APP_ID` / `FEISHU_APP_SECRET`（或 `LARK_APP_ID` / `LARK_APP_SECRET`），
+可选 `FEISHU_BASE_URL` / `LARK_BASE_URL`（默认 `https://open.feishu.cn/open-apis`，
+Lark 海外版设 `https://open.larksuite.com/open-apis`，或用 `FEISHU_DOMAIN=lark` 简写）。
+
 ---
 
-## 9. Hook 索引 (13 个注入点)
+## 9. Hook 索引 (12 个注入点)
+
+v1.7.0：`on_cron_deliver` 已删除（死代码——`_wrap_cron_deliver` 直接调 `ctrl._do_cron_deliver`，该 hook 从未被调用；grep 全仓 + hermes v0.20.5 源码交叉验证）。表格顺序与 `plugin.yaml provides_hooks` 一致（v1.7.0 勘误：此前两处顺序不一致）。
 
 | # | Hook | 签名 | 说明 |
 |---|------|------|------|
@@ -260,15 +271,14 @@ display:
 | 1 | `on_feishu_normalize` | sync | 修正飞书引用消息虚假 thread_id |
 | 2 | `on_message_started` | sync | 创建 CardSession |
 | 3 | `on_message_completed` | sync→bool | 完成态卡片，返回是否已发卡片 |
-| 4 | `on_tool_updated` | sync | 工具调用状态更新 |
-| 5 | `on_answer_delta` | sync | AI 回复增量文本 |
-| 6 | `on_thinking_delta` | sync | 思考内容（被跳过防重复） |
-| 7 | `on_reasoning_delta` | sync | 原生推理增量 |
-| 8 | `on_background_review_message` | sync | 后台审查通知 |
-| 9 | `on_message_aborted` | sync | 消息异常终止 |
-| 10 | `on_message_interrupted` | sync | 新消息打断旧消息 |
-| 11 | `on_cron_deliver` | **async** | Cron 推送卡片 |
-| 12 | `on_message_completed`(bg) | sync | 后台任务卡片（复用 Hook 3，但用 task_id 作为 message_id，调用场景不同） |
+| 4 | `on_message_aborted` | sync | 消息异常终止 |
+| 5 | `on_message_interrupted` | sync | 新消息打断旧消息 |
+| 6 | `on_answer_delta` | sync | AI 回复增量文本 |
+| 7 | `on_thinking_delta` | sync | 思考内容（被跳过防重复） |
+| 8 | `on_reasoning_delta` | sync | 原生推理增量 |
+| 9 | `on_tool_updated` | sync | 工具调用状态更新 |
+| 10 | `on_background_review_message` | sync | 后台审查通知 |
+| 11 | `on_message_completed`(bg) | sync | 后台任务卡片（复用 Hook 3，但用 task_id 作为 message_id，调用场景不同） |
 
 ---
 
@@ -352,4 +362,4 @@ hermes gateway restart
 
 ---
 
-*Last updated: 2026-07-21 | Version: 1.6.0*
+*Last updated: 2026-08-26 | Version: 1.7.0*

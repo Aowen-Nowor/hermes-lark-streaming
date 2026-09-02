@@ -13,7 +13,7 @@ authors = [
     {name = "Aowen-Nowor"},
 ]
 dependencies = [
-    "lark-oapi>=1.4.0",
+    "lark-oapi>=1.4.24",  # v1.7.0: 1.4.0 has NO async cardkit API (acreate/aupdate/abatch_update/asettings) — plugin cannot run; 1.4.24+ verified to ship the full async set incl. card_element.acontent
     "PyYAML>=6.0",
 ]
 
