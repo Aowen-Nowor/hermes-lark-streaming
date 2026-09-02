@@ -717,6 +717,8 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         answer: str = "",
         duration: float = 0.0,
         model: str = "",
+        provider: str = "",
+        session_title: str = "",
         tokens: dict | None = None,
         context: dict | None = None,
         api_calls: int = 0,
@@ -855,6 +857,8 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         session.footer = {
             "duration": duration,
             "model": model,
+            "provider": provider,
+            **({"session_title": session_title} if session_title else {}),
             **({"input_tokens": tokens.get("input_tokens")} if tokens else {}),
             **({"output_tokens": tokens.get("output_tokens")} if tokens else {}),
             **({"cache_read_tokens": tokens.get("cache_read_tokens")} if tokens and tokens.get("cache_read_tokens") else {}),

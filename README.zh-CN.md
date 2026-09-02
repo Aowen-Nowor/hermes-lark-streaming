@@ -132,6 +132,9 @@ hermes_lark_streaming:
   card_ttl_sec: 600               # 卡片存活检测超时（秒）
   max_tool_steps: 20               # 统一面板最多显示的工具步骤数（默认20，范围1~100）
   max_reasoning_rounds: 20         # 统一面板最多显示的推理轮次数（默认20，范围1~100）
+  width_mode: default              # 卡片宽度："default"(600px)、"fill"(撑满窗口)、或像素值(如 700, 800)
+  image_size: fit_horizontal        # 图片尺寸："fit_horizontal"、"stretch"、"large"、"medium"、"small"、"tiny"、或 "Wpx Hpx"
+  show_session_title: true          # 是否在卡片顶部显示会话标题
 
   footer:
     show_label: false              # 是否显示字段标签
@@ -141,6 +144,7 @@ hermes_lark_streaming:
       #   status      — 回复状态（已完成 / 出错 / 已停止）
       #   elapsed     — AI 回复耗时
       #   model       — 使用的模型名称
+      #   provider    — 提供商名称（custom provider 自动解析为实际名称）
       #   cost        — 预估费用及可信度（$0.023 估算 / $0.023 实报 / 免费）
       #   compression_exhausted — 上下文已满（⚠ 上下文已满）
       # 以下字段默认不显示 — 在 fields 列表中添加即可启用：
@@ -157,6 +161,15 @@ hermes_lark_streaming:
 ```yaml
 display:
   show_reasoning: true  # 在统一面板中显示推理内容
+```
+
+### 工具调用过渡文字
+
+工具调用前的过渡文字（interim 文本，如"我先查一下…"）默认**不写入**卡片正文，最终答案通过独立的 stream 通道正常显示：
+
+```yaml
+hermes_lark_streaming:
+  interim_to_answer: false  # true 时恢复旧行为：过渡文字作为答案追加进正文
 ```
 
 ### 统一面板超限压缩

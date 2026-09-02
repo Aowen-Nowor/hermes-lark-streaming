@@ -128,6 +128,9 @@ feishu:
 | `print_step` | `4` | 1–10 | 打字机每次渲染字符数（需飞书7.23+） |
 | `panel_expanded` | `false` | bool | 完成态卡片面板是否展开 |
 | `streaming_panel_expanded` | `false` | bool | 流式态卡片面板是否展开 |
+| `width_mode` | `default` | `default`/`fill`/整数 | 卡片宽度：`default`(600px)、`fill`(撑满窗口)、或像素值(如 `700`、`800`) |
+| `image_size` | `fit_horizontal` | 预设值/自定义 | 图片尺寸：`fit_horizontal`、`stretch`、`large`、`medium`、`small`、`tiny`、或 `Wpx Hpx` |
+| `show_session_title` | `true` | bool | 是否在卡片顶部显示会话标题 |
 | `footer.show_label` | `false` | bool | 是否显示页脚字段标签 |
 | `footer.fields` | `[[status, elapsed, model, cost, compression_exhausted]]` | array | 页脚字段配置 |
 
@@ -148,10 +151,13 @@ hermes_lark_streaming:
   flush_interval_ms: 200
   print_strategy: delay
   print_step: 4
+  width_mode: default
+  image_size: fit_horizontal
+  show_session_title: true
   footer:
     show_label: false
     fields:
-      - [status, elapsed, model, cost, compression_exhausted]
+      - [status, elapsed, model, provider, cost, compression_exhausted]
 
 # display 节是 Hermes 全局配置，不在 hermes_lark_streaming 下
 display:

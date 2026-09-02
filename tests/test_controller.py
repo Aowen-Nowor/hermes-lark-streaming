@@ -1416,6 +1416,9 @@ class TestLinearOnThinkingNativeReasoningDedup:
     def test_dedup_with_mixed_reasoning_and_answer(self) -> None:
         """When reasoning is already tracked, only answer part is processed from thinking."""
         ctrl, session = self._make_dedup_session()
+        # v1.7.0: 该场景验证的是"reasoning 去重时 answer 仍处理"，需要显式
+        # 开启 interim_to_answer（新默认 False 下 interim answer 不写入正文）
+        ctrl._cfg._raw.setdefault("hermes_lark_streaming", {})["interim_to_answer"] = True
 
         # Simulate reasoning_callback delivering text — populates
         # _current_reasoning, which serves as the dedup guard.
@@ -1431,6 +1434,66 @@ class TestLinearOnThinkingNativeReasoningDedup:
 
         # Answer should be set (no streamed answer yet)
         assert "Here is my answer" in session.unified_state.answer_text
+
+
+class TestLinearOnThinkingInterimToAnswer:
+    """v1.7.0: interim_to_answer 配置控制过渡文字是否写入卡片正文.
+
+    工具调用前的过渡文字（interim_assistant_callback 通道）默认不再作为
+    答案写入正文——最终答案走 stream_delta_callback，两条通道独立。
+    interim_to_answer=True 时恢复旧行为（追加进正文）。
+    """
+
+    def _make_session_with_cfg(self, *, interim_to_answer: bool) -> tuple:
+        ctrl = _setup_ctrl(linear=True)
+        # 默认配置（False）和显式 True 分别注入 _raw
+        ctrl._cfg._raw.setdefault("hermes_lark_streaming", {})["interim_to_answer"] = interim_to_answer
+        session = _make_session("msg_interim", linear=True)
+        session.state = STREAMING
+        ctrl._sessions["msg_interim"] = session
+        return ctrl, session
+
+    def test_default_false_skips_answer_from_interim(self) -> None:
+        """默认 interim_to_answer=False：interim 文本的 answer 部分不写入正文."""
+        ctrl, session = self._make_session_with_cfg(interim_to_answer=False)
+
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            ctrl._linear_on_thinking(session, "我先查一下文件内容")
+
+        assert session.unified_state.answer_text == ""
+
+    def test_true_accepts_answer_from_interim(self) -> None:
+        """interim_to_answer=True：interim 文本的 answer 部分写入正文（旧行为）."""
+        ctrl, session = self._make_session_with_cfg(interim_to_answer=True)
+
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            ctrl._linear_on_thinking(session, "我先查一下文件内容")
+
+        assert session.unified_state.answer_text == "我先查一下文件内容"
+
+    def test_reasoning_still_processed_when_disabled(self) -> None:
+        """interim_to_answer=False 只拦 answer 部分，reasoning 部分不受影响."""
+        ctrl, session = self._make_session_with_cfg(interim_to_answer=False)
+        ctrl._cfg._reload_cached = lambda: {
+            "display": {"platforms": {"feishu": {"show_reasoning": True}}},
+        }
+
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            ctrl._linear_on_thinking(session, "Reasoning:\nThe user is asking about Python")
+
+        assert session.unified_state.current_reasoning_text == "The user is asking about Python"
+        assert session.unified_state.answer_text == ""
+
+    def test_true_restores_incremental_append(self) -> None:
+        """interim_to_answer=True 时保留增量追加去重逻辑（interim 携带全文）."""
+        ctrl, session = self._make_session_with_cfg(interim_to_answer=True)
+
+        # 先写入部分答案，interim 携带完整文本时应只追加新部分
+        session.unified_state.on_answer_delta("prefix")
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            ctrl._linear_on_thinking(session, "prefix-suffix")
+
+        assert session.unified_state.answer_text == "prefix-suffix"
 
 
 # ── v1.1.1 新增测试 ──

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -161,6 +162,16 @@ class Config:
         return self.flush_interval_ms / 1000.0
 
     @property
+    def interim_to_answer(self) -> bool:
+        """interim 文本（工具调用前过渡文字）是否作为答案写入卡片正文。
+
+        默认 False = 过渡文字不进入正文（最终答案仍走 stream 通道正常显示）。
+        设 True 恢复旧行为（interim 文本的 answer 部分追加进正文）。
+        """
+        sec = self._plugin_sec()
+        return _to_bool(sec.get("interim_to_answer", False))
+
+    @property
     def answer_flush_interval_ms(self) -> float:
         """answer-only 流式刷新间隔 (ms). 默认 150.
 
@@ -201,6 +212,41 @@ class Config:
         return str(self._platform_cfg().get("base_url", "https://open.feishu.cn/open-apis"))
 
     @property
+    def card_width(self) -> str | int:
+        """卡片宽度: "default"(600px), "fill"(撑满窗口), 或自定义像素值(如 700, 800)."""
+        sec = self._plugin_sec()
+        val = sec.get("width_mode", "default")
+        if isinstance(val, int) and val > 0:
+            return val
+        if isinstance(val, str):
+            stripped = val.strip()
+            if stripped in ("default", "fill"):
+                return stripped
+            try:
+                n = int(stripped)
+                if n > 0:
+                    return n
+            except (ValueError, TypeError):
+                pass
+        return "default"
+
+    @property
+    def image_size(self) -> str:
+        sec = self._plugin_sec()
+        val = sec.get("image_size", "fit_horizontal")
+        if not isinstance(val, str):
+            return "fit_horizontal"
+        stripped = val.strip()
+        _SIZE_PRESETS = frozenset({
+            "fit_horizontal", "stretch", "large", "medium", "small", "tiny",
+        })
+        if stripped in _SIZE_PRESETS:
+            return stripped
+        if re.match(r'^\d+px\s+\d+px$', stripped):
+            return stripped
+        return "fit_horizontal"
+
+    @property
     def card_duration_sec(self) -> int:
         return _to_int(self._plugin_sec().get("card_ttl_sec", 600), default=600)
 
@@ -226,6 +272,12 @@ class Config:
         return _to_bool(footer.get("show_label", False))
 
     @property
+    def show_session_title(self) -> bool:
+        """是否在卡片顶部显示会话标题。默认 True."""
+        sec = self._plugin_sec()
+        return _to_bool(sec.get("show_session_title", True), default=True)
+
+    @property
     def gateway_cards(self) -> bool:
         """默认 True. TTL 缓存读取."""
         sec = self._reload_cached().get("hermes_lark_streaming")
@@ -235,7 +287,7 @@ class Config:
 
     @staticmethod
     def _default_footer_fields() -> list[list[str]]:
-        return [["status", "elapsed", "model", "cost", "compression_exhausted"]]
+        return [["status", "elapsed", "model", "provider", "cost", "compression_exhausted"]]
 
     @property
     def env_app_id(self) -> str:
