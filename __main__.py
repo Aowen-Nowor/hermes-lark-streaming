@@ -221,6 +221,24 @@ def _cmd_doctor() -> int:
         print(f"[1/6] Plugin version:    IMPORT FAILED — {e}")
         return 2
 
+    # v1.8.0 (P1-1): lark-oapi 门槛检查——hermes >= 0.19 传 extra_ua_tags，
+    # lark-oapi < 1.6.4 不认该参数 → 飞书 WS 断连（2026-07-21 生产中断根因）。
+    try:
+        import importlib.metadata as _md
+        _lark_v = _md.version("lark-oapi")
+        def _vt(v):
+            try:
+                return tuple(int(p) for p in v.split(".")[:3])
+            except Exception:
+                return ()
+        if _vt(_lark_v) >= (1, 6, 4):
+            print(f"      lark-oapi:         {_lark_v} ✓ (required >=1.6.4)")
+        else:
+            print(f"      lark-oapi:         {_lark_v} ✗ BELOW required >=1.6.4")
+            print("      Fix: pip install -U 'lark-oapi>=1.6.4'")
+    except Exception:
+        print("      lark-oapi:         (version unknown — is lark-oapi installed?)")
+
     print(f"[2/6] Python:             {sys.version.split()[0]}")
     hermes_home = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
     print(f"      HERMES_HOME:        {hermes_home}")

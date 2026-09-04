@@ -28,6 +28,20 @@ def _classify_gateway_message(content: str) -> str:
     # Auth / pairing messages
     if any(kw in content for kw in ("pairing code", "pairing requests", "配对码", "I don't recognize you")):
         return "auth"
+    # v1.8.0 (P3-4): Gateway lifecycle notices — informational, NOT errors.
+    # hermes _notify_active_sessions_of_shutdown (gateway/run.py) hardcodes
+    # "⚠️ Gateway restarting — …" / "⚠️ Gateway shutting down — …"; the
+    # drain path sends "⏳ Gateway restarting — queued for the next turn…"
+    # and zh locales use "♻ 正在重启网关…" / "⏳ 正在等待 N 个活跃代理结束
+    # 后重启…". The ⚠️ prefix made every one of them land in the "error"
+    # bucket below — production 2026-08 audit: 13/13 planned restarts were
+    # misclassified as errors in the card registry / logs.
+    if any(kw in content for kw in (
+        "Gateway restarting", "Gateway shutting down", "Gateway stopping",
+        "queued for the next turn", "not accepting another turn",
+        "Draining", "正在重启网关", "活跃代理结束后重启",
+    )):
+        return "lifecycle"
     # Error messages
     if any(kw in content for kw in ("❌", "⚠️", "error", "failed", "Error", "Failed")):
         return "error"
@@ -720,12 +734,15 @@ def _wrap_handle_card_action_event(original_method: Callable) -> Callable:
         )
 
         if clarify_action:
-            # didn't run (SDK holds stale bound method). Handle clarify resolution
+            # v1.8.0 (P3-2): 文案刷新——v1.5.0 已删除 _on_card_action_trigger
+            # 包装器，自 v1.4.2 起 _handle_card_action_event 就是 clarify 的
+            # 唯一拦截主链路（生产 E2E 6/6 全走此路径）。旧日志里的
+            # "SDK stale bound method path — wrapper bypassed" 描述的是
+            # v1.5.0 之前的废弃架构，误导读者以为降级路径被触发。
             _cid = action_value.get("clarify_id", "") if isinstance(action_value, dict) else ""
             _logger.info(
-                "HLS: clarify card action %r reached _handle_card_action_event "
-                "(SDK stale bound method path — _on_card_action_trigger wrapper "
-                "bypassed), handling clarify resolution here, clarify_id=%s",
+                "HLS: clarify card action %r received — handling clarify "
+                "resolution (main interception path), clarify_id=%s",
                 clarify_action,
                 (_cid or "?")[:12],
             )
@@ -740,7 +757,11 @@ def _wrap_handle_card_action_event(original_method: Callable) -> Callable:
                 )
             return  # suppress /card synthetic command generation
 
-        # which Gateway rejects ("Unknown command /card"). Note: hermes_action /
+        # Non-clarify card actions: hermes' default handler (0.21 源码
+        # plugins/platforms/feishu/adapter.py:3191 _handle_card_action_event)
+        # synthesizes a "/card <tag> <value>" COMMAND message from every card
+        # click, which the gateway then rejects ("Unknown command /card")——
+        # 垃圾命令会污染会话。抑制并打 WARNING 留痕。
         try:
             action_tag = str(getattr(action, "tag", "") or "button")
         except Exception:

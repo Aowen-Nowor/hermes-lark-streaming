@@ -33,6 +33,7 @@ from ..feishu import (
     CARDKIT_SEQUENCE_CONFLICT,
     CARDKIT_STREAMING_CLOSED,
     FeishuAPIError,
+    extract_not_found_element_id,
     is_element_not_found_error,
     is_schema_error,
     is_terminal_api_code,
@@ -287,11 +288,21 @@ class UnifiedControllerMixin:
             new_elements.append(_streaming_element(element_id=ANSWER_ELEMENT_ID))
 
             # Add new elements before loading hint
+            # v1.8.0 (P2-3): 若 hint 已被判定不存在（hint_removed / 已从
+            # existing_elements 移除），insert_before 继续锚 hint 只会在
+            # 重入路径（answer 跟踪被 Phase 3 自愈丢弃后重建）撞 300315。
+            # 退而锚 _LOADING_ELEMENT_ID（底部 loading icon，仅在 seal 时
+            # 删除——seal 自己就用它当 insert_before 目标，合法锚点）。
+            _insert_target = (
+                _LOADING_HINT_ELEMENT_ID
+                if _LOADING_HINT_ELEMENT_ID in session.existing_elements
+                else _LOADING_ELEMENT_ID
+            )
             actions.append({
                 "action": "add_elements",
                 "params": {
                     "type": "insert_before",
-                    "target_element_id": _LOADING_HINT_ELEMENT_ID,
+                    "target_element_id": _insert_target,
                     "elements": new_elements,
                 },
             })
@@ -370,15 +381,38 @@ class UnifiedControllerMixin:
                                 )
                         return
                     elif is_element_not_found_error(e):
+                        # v1.8.0 (P2-3): mirror the v1.4.1 Phase 3 fix.
+                        # Phase 2 的 batch 只引用 loading hint（insert_before
+                        # target + delete）——错误点到 hint 不存在时，唯一合
+                        # 理的解释是：同批次的上一次尝试已在服务端生效（answer
+                        # [+panel] 已插入、hint 已删除），但响应在网络层丢失
+                        # （timeout / SDK 瞬态重试），重发撞上 300315"not find
+                        # elementID"。batch_update 非幂等，这正是 07-02 生产
+                        # 事故链：本分支旧版清空 dirty 却不标记元素已创建 →
+                        # 之后的每次 flush 都全量重建 add_elements batch →
+                        # 300315 死循环 → answer 永远上不了卡片 → 完成时才靠
+                        # 文本兜底重发整条答案。
+                        # 修复：把跟踪状态再同步为服务端真实状态（answer 必在
+                        # 被生效的 batch 里——Path A/B 都会加它），保留 dirty
+                        # 标志并落穿到下方流式区，本次 flush 直接把待发内容
+                        # 写进已存在的元素。panel 存在极小概率误标记（生成期
+                        # race），由 Phase 3 处理器的 element-id 精确自愈兜底。
                         _logger.warning(
-                            "unified flush phase 2 element not found (non-fatal): %s card=%s",
+                            "unified flush phase 2 element not found — "
+                            "re-syncing creation state (prior batch likely "
+                            "applied server-side, non-idempotent retry "
+                            "collision): %s card=%s",
                             e, session.card_id[:12],
                         )
+                        session._creation_stages.add("answer")
+                        session.existing_elements.add(ANSWER_ELEMENT_ID)
+                        session._creation_stages.add("hint_removed")
                         session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
-                        state.panel_dirty = False
-                        state.answer_dirty = False
-                        state.tool_steps_dirty = False
-                        return
+                        if _has_panel:
+                            session._creation_stages.add("panel")
+                            session.existing_elements.add(UNIFIED_PANEL_ELEMENT_ID)
+                        # 不清 panel_dirty / answer_dirty / tool_steps_dirty：
+                        # 落穿到本函数下半段的流式/Phase3 更新路径。
                     else:
                         # v1.3.3 fix (P0): transient API error (rate limit, auth
                         _logger.warning(
@@ -529,6 +563,31 @@ class UnifiedControllerMixin:
                     # v1.4.1 fix (P1): Phase 3 batch_update 元素不存在 (300315 +
                     # warning 分支 → hint_removed 仍未同步 + existing_elements
                     # 重试。info 级别 (不是 warning/error) — 不是真正的故障。
+                    # v1.8.0 (P2-3): 错误消息点名的 elementID 现在被解析——
+                    # 若是 panel/answer 本体不存在，丢弃对应跟踪标记，让下轮
+                    # flush 走 add 路径重建该元素（自愈）；仅 hint 缺失时保持
+                    # v1.4.1 行为（同步 hint_removed + 保留 dirty 重试）。
+                    # 这同时兜底 Phase 2 再同步对 panel 的极小概率误标记。
+                    _nf = extract_not_found_element_id(e)
+                    if _nf == UNIFIED_PANEL_ELEMENT_ID:
+                        _logger.info(
+                            "unified flush phase 3 panel element not found — "
+                            "dropping panel tracking, will re-add next flush: %s card=%s",
+                            e, session.card_id[:12],
+                        )
+                        session._creation_stages.discard("panel")
+                        session.existing_elements.discard(UNIFIED_PANEL_ELEMENT_ID)
+                        # 保留 panel_dirty / tool_steps_dirty → add 路径重试
+                        return
+                    if _nf == ANSWER_ELEMENT_ID:
+                        _logger.info(
+                            "unified flush phase 3 answer element not found — "
+                            "dropping answer tracking, will re-create next flush: %s card=%s",
+                            e, session.card_id[:12],
+                        )
+                        session._creation_stages.discard("answer")
+                        session.existing_elements.discard(ANSWER_ELEMENT_ID)
+                        return
                     _logger.info(
                         "unified flush phase 3 element not found (non-fatal): %s — "
                         "syncing hint tracking, card=%s",
@@ -1107,6 +1166,18 @@ class UnifiedControllerMixin:
                         _logger.error("drain SCHEMA ERROR: %s — detail: %s", e, e.extract_schema_detail())
                         state.panel_dirty = False
                         state.tool_steps_dirty = False
+                    elif is_element_not_found_error(e):
+                        # v1.8.0 (P2-3): drain 的 partial_update 只引用 panel
+                        # 本体——元素不存在即 panel 已从服务端消失（例如 Phase 2
+                        # 再同步误标记的 race）。丢弃 panel 跟踪，避免后续 drain
+                        # 轮次重复打同一失败 partial_update（8 轮 warning 刷屏）。
+                        _logger.info(
+                            "drain panel element not found — dropping panel "
+                            "tracking: %s card=%s",
+                            e, (session.card_id or "?")[:12],
+                        )
+                        session._creation_stages.discard("panel")
+                        session.existing_elements.discard(UNIFIED_PANEL_ELEMENT_ID)
                     else:
                         _logger.warning("drain panel failed: %s", e)
 
