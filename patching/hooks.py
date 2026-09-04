@@ -49,6 +49,15 @@ def on_feishu_normalize(
     if platform != "feishu":
         return
 
+    # v1.8.0 (P2-1): WS 渠道活性脉冲——每条到达 _handle_message 的飞书消息
+    # 都证明 WS 长连接活着（lark SDK 重连耗尽后线程静默死亡、适配器仍报
+    # 已连接，last_inbound 是 /aowen monitor 唯一可见的活性信号）。
+    try:
+        from ..aowen import record_inbound
+        record_inbound()
+    except Exception:
+        _logger.debug("HLS: record_inbound failed", exc_info=True)
+
     raw = getattr(event, "raw_message", None)
     raw_event = raw.get("event") if isinstance(raw, dict) else None
     if raw_event is None:

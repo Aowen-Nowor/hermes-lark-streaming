@@ -10,7 +10,7 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 1.7.0 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
+| 版本 | 1.8.0 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
 
 ---
 
@@ -113,7 +113,7 @@ Background: _run_background_task ── [Hook 1/2]
 
 **4.13 配置刷新 (v1.1.0)**: 不做自动 mtime 检测（避免每 token 一次 stat()）。配置刷新方式：`/aowen config reload` 命令立即生效，或重启网关生效。`Config.reload()` 清缓存。
 
-**4.14 /aowen 命令体系 (v1.1.0)**: `aowen/` 子包通过 `pre_gateway_dispatch` hook 拦截 `/aowen` 命令，直接回复飞书卡片，不经过 Hermes AI。命令：`/aowen help`、`/aowen status`（含配置折叠面板）、`/aowen monitor`、`/aowen monitor reset`、`/aowen config reload`。零后台内存占用。卡片视觉重构采用统一设计语言（banner→指标列→详情图标行→折叠→footer），颜色语义化（green=success/orange=warning/red=error/blue=info/grey=neutral），全部 column_set 用 flex_mode=stretch 实现响应式，只用 v2 安全标签，不引入 button/form_container/interactive_container。
+**4.14 /aowen 命令体系 (v1.1.0)**: `aowen/` 子包通过 `pre_gateway_dispatch` hook 拦截 `/aowen` 命令，直接回复飞书卡片，不经过 Hermes AI。命令：`/aowen help`、`/aowen status`（含配置折叠面板）、`/aowen monitor`、`/aowen monitor reset`、`/aowen config reload`。零后台内存占用。卡片视觉重构采用统一设计语言（banner→指标列→详情图标行→折叠→footer），颜色语义化（green=success/orange=warning/red=error/blue=info/grey=neutral），全部 column_set 用 flex_mode=stretch 实现响应式，只用 v2 安全标签，不引入 button/form_container/interactive_container。v1.8.0：monitor 新增"渠道健康"区（入站消息计数 + 最近入站时间）——lark SDK 重连预算耗尽后 WS 线程静默死亡、适配器仍报已连接，last_inbound 是唯一可观测的渠道活性信号；`monitor reset` 保留 last_inbound_at（渠道活性事实，非计数器）。
 
 **4.14.1 /aowen 中断场景提示卡 (v1.1.0)**: AI 回复中（agent 运行中）发送 /aowen 命令时，Hermes 网关走"agent 运行中"快速路径，未知 slash 命令（/aowen 不在白名单）会 fall through 到默认中断路径发给 LLM。借鉴 Hermes 原生 /model 命令的 "Agent is running — wait or /stop first" UX，在 `patching/gateway.py` 的 `_wrap_handle_message` 中检测此场景，发送 `build_interrupt_hint_card()`（橙色 header "AI 正在回复中"）并 return "" 阻止消息进入 agent。
 
@@ -265,7 +265,7 @@ v1.7.0：`on_cron_deliver` 已删除（死代码——`_wrap_cron_deliver` 直�
 | # | Hook | 签名 | 说明 |
 |---|------|------|------|
 | 0 | `pre_gateway_dispatch` | sync→dict | 消息分发前拦截（v1.1.0 新增）。返回 `{"action":"skip"}` 阻止消息进入 agent，用于 /aowen 命令 |
-| 1 | `on_feishu_normalize` | sync | 修正飞书引用消息虚假 thread_id |
+| 1 | `on_feishu_normalize` | sync | 修正飞书引用消息虚假 thread_id；v1.8.0 起兼作 WS 渠道活性脉冲（record_inbound → /aowen monitor 渠道健康区） |
 | 2 | `on_message_started` | sync | 创建 CardSession |
 | 3 | `on_message_completed` | sync→bool | 完成态卡片，返回是否已发卡片 |
 | 4 | `on_message_aborted` | sync | 消息异常终止 |
@@ -359,4 +359,4 @@ hermes gateway restart
 
 ---
 
-*Last updated: 2026-08-26 | Version: 1.7.0*
+*Last updated: 2026-09-04 | Version: 1.8.0*

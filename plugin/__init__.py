@@ -46,6 +46,54 @@ _DEFAULT_STREAMING_CONFIG: dict[str, Any] = {
 # Hold strong refs to pre-warm tasks (prevent GC per Python docs)
 _prewarm_tasks: set = set()
 
+# v1.8.0 (P1-1): lark-oapi 最低版本门槛。hermes-agent >= 0.19 会给
+# lark.Client.builder() 传 extra_ua_tags——该参数 1.6.4 才引入（4 个版本
+# 的 wheel 源码比对证实，1.5.1 无）。混合安装（hermes 升级、lark-oapi
+# 留旧）会让飞书 WS 连接在每次重试时抛错：2026-07-21 生产 22 分 39 秒
+# 中断的根因。hermes 自身 pin lark-oapi==1.6.8（feishu extra），此门槛
+# 只对手工管理依赖的环境报警。
+_LARK_OAPI_MIN = (1, 6, 4)
+
+def _parse_version(v: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(p) for p in str(v).split(".")[:3])
+    except (ValueError, TypeError):
+        return ()
+
+def _check_lark_oapi_floor() -> None:
+    """v1.8.0 (P1-1): 启动时检测 lark-oapi 版本，低于门槛立即在日志里留下指纹.
+
+    错误级别按风险定级：hermes >= 0.19（会传 extra_ua_tags）+ 旧 SDK =
+    必然 WS 断连 → ERROR；其余组合 → WARNING（低于门槛但暂不会断）。
+    """
+    import importlib.metadata as _md
+    try:
+        installed = _md.version("lark-oapi")
+    except Exception:
+        _logger.warning(
+            "hermes-lark-streaming: lark-oapi 版本无法探测（importlib.metadata "
+            "失败）——无法校验 >=1.6.4 门槛"
+        )
+        return
+    ver = _parse_version(installed)
+    if ver and ver >= _LARK_OAPI_MIN:
+        return
+    hermes_ver = ""
+    try:
+        hermes_ver = _md.version("hermes-agent")
+    except Exception:
+        pass
+    breaks_ws = bool(_parse_version(hermes_ver)) and _parse_version(hermes_ver) >= (0, 19, 0)
+    _logger.log(
+        logging.ERROR if breaks_ws else logging.WARNING,
+        "hermes-lark-streaming: lark-oapi %s 低于要求的 >=1.6.4（当前 "
+        "hermes-agent=%s）。hermes >= 0.19 会向 lark.Client 传 extra_ua_tags，"
+        "旧版 lark-oapi 不认这个参数 → 飞书 WS 无法连接（2026-07-21 生产 "
+        "22 分钟中断根因）。修复：pip install -U 'lark-oapi>=1.6.4'",
+        installed,
+        hermes_ver or "unknown",
+    )
+
 def _backup_config() -> None:
     """Back up config.yaml once per install (skips if a backup already exists)."""
     config_path = _get_hermes_config_path()
@@ -148,6 +196,13 @@ def _cleanup_config() -> None:
 
 def register(ctx: "PluginContext") -> None:
     """Register hermes-lark-streaming as a Hermes plugin (applies runtime patches)."""
+    # v1.8.0 (P1-1): 依赖健康检测先于一切补丁——07-21 型断连的日志指纹
+    # 必须出现在 patch 输出之前，方便运维按时间线定位。
+    try:
+        _check_lark_oapi_floor()
+    except Exception:
+        _logger.debug("lark-oapi floor check failed", exc_info=True)
+
     _ensure_streaming_config()
 
     try:

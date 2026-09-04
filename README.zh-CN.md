@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/项目-Vibe%20Coding-ff69b4" alt="Vibe Coding">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-1.7.0-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.8.0-ff9800.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -22,6 +22,8 @@
 > 基于 [Cheerwhy/hermes-lark-streaming](https://github.com/Cheerwhy/hermes-lark-streaming) v0.7.0 版本 fork 后进行改造和优化
 >
 > ⚠️ **与上游插件不兼容** — 如已安装原版 `Cheerwhy/hermes-lark-streaming`，请先卸载后再安装本插件。
+>
+> 🚫 **PyPI 上的 `hermes-lark-streaming`（2.x，"泡波卡"/aiduPOP）不是本插件官方发布**——它是第三方账号（monkey2jack）上传的衍生包（fork 本仓库并叠加自有主题层，包元数据却署名 Aowen-Nowor）。请勿 `pip install hermes-lark-streaming`。官方渠道仅为上述 Gitee/GitHub 仓库（经 `hermes plugins install` 安装）。
 
 ---
 

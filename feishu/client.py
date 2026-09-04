@@ -156,6 +156,24 @@ def is_element_not_found_error(e: "FeishuAPIError") -> bool:
         return True
     return False
 
+# v1.8.0 (P2-3): 300315 错误消息携带被引用的 elementID（真飞书 E2E 实测格式
+# "ErrMsg: not find elementID : context_loading_hint;"）。取出名字可以让上层
+# 精确再同步 session 跟踪状态，而不是只能笼统地当作"某元素不存在"。
+_RE_NOT_FOUND_ELEMENT_ID = re.compile(
+    r"not find elementID\s*[:：]?\s*([A-Za-z0-9_-]+)", re.IGNORECASE
+)
+
+def extract_not_found_element_id(e: "FeishuAPIError") -> str | None:
+    """从元素不存在错误中提取被点名的 element_id（未点名返回 None）.
+
+    仅 300315 变体的消息含 elementID；300313/300314 的消息不带，返回 None，
+    调用方需自行回退到启发式处理。
+    """
+    if not is_element_not_found_error(e):
+        return None
+    m = _RE_NOT_FOUND_ELEMENT_ID.search(str(e))
+    return m.group(1) if m else None
+
 @dataclass(frozen=True)
 class FeishuClientConfig:
     app_id: str
@@ -413,7 +431,6 @@ class FeishuClient:
                 .request_body(body_builder.build())
                 .build()
             )
-            t0 = _time.monotonic()
             # v1.7.0 (R2-11 dead-code removal): the asyncio.to_thread fallback
             # for SDKs without card_element.acontent is gone — cross-verified
             # against every published lark-oapi: 1.4.0 has NO async cardkit
@@ -421,11 +438,11 @@ class FeishuClient:
             # the plugin cannot even initialize its API surface), while
             # 1.4.24+ ships the full async set INCLUDING acontent. So any SDK
             # new enough to run this plugin always has acontent; the fallback
-            # was unreachable. pyproject now requires lark-oapi>=1.4.24.
+            # was unreachable.
+            # v1.8.0 (P3): removed the leftover t0/elapsed_ms/"if >200: pass"
+            # timing skeleton — it computed a duration then discarded it
+            # (audit: dead code; cardkit_create keeps its real perf debug line).
             resp = await self._client.cardkit.v1.card_element.acontent(request)
-            elapsed_ms = (_time.monotonic() - t0) * 1000
-            if elapsed_ms > 200:
-                pass
             self._check(resp, "cardkit_stream_element")
 
         last_error: FeishuAPIError | None = None

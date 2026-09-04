@@ -4,7 +4,7 @@
   <img src="https://img.shields.io/badge/Project-Vibe%20Coding-ff69b4" alt="Vibe Coding">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-4caf50.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.11+-3776AB.svg" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/version-1.7.0-ff9800.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.8.0-ff9800.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -22,6 +22,8 @@ Feishu/Lark CardKit v2.0 streaming cards plugin for Hermes Agent — real-time A
 > Based on [Cheerwhy/hermes-lark-streaming](https://github.com/Cheerwhy/hermes-lark-streaming) v0.7.0, with extensive refactoring and optimizations
 >
 > ⚠️ **Incompatible with the upstream plugin** — if you have the original `Cheerwhy/hermes-lark-streaming` installed, please uninstall it first before installing this version.
+>
+> 🚫 **The `hermes-lark-streaming` package on PyPI (2.x, "aiduPOP") is NOT published by us** — it is a third-party derivative (uploaded by an unrelated account; forked from this repo with an extra theme layer, yet signed with the author's name). Do **not** `pip install hermes-lark-streaming`. Official channels: the Gitee/GitHub repos above (via `hermes plugins install`).
 
 ---
 

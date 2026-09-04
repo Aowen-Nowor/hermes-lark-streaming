@@ -1,7 +1,7 @@
 # hermes-lark-streaming 安装指南
 
 > 高信息密度参考文档，专为 Agent 自动解析设计
-> 最后更新: 2026-08-26 (v1.7.0)
+> 最后更新: 2026-09-04 (v1.8.0)
 
 ## 快速概览
 
@@ -10,8 +10,9 @@
 | 名称 | hermes-lark-streaming (飞书敖式卡片) |
 | 许可证 | MIT |
 | Python | >=3.11 |
-| 依赖 | lark-oapi>=1.4.0, PyYAML>=6.0 |
+| 依赖 | lark-oapi>=1.6.4, PyYAML>=6.0 |
 | 插件类型 | standalone |
+| 验证基线 | hermes-agent v0.21.0 (tag v2026.8.31)；生产建议 >= v0.19.0 |
 | Gitee | https://gitee.com/Aowen-Nowor/hermes-lark-streaming |
 | GitHub | https://github.com/Aowen-Nowor/hermes-lark-streaming |
 
@@ -46,12 +47,6 @@ git clone https://gitee.com/Aowen-Nowor/hermes-lark-streaming.git
 cd hermes-lark-streaming
 hermes plugins add .
 hermes gateway restart
-```
-
-### 方式三：pip 安装
-
-```bash
-pip install hermes-lark-streaming
 ```
 
 ## 卸载
@@ -198,12 +193,14 @@ display:
 | 现象 | 原因 | 解决方案 |
 |------|------|----------|
 | 卡片不显示 | 缺少凭据 | 设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` |
+| 飞书消息完全无响应（网关在跑） | lark-oapi < 1.6.4：hermes ≥ 0.19 传 `extra_ua_tags`，旧 SDK 不认 → WS 连不上（2026-07-21 生产 22 分钟中断根因；插件启动时会打 ERROR 指纹） | `pip install -U 'lark-oapi>=1.6.4'` |
 | 错误码 300305 | 元素超限（硬限制 200） | 减小 `max_tool_steps` / `max_reasoning_rounds` |
 | 错误码 300315 | Schema 校验失败 | 检查飞书 Card 2.0 规范，确认卡片属性合法 |
 | 内容被截断 | 静态卡片表格超限 | 静态卡片（cron/gateway）表格行数 >5 时自动降级 |
 | 流式卡住 | TTL 过期 | 增加 `card_ttl_sec` 值 |
 | 封口失败 | 元素总数超标 | 安全网已自动裁剪早期面板，检查日志确认 |
 | 文本兜底 | 极端超限场景 | 核心内容保留，完整内容降级为纯文本 |
+| 长时间收不到消息且 `/aowen monitor` 最近入站不动 | WS 静默断连（SDK 重连预算耗尽后线程退出，适配器仍报已连接，v1.8.0 前无可观测信号） | 重启网关 `hermes gateway restart`；用 `/aowen monitor` 渠道健康区观察最近入站时间 |
 
 ## 验证安装
 
@@ -233,7 +230,7 @@ A: 在飞书开放平台创建应用后，在「凭证与基础信息」页面�
 A: 单卡片最多 200 个 Tag 对象，插件内置安全网自动裁剪超限内容。
 
 **Q: 支持哪些 Hermes Agent 版本？**  
-A: 需要支持插件系统的 Hermes Agent 版本，建议使用最新版。
+A: 需要支持插件系统的 Hermes Agent（v0.17+）。本插件按 hermes-agent v0.21.0（tag v2026.8.31）源码逐点验证兼容；生产建议 >= v0.19.0。RELAY 前置部署需 v0.20.5+。旧版 hermes（< 0.19）不受 lark-oapi 门槛影响，但建议同步升级。
 
 **Q: 卸载时忘记运行 cleanup 怎么办？**  
 A: 可忽略，或手动清理 `~/.hermes/config.yaml` 中的相关配置。
