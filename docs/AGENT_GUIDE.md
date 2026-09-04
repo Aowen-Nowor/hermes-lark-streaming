@@ -49,18 +49,6 @@ hermes plugins add .
 hermes gateway restart
 ```
 
-### 方式三：pip 安装（⚠️ 不可用——PyPI 上是第三方衍生包）
-
-> **PyPI 上的 `hermes-lark-streaming`（2.x，"泡波卡"/aiduPOP）不是本插件官方发布**，
-> 与作者无关。它是第三方账号（monkey2jack）上传的衍生包：fork 了本仓库代码
-> （多个核心文件字节级相同）并叠加其自有主题层，包元数据却署名 Aowen-Nowor。
-> `pip install hermes-lark-streaming` 装到的是那个衍生版，**不是本插件**。
->
-> 官方分发渠道仅限：**方式一**（Hermes CLI 从上述 Git 仓库安装）和
-> **方式二**（本仓库本地安装）。
->
-> 已误装的话：`pip uninstall hermes-lark-streaming`，再按方式一/方式二重装。
-
 ## 卸载
 
 ```bash

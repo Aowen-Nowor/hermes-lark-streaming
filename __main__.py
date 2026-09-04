@@ -71,9 +71,8 @@ def _bootstrap_package() -> None:
         "Error: Cannot locate hermes_lark_streaming package.\n"
         "\n"
         "Possible fixes:\n"
-        "  1. Install via pip:  pip install hermes-lark-streaming\n"
-        "  2. Run directly:     $HERMES_PYTHON /path/to/hermes-lark-streaming/__main__.py status\n"
-        "  3. Set PYTHONPATH:   PYTHONPATH=~/.hermes/plugins $HERMES_PYTHON -m hermes_lark_streaming status",
+        "  1. Run directly:     $HERMES_PYTHON /path/to/hermes-lark-streaming/__main__.py status\n"
+        "  2. Set PYTHONPATH:   PYTHONPATH=~/.hermes/plugins $HERMES_PYTHON -m hermes_lark_streaming status",
         file=sys.stderr,
     )
 
