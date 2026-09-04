@@ -1016,7 +1016,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             if mid is None or now - s.created_at <= self._session_ttl:
                 continue
             if s.is_terminal_phase:
-                _logger.warning("pruning stale terminal session: msg=%s", (mid or "?")[:20])
+                # v1.8.0 (P3): 正常的过期清理（终态 session 超过 TTL 被回收）
+                # 在生产里以 WARNING 级别刷屏（实测 2 个月 180 条、零一次伴随
+                # 真故障）。降级 debug——真正反常的是下面的"活跃 session 超
+                # TTL"，保留 WARNING。
+                _logger.debug("pruning stale terminal session: msg=%s", (mid or "?")[:20])
                 self._cleanup(mid)
             else:
                 # 活跃 session 超 TTL 只打日志，不清理（避免 AI 回调丢失）

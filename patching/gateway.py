@@ -710,8 +710,11 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
                 _logger.debug("HLS: relay lane detection failed", exc_info=True)
             return orig(job, content, adapters=adapters, loop=loop, **kwargs)
 
-        _logger.info(
-            "hermes-lark-streaming v%s: cron delivery intercepted, redirecting to card (job=%s)",
+        _logger.debug(
+            # v1.8.0 (P2-2): 旧文案 "cron delivery intercepted"（拦截）误导操作
+            # 者以为消息被阻断；且每次推送都打 INFO。改为中性描述 + debug。
+            "hermes-lark-streaming v%s: cron delivery redirected to streaming "
+            "card (job=%s)",
             __version__,
             job.get("id", "?")[:12],
         )
@@ -724,7 +727,7 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
             try:
                 from ..controller import get_controller
                 ctrl = get_controller()
-                _logger.info(
+                _logger.debug(
                     "cron _card_sending_send: ctrl.enabled=%s chat=%s content_len=%d",
                     ctrl.enabled,
                     chat_id[:12] if chat_id else "?",
