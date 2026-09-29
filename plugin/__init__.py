@@ -54,6 +54,37 @@ _prewarm_tasks: set = set()
 # 只对手工管理依赖的环境报警。
 _LARK_OAPI_MIN = (1, 6, 4)
 
+def _ensure_lazy_packages_on_path() -> None:
+    """v1.8.2-fuling1: Docker lazy-packages fallback.
+
+    On sealed Docker images Hermes redirects lazy installs to a writable
+    data-volume dir (HERMES_LAZY_INSTALL_TARGET, e.g. /opt/data/lazy-packages)
+    and activates it via hermes_bootstrap at process start. If the plugin
+    loader thread runs before/outside that activation, lark_oapi lives on
+    disk but is unimportable (2026-09-29 second-boot failure: patcher died
+    with "No module named 'lark_oapi'" and the plugin self-disabled).
+    Idempotent, thread-safe, never raises.
+    """
+    import sys as _sys
+    try:
+        target = os.environ.get("HERMES_LAZY_INSTALL_TARGET", "")
+        if not target:
+            # Mirror hermes_bootstrap default: <HERMES_HOME>/lazy-packages
+            home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+            target = os.path.join(home, "lazy-packages")
+        if not os.path.isdir(target):
+            return
+        if target not in _sys.path:
+            _sys.path.append(target)
+            _logger.info(
+                "hermes-lark-streaming: appended lazy-packages dir to sys.path: %s",
+                target,
+            )
+    except Exception:
+        _logger.debug("lazy-packages path setup failed", exc_info=True)
+
+_ensure_lazy_packages_on_path()
+
 def _parse_version(v: str) -> tuple[int, ...]:
     try:
         return tuple(int(p) for p in str(v).split(".")[:3])

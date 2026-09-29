@@ -39,7 +39,17 @@ class HermesCompat:
         _logger.info("HLS: Hermes version detected: %s", self.hermes_version)
     
     def _resolve_modules(self) -> None:
-        """Resolve all Hermes internal modules, recording what's available."""
+        """Resolve all Hermes internal modules, recording what's available.
+
+        v1.8.2-fuling1 deadlock fix: this runs on the plugin-loader thread
+        while the gateway main thread may still be importing gateway.run (it
+        holds that module's import lock). ANY blocking import here of a
+        module the main thread is importing = circular wait = 300s watchdog
+        kill (2026-09-29 outage). All lookups below are therefore
+        non-blocking: sys.modules cache only, zero importlib.import_module /
+        import statements. Anything not yet loaded is resolved later by the
+        delayed-patch poller in patching/__init__.py.
+        """
         self.gateway_runner_class: Any | None = None
         self.aiagent_class: Any | None = None
         self.feishu_adapter_class: Any | None = None
@@ -47,41 +57,46 @@ class HermesCompat:
         self.conversation_loop_module: Any | None = None
         self.conversation_loop_func: Any | None = None
         self.run_agent_module: Any | None = None
-        
-        # GatewayRunner
-        try:
-            from gateway.run import GatewayRunner
-            self.gateway_runner_class = GatewayRunner
-        except (ImportError, AttributeError):
+
+        # GatewayRunner — non-blocking: sys.modules cache only
+        _gw_mod = sys.modules.get("gateway.run")
+        if _gw_mod is not None:
+            _cls = getattr(_gw_mod, "GatewayRunner", None)
+            if _cls is not None:
+                self.gateway_runner_class = _cls
+        if self.gateway_runner_class is None:
             _logger.debug("HLS: GatewayRunner not available yet")
-        
-        # AIAgent
-        try:
-            from run_agent import AIAgent
-            self.aiagent_class = AIAgent
-            self.run_agent_module = sys.modules.get("run_agent")
-        except (ImportError, AttributeError):
+
+        # AIAgent — non-blocking: sys.modules cache only
+        _ra_mod = sys.modules.get("run_agent")
+        if _ra_mod is not None:
+            _cls = getattr(_ra_mod, "AIAgent", None)
+            if _cls is not None:
+                self.aiagent_class = _cls
+                self.run_agent_module = _ra_mod
+        if self.aiagent_class is None:
             _logger.debug("HLS: AIAgent not available yet")
-        
-        # FeishuAdapter — 抽取到 _resolve_feishu_adapter()，
-        # 便于 resolve_feishu_adapter_class_fresh() 复用（v1.4.0: fix deferred loading patch miss）
+
+        # FeishuAdapter — 抽取到 _resolve_feishu_adapter()，便于 resolve_feishu_adapter_class_fresh() 复用（v1.4.0: fix deferred loading patch miss）
         self.feishu_adapter_class = self._resolve_feishu_adapter()
-        
-        # Cron scheduler
-        for mod_name in ("cron.scheduler", "gateway.cron.scheduler"):
-            try:
-                mod = importlib.import_module(mod_name)
-                if hasattr(mod, "_deliver_result"):
-                    self.cron_scheduler_module = mod
-                    break
-            except ImportError:
-                continue
-        
+
+        # Cron scheduler — non-blocking: sys.modules cache only
+        for _mod_name in ("cron.scheduler", "gateway.cron.scheduler"):
+            _mod = sys.modules.get(_mod_name)
+            if _mod is not None and hasattr(_mod, "_deliver_result"):
+                self.cron_scheduler_module = _mod
+                break
+
         # Conversation loop (with namespace collision workaround)
         self._resolve_conversation_loop()
     
     def _resolve_feishu_adapter(self) -> Any | None:
-        """Resolve FeishuAdapter class through the gateway's namespace."""
+        """Resolve FeishuAdapter class through the gateway's namespace.
+
+        v1.8.2-fuling1: non-blocking — sys.modules only. importlib.import_module
+        here can deadlock against the gateway main thread's in-flight import
+        of the same module (see _resolve_modules docstring).
+        """
         # 顺序很关键：真身（hermes_plugins.feishu_platform.adapter）优先，确保
         # 如果 deferred loader 已触发，我们能拿到 gateway 实际使用的 class object。
         _feishu_import_paths = [
@@ -90,16 +105,13 @@ class HermesCompat:
             "gateway.platforms.feishu",                # Legacy path (Hermes < v0.17)
         ]
         for _mod_path in _feishu_import_paths:
-            try:
-                mod = importlib.import_module(_mod_path)
-                if hasattr(mod, "FeishuAdapter"):
-                    cls = getattr(mod, "FeishuAdapter")
-                    _logger.debug("HLS: FeishuAdapter resolved via %s", _mod_path)
-                    return cls
-            except (ImportError, AttributeError):
-                if _mod_path == "hermes_plugins.feishu_platform.adapter":
-                    pass
-                continue
+            mod = sys.modules.get(_mod_path)
+            if mod is None:
+                continue  # not loaded yet — delayed poller will retry
+            cls = getattr(mod, "FeishuAdapter", None)
+            if cls is not None:
+                _logger.debug("HLS: FeishuAdapter resolved via %s", _mod_path)
+                return cls
         _logger.debug("HLS: FeishuAdapter not available via any import path")
         return None
     
@@ -120,13 +132,14 @@ class HermesCompat:
                 return
         
         # Strategy 2: Anchor-based discovery
+        # v1.8.2-fuling1: anchor must ALREADY be loaded — importing it here
+        # can deadlock against the gateway main thread (see _resolve_modules).
+        # If neither anchor is in sys.modules yet, fall through to Strategy 3;
+        # the delayed-patch poller re-runs resolution after startup completes.
         for anchor_name in ("gateway.run", "run_agent"):
             anchor = sys.modules.get(anchor_name)
             if anchor is None:
-                try:
-                    anchor = importlib.import_module(anchor_name)
-                except ImportError:
-                    continue
+                continue  # non-blocking: skip unloaded anchors
             anchor_file = getattr(anchor, "__file__", None)
             if not anchor_file:
                 continue
@@ -153,13 +166,13 @@ class HermesCompat:
                 _logger.debug("HLS: anchor-based load failed: %s", e)
         
         # Strategy 3: Standard import
-        try:
-            from agent.conversation_loop import run_conversation as _func
-            import agent.conversation_loop as _mod
-            self.conversation_loop_module = _mod
-            self.conversation_loop_func = _func
-        except (ImportError, AttributeError):
-            pass
+        # v1.8.2-fuling1: sys.modules only (non-blocking, same rationale).
+        _mod = sys.modules.get("agent.conversation_loop")
+        if _mod is not None:
+            _func = getattr(_mod, "run_conversation", None)
+            if _func is not None:
+                self.conversation_loop_module = _mod
+                self.conversation_loop_func = _func
     
     @property
     def has_gateway_runner(self) -> bool:

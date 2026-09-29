@@ -6,6 +6,7 @@ import contextvars
 import logging
 import threading
 import time
+import sys
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 
@@ -110,6 +111,15 @@ _gateway_cards_lock = threading.Lock()
 
 _gw_runner_patched: bool = False
 
+# v1.8.2-fuling1: completion flags for the deferred patch poller — targets
+# that were not loaded (non-blocking resolution) at register time get
+# re-applied by _apply_deferred_targets() until complete.
+_cl_module_patched: bool = False
+_cron_patched_flag: bool = False
+_create_adapter_hooked_flag: bool = False
+_deferred_poller_started = False
+_deferred_poller_lock = threading.Lock()
+
 _patch_status: dict[str, Any] = {}
 
 _patched_feishu_classes: set[int] = set()
@@ -192,6 +202,124 @@ from .hooks import (  # noqa: E402
 )
 
 # ── Public entry point ─────────────────────────────────────────────
+
+def _maybe_start_deferred_targets_poller(
+    *,
+    need_gw: bool,
+    need_cl: bool,
+    need_cron: bool,
+    need_adapter: bool,
+    need_agent: bool,
+    need_hook: bool,
+    need_relay: bool,
+) -> None:
+    """v1.8.2-fuling1: start the all-targets deferred patch poller.
+
+    Runs ONLY if at least one patch target was missed at register time
+    (non-blocking resolution). The poller thread reads sys.modules only —
+    it never imports — so it cannot deadlock against the gateway main
+    thread. When the main thread finishes importing gateway.run et al.,
+    the targets become visible and get patched here, 2s granularity,
+    60s budget (mirrors the legacy GatewayRunner-only delayed patch).
+    """
+    global _deferred_poller_started
+    if not any((need_gw, need_cl, need_cron, need_adapter, need_agent, need_hook, need_relay)):
+        return
+    with _deferred_poller_lock:
+        if _deferred_poller_started:
+            return
+        _deferred_poller_started = True
+
+    def _poll_deferred_targets():
+        deadline = time.monotonic() + 60.0
+        pending = {
+            "gateway_runner": need_gw,
+            "conversation_loop": need_cl,
+            "cron_scheduler": need_cron,
+            "feishu_adapter": need_adapter,
+            "aiagent": need_agent,
+            "create_adapter_hook": need_hook,
+            "relay_adapter": need_relay,
+        }
+        _logger.info(
+            "hermes-lark-streaming: deferred targets poller started (2s interval, "
+            "60s budget): %s",
+            [k for k, v in pending.items() if v],
+        )
+        while time.monotonic() < deadline and any(pending.values()):
+            time.sleep(2.0)
+
+            if pending["gateway_runner"] and _apply_gateway_runner_patches():
+                pending["gateway_runner"] = False
+                _logger.info("hermes-lark-streaming: GatewayRunner patched (deferred) ✓")
+
+            if pending["conversation_loop"]:
+                _cl_mod = sys.modules.get("agent.conversation_loop")
+                _func = getattr(_cl_mod, "run_conversation", None) if _cl_mod else None
+                if _func is not None and not getattr(_func, "_hls_wrapped", False):
+                    try:
+                        _cl_mod.run_conversation = _wrap_run_conversation(_func)
+                        pending["conversation_loop"] = False
+                        _logger.info("hermes-lark-streaming: agent.conversation_loop module patched (deferred) ✓")
+                    except (AttributeError, TypeError) as e:
+                        _logger.debug("HLS: deferred conversation_loop patch failed: %s", e)
+
+            if pending["cron_scheduler"]:
+                for _name in ("cron.scheduler", "gateway.cron.scheduler"):
+                    _mod = sys.modules.get(_name)
+                    if _mod is not None and hasattr(_mod, "_deliver_result"):
+                        try:
+                            if not getattr(_mod._deliver_result, "_hls_wrapped", False):
+                                _mod._deliver_result = _wrap_cron_deliver(_mod._deliver_result)
+                            pending["cron_scheduler"] = False
+                            _logger.info(
+                                "hermes-lark-streaming: cron scheduler patched (deferred) ✓ (module=%s)",
+                                _name,
+                            )
+                        except (AttributeError, TypeError) as e:
+                            _logger.debug("HLS: deferred cron patch failed: %s", e)
+                        break
+
+            if pending["feishu_adapter"]:
+                _cls = HermesCompat().feishu_adapter_class
+                if _cls is not None:
+                    if _apply_feishu_adapter_patches(_cls, is_repatch=False):
+                        pending["feishu_adapter"] = False
+                        _logger.info("hermes-lark-streaming: FeishuAdapter patched (deferred) ✓")
+
+            if pending["aiagent"]:
+                _cls = HermesCompat().aiagent_class
+                if _cls is not None:
+                    _apply_direct_agent_patch()
+                    if getattr(_cls, "run_conversation", None) is not None and getattr(
+                        _cls.run_conversation, "_hls_direct_patched", False
+                    ):
+                        pending["aiagent"] = False
+                        _logger.info("hermes-lark-streaming: AIAgent.run_conversation patched (deferred) ✓")
+
+            if pending["create_adapter_hook"] and _apply_create_adapter_hook():
+                pending["create_adapter_hook"] = False
+                _logger.info("hermes-lark-streaming: platform_registry.create_adapter hooked (deferred) ✓")
+
+            if pending["relay_adapter"]:
+                _mod = sys.modules.get("gateway.relay.adapter")
+                _cls = getattr(_mod, "RelayAdapter", None) if _mod else None
+                if _cls is not None and _apply_relay_adapter_patches(_cls):
+                    pending["relay_adapter"] = False
+                    _logger.info("hermes-lark-streaming: RelayAdapter patched (deferred) ✓")
+
+        _left = [k for k, v in pending.items() if v]
+        if _left:
+            _logger.error(
+                "hermes-lark-streaming: deferred targets NOT resolved within 60s: %s "
+                "— streaming cards may be partially unavailable. Run /aowen doctor.",
+                _left,
+            )
+        else:
+            _logger.info("hermes-lark-streaming: all deferred patch targets resolved ✓")
+
+    _t = threading.Thread(target=_poll_deferred_targets, daemon=True, name="hls-deferred-patcher")
+    _t.start()
 
 def _apply_gateway_runner_patches() -> bool:
     """Apply the three critical GatewayRunner method patches."""
@@ -375,14 +503,13 @@ def apply_patches() -> None:
     # are built via platform_registry.create_adapter("relay", config)); this
     # direct import covers a gateway that already imported gateway.relay
     # before plugin registration. Missing module → not a relay deployment.
+    # v1.8.2-fuling1: non-blocking sys.modules lookup (deadlock fix).
     relay_patched = False
-    try:
-        from gateway.relay.adapter import RelayAdapter as _RelayAdapter
-        relay_patched = _apply_relay_adapter_patches(_RelayAdapter)
-    except ImportError:
-        relay_patched = False
-    except Exception:
-        _logger.debug("hermes-lark-streaming: direct RelayAdapter patch failed", exc_info=True)
+    _relay_mod = sys.modules.get("gateway.relay.adapter")
+    if _relay_mod is not None:
+        _RelayAdapter = getattr(_relay_mod, "RelayAdapter", None)
+        if _RelayAdapter is not None:
+            relay_patched = _apply_relay_adapter_patches(_RelayAdapter)
 
     # ── Summary ──
     # v1.1.0: Record patch status in a structured dict for doctor command
@@ -415,6 +542,22 @@ def apply_patches() -> None:
 
     # Deferred direct patch: retry AIAgent.run_conversation after Hermes
     # finishes loading all modules (belt-and-suspenders for lazy imports)
+
+    # v1.8.2-fuling1: 全目标延迟补全轮询 — 启动时因非阻塞解析而未命中的
+    # 目标（GatewayRunner / conversation_loop / cron / FeishuAdapter 真身 /
+    # AIAgent / platform_registry 钩子 / RelayAdapter），由后台线程按 2s 间隔
+    # 重新解析并补丁，直至全部完成或 60s 超时。网关主线程完成 gateway.run
+    # 导入后，sys.modules 里必然可见——届时再打补丁绝无死锁风险（本线程
+    # 只读 sys.modules，绝不触发 import）。
+    _maybe_start_deferred_targets_poller(
+        need_gw=not gw_patched,
+        need_cl=not _module_patch_applied,
+        need_cron=not cron_patched,
+        need_adapter=FeishuAdapter is None,
+        need_agent=compat.aiagent_class is None,
+        need_hook=not create_adapter_hooked,
+        need_relay=False,  # relay 走 create_adapter 钩子兜底，无需轮询
+    )
 
 def _apply_feishu_adapter_patches(FeishuAdapter, *, is_repatch: bool = False) -> bool:
     """Apply all FeishuAdapter method patches to the given class."""
@@ -651,7 +794,11 @@ def _apply_create_adapter_hook() -> bool:
     Returns True if the hook was installed (or was already installed).
     """
     try:
-        from gateway.platform_registry import platform_registry as _pr
+        # v1.8.2-fuling1: non-blocking — sys.modules only (deadlock fix).
+        _pr_mod = sys.modules.get("gateway.platform_registry")
+        if _pr_mod is None:
+            raise ImportError("gateway.platform_registry not loaded yet")
+        _pr = _pr_mod.platform_registry
     except (ImportError, AttributeError):
         _logger.info(
             "hermes-lark-streaming: platform_registry not available yet, "
