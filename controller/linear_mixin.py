@@ -144,7 +144,23 @@ class UnifiedControllerMixin:
                     print_step=self._cfg.print_step,
                 )
                 card_id = await self._client.cardkit_create(card)
-                card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
+                # v1.8.3 (P1, issue #18-3): reply API requires an om_ message id.
+                # Synthetic ids (background-task "bg_*" etc.) are guaranteed to
+                # fail with 99992354 — deliver the card directly to the chat
+                # instead, which is the correct API for a chat-level target.
+                if reply_to.startswith("om_"):
+                    card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
+                elif session.chat_id:
+                    _logger.info(
+                        "HLS: non-om_ reply target (%s…), sending card to chat %s…",
+                        reply_to[:12], (session.chat_id or "?")[:12],
+                    )
+                    card_msg_id = await self._client.send_card_by_id_to_chat(session.chat_id, card_id)
+                else:
+                    raise FeishuAPIError(
+                        f"no valid delivery target: reply_to={reply_to[:24]!r} "
+                        "is not om_ and session has no chat_id"
+                    )
 
                 session.card_id = card_id
                 session.card_msg_id = card_msg_id

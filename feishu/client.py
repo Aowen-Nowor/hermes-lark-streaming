@@ -382,6 +382,51 @@ class FeishuClient:
             return str(resp.data.message_id)
         raise FeishuAPIError("reply_card_by_id: response missing message_id")
 
+    async def send_card_by_id_to_chat(self, chat_id: str, card_id: str) -> str:
+        """v1.8.3 (issue #18-3): 按 card_id 直发 CardKit 卡片实体到会话（非回复）。
+
+        用于回复目标不是合法 om_ 消息 id 的场景（如 /background 任务的合成
+        task_id）：reply API 对非 om_ id 必然报 99992354，此时会话内直接
+        发送是唯一正确的投递通道。
+        """
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("interactive")
+                .content(self._dumps({"type": "card", "data": {"card_id": card_id}}))
+                .build()
+            )
+            .build()
+        )
+        resp = await self._client.im.v1.message.acreate(request)
+        self._check(resp, "send_card_by_id_to_chat")
+        if resp.data and resp.data.message_id:
+            return str(resp.data.message_id)
+        raise FeishuAPIError("send_card_by_id_to_chat: response missing message_id")
+
+    async def send_text_to_chat(self, chat_id: str, text: str) -> str:
+        """v1.8.3 (issue #18-3): 直发纯文本到会话（非回复），返回 message_id."""
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("text")
+                .content(self._dumps({"text": text}))
+                .build()
+            )
+            .build()
+        )
+        resp = await self._client.im.v1.message.acreate(request)
+        self._check(resp, "send_text_to_chat")
+        if resp.data and resp.data.message_id:
+            return str(resp.data.message_id)
+        raise FeishuAPIError("send_text_to_chat: response missing message_id")
+
     async def update_card(self, message_id: str, card: dict[str, Any]) -> None:
         """PATCH 更新已发送的卡片（IM PATCH 通道）."""
         request = (
