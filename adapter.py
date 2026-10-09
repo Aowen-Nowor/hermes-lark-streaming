@@ -41,8 +41,15 @@ def _import_builtin() -> Any:
     )
 
 
-# 惰性导入：hermes 不在（纯 SDK / 卡片引擎独立使用 / 测试）时包导入不炸，
-# register()/实例化时 fail-fast 给出原始错误。
+# 导入期即尝试绑定真实基类（v2.0.0 生产修复）：hermes 进程内（网关/CLI/插件
+# 加载器）此刻 ``plugins.platforms.feishu.adapter`` 已可导入，直接绑定 →
+# 类身份唯一、零参 super 的 ``__class__`` cell 与类一致。仅纯 SDK 环境（无
+# hermes）回退占位基类。
+#
+# 历史：原实现惰性到 register() 才换基，而 ``type()`` 重建会借用旧类的方法
+# 函数对象（``__class__`` cell 指向旧类）→ 首次实例化 super() 身份错乱；
+# ``__bases__`` 原地赋值在 CPython 3.12+ 直接 TypeError（deallocator 差异）。
+# 两条路都不通，唯一稳妥做法就是导入期绑定。
 _builtin: Any = None
 _BUILTIN_IMPORT_ERROR: Exception | None = None
 
@@ -66,7 +73,11 @@ class _MissingBuiltin:
     """hermes 缺失时的占位基类：类型可定义，register/实例化时 fail-fast。"""
 
 
-_FeishuAdapter: Any = _MissingBuiltin
+# 导入期绑定：hermes 在 → 真实基类（生产路径，类身份唯一）；hermes 不在 → 占位基类
+try:
+    _FeishuAdapter: Any = _get_builtin().FeishuAdapter
+except Exception:  # noqa: BLE001 — 纯 SDK / 卡片引擎独立使用 / 测试环境
+    _FeishuAdapter = _MissingBuiltin
 
 
 def _ensure_builtin() -> None:
@@ -307,22 +318,30 @@ def _strip_internal(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
 
 # ── 注册入口 ────────────────────────────────────────────────────────────────
 def _rebuild_class_with_real_base() -> Any:
-    """hermes 就绪后把适配器类切换到真实基类（原地换基）.
+    """占位基类兜底路径：hermes 缺席时导入的类，在 register() 时换真实基类.
 
-    模块导入时 hermes 可能不在（占位基类 ``_MissingBuiltin``）；register() 是
-    必然运行在 hermes 进程内的入口，在此完成真实继承链组装。
+    正常生产路径**不会走到这里**：模块导入期的 try 绑定（见模块头注释）在
+    hermes 进程内直接把 ``_FeishuAdapter`` 绑到真实基类，本函数检测到
+    ``__bases__[0]`` 不是占位类时直接原样返回（no-op，身份零变化）。
 
-    实现说明（v2.0.0 生产修复）：不能用 ``type()`` 重建类——借用的方法函数
-    对象带有指向旧类的 ``__class__`` cell，零参 ``super()`` 在首次实例化时
-    抛 ``TypeError: obj ... is not an instance or subtype of type``（V2 上线
-    当日在 hermes 网关实测暴露；测试环境真实基类在导入期即绑定，rebuild 分支
-    从未执行，故 584 项测试无法捕获）。原地改 ``__bases__`` 保持类对象身份与
-    全部方法闭包一致，零参 super 语义不变。
+    兜底路径仅覆盖"导入时 hermes 不可用、register() 时可用"的边缘场景，
+    用 ``type()`` 重建（注册可用）。注意：重建借用的方法函数 ``__class__``
+    cell 仍指向旧类，该路径下的实例化会 fail-fast——这正是导入期绑定成为
+    主路径的原因。任何路径下 register() 都不会静默产出坏适配器。
     """
     base = _get_builtin().FeishuAdapter
     cls = FeishuStreamingAdapter
     if cls.__bases__ and cls.__bases__[0] is _MissingBuiltin:
-        cls.__bases__ = (base,)  # 原地换基：身份/cell/MRO 一次到位，无第二类对象
+        ns = {
+            k: v for k, v in vars(cls).items()
+            if k not in ("__dict__", "__weakref__", "__module__", "__qualname__", "__doc__")
+        }
+        cls = type(
+            "FeishuStreamingAdapter", (base,),
+            {"__module__": __name__, "__qualname__": "FeishuStreamingAdapter",
+             "__doc__": FeishuStreamingAdapter.__doc__, **ns},
+        )
+        globals()["FeishuStreamingAdapter"] = cls
     return cls
 
 
