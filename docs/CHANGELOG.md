@@ -1,3 +1,24 @@
+## v1.8.4 (2026-10-09)
+
+hermes v0.21.6 集成哨兵误报修复版 — 纯测试与文档，零运行时代码改动，CI workflow 按约定不动。hermes v0.21.6 发布次日（2026-10-08），每日集成测试报告 30 用例 9 failed（均为 GatewayRunner/AIAgent 方法存在性哨兵）。经 5 轮审计 + 本地双环境 100% 复现确认：**插件运行时代码与 hermes v0.21.6 完全兼容，9 个失败全部是假警报**。根因是两层叠加：①hermes v0.21.6 的 pyproject 将全部 45 个依赖标记 `python_version >= '3.14'`（官方仅支持 3.14，.python-version=3.14），而 CI workflow 钉死 Python 3.11 → `pip install -e .`（best-effort + `|| true`）实际装入 0 个依赖 → hermes 在 CI 里 import 全灭（本地复现首个缺失模块为 ruamel），30 用例全部落到 AST 兜底层；②hermes v0.21.x Mixin 化把被补丁方法搬出了原单体文件（v1.8.2 修过同型问题的第三批残留）——`_handle_message`→`gateway/run_inbound.py`（GatewayInboundMixin）、`_handle_message_with_agent`/`_run_agent`/`_run_background_task`→`gateway/run_turn.py`（GatewayTurnMixin）、`AIAgent.run_conversation`→`agent/turn_facade.py`（TurnFacadeMixin），AST 兜底只扫 `gateway/run.py`/`run_agent.py` 单文件类体，必然失明 → 8 用例误报"方法不存在"；③`test_run_conversation_still_callable` 的第二个 import 无异常保护 → `ModuleNotFoundError`（dotenv）把用例炸成 error，成为第 9 个失败。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🧪 Test | **集成哨兵 9 用例在 hermes v0.21.6 上集体误报**（30 用例 9 failed，失败名单与 cron 卡片逐字吻合）：GatewayRunner 三方法 / AIAgent.run_conversation 的存在性检查 + required/optional 类方法参数化用例 + run_conversation callable 检查 | 三层叠加：CI（Python 3.11）装不上 hermes v0.21.6 的 3.14-only 依赖致 import 层全灭；v0.21.x Mixin 化后 AST 单文件类体扫描面失明；`test_run_conversation_still_callable` 第二 import 无保护 | AST 兜底补三组 Mixin 候选并新增 `_ast_any_class_has_method` 并集扫描助手：`_GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES`（gateway.run→run_inbound→run_turn）、`_AIAGENT_METHOD_MODULE_CANDIDATES`（run_agent→agent.turn_facade）、`_CLASS_METHOD_AST_MODULE_CANDIDATES` 映射（required/optional 参数化用例共用）；候选文件旧版缺失自动跳过（纯增量，与 v1.8.2 候选并集模式同源）；`test_run_conversation_still_callable` 补 import 保护 + 沿用 `_RUN_CONVERSATION_METHOD_CANDIDATES` 的 AST 兜底。本地双环境验证：模拟 CI 环境（仅插件依赖 + v0.21.6 源码）修复前 9 failed → 修复后 28 passed + 2 skipped；全依赖环境前后均为 28 passed + 2 skipped（import 层语义零变化）；v0.21.1 双环境同计数（向后兼容）(`tests/integration/test_hermes_compat.py`) |
+| 🧪 Test | **optional 哨兵 `GatewayRunner._run_background_task` 在 v0.21.x 上误报 skip**：该方法 v0.21.x 起定义在 `gateway/run_turn.py`（GatewayTurnMixin），旧 AST 扫描按"指定类名 + 单文件"找 `GatewayRunner` 类体必然落空，被 optional 语义降级为 skip（功能实际健在） | optional 检查的 AST 段未随 Mixin 布局迁移 | optional 用例的候选路径表接入 `_CLASS_METHOD_AST_MODULE_CANDIDATES`，AST 段对 Mixin 候选改用 any-class 并集语义；v0.21.1/v0.21.6 双版本上从 skip 恢复为 passed（background 卡片功能哨兵恢复生效）(`tests/integration/test_hermes_compat.py`) |
+| 📝 Docs | 验证基线升 **hermes-agent v0.21.6**（AGENT_GUIDE 概览表 + 版本 FAQ），FAQ 补充"hermes v0.21.6 起依赖仅支持 Python 3.14 运行时安装"的部署提示 | 基线停留在 v0.21.1 (tag v2026.9.7) | 本轮审计证据：v0.21.6 全依赖环境 10+ 个 patch 目标 hasattr 全过、`_run_agent` 签名与 v0.21.1 逐参数一致、persist_* 参数仍在 run_conversation 双生产面、`cron.scheduler._deliver_result`/`platform_registry.create_adapter`/`run_turn_runner._wire_turn_agent_callbacks` 等全部在位；976 单元测试全过 (`docs/AGENT_GUIDE.md`) |
+
+**审计方法**: 5 轮递进审计（只求证不猜测，全程未动 CI workflow）。①仓库一致性：Gitee DEV c04485b 与 github_sync 零差异，hermes-agent 检出 v0.21.6/v2026.9.7 双 tag；②测试解剖：9 个失败用例逐个定位到"import 优先 + AST 兜底"双层结构，确认 AST 层 `_ast_class_has_method` 只扫单文件类体；③hermes 源码比对：Mixin 组合架构（GatewayRunner×18 / AIAgent×14 Mixin）、方法迁移行号级定位（run_inbound.py:1285 / run_turn.py:2144+2928+2376 / turn_facade.py:22）、`_run_agent` 签名逐参数比对（与 v0.21.1 泛化签名一致）；④本地 100% 复现：干净 venv（仅 pytest/pytest-asyncio/PyYAML/lark-oapi，对齐 CI 实际依赖面）+ v0.21.6 源码 → 9 failed 名单与 cron 卡片逐字一致；装齐 hermes 依赖后同版本 → 28 passed + 2 skipped（30/30），反证运行时兼容；⑤环境根因实证：v0.21.6 pyproject 45/45 依赖带 `python_version >= '3.14'` 标记（v0.21.1 为 0/34 无标记）、hermes 官方 `.python-version=3.14`、插件自身依赖 PyPI 实查（PyYAML 6.0.3 有 cp314 轮子、lark-oapi 纯 Python）。修复后回归：模拟 CI / 全依赖 × v0.21.1 / v0.21.6 四种组合全部 28 passed + 2 skipped，单元 976 全过，改动文件 ruff 全绿。
+
+**已知限制**:
+- CI workflow（`hermes-integration-test.yml`）按约定**不做任何改动**：①Python 仍钉 3.11，装不上 hermes v0.21.6+ 的 3.14-only 依赖 → CI 集成测试长期运行在 AST 源码级验证层（import 层等价性已在本地全依赖环境验证，两种模式同计数）；②workflow 内联通知脚本的 junitxml 解析存在 Element 真值 bug（`tc.find("failure") or tc.find("error")` —— ET 元素真值取决于子元素数量而非文本，本地复现时 Python 明确给出 DeprecationWarning），失败详情在飞书卡片恒为空，两者修复均需改 workflow，留待 workflow 解冻后一并处理
+- AST 并集扫描是"源码结构存在性"验证：能证明方法定义于候选文件中的某个类，不证明运行时行为——运行时行为由 976 单元 + 真飞书 E2E 覆盖
+- 若未来 hermes 再把方法搬出候选清单覆盖的文件，哨兵会再次报警——候选清单按 v1.8.2 既有模式增量维护即可
+- `.hermes-last-release` 已被 v0.21.6 失败轮更新（workflow 对 success/failure 都记录），CI 不动的前提下下次 cron 将等 hermes 新版本发布才再测；本版修复合入 github_sync 后可用 workflow_dispatch 手动触发即时验证
+- 审计期间发现 hermes v0.21.6 的 `agent/conversation_loop.py` 导入链新增 ruamel 依赖（v0.21.1 无）——属上游自身演进，对插件运行时无影响（插件跟随 hermes 宿主环境运行），仅影响依赖残缺环境下哨兵的 import 层
+
+---
+
 ## v1.8.3 (2026-10-08)
 
 GitHub Issues 专项修复版 — 处理仓库全部未关闭 issues（#10/#12/#13/#14/#15/#18/#19/#21），只修 bug、不做新需求：逐项对照插件 v1.8.2 代码与 hermes-agent 源码验证"是否仍成立、根因在哪"后才动手，**6 项确认修复（P0×1 / P1×5）+ 1 项连带缺陷**；#13（字号配置）、#19（驱逐降级）为新需求/改进项按约定不纳入本轮，#10 为表扬帖无需处理，#14 经源码核对确认已由 v1.8.1 修复并补回归测试。本轮还复核并采纳了外部 PR #20 的死锁修复思路（两个独立生产报告互相印证），实现按本项目结构重写并补全其未覆盖的 `_wrap_run_conversation`/`_wrap_cron_deliver` 防重复哨兵。
