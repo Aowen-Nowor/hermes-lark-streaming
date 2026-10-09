@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import time
 from typing import Any, Callable
 
 from .. import __version__
-from ..state.phase import TERMINAL_PHASES
+from ..state.phase import TERMINAL_PHASES, CardPhase
 from . import (
     _msg_ctx,
     _started_msg_ids,
@@ -16,6 +17,74 @@ from . import (
     _logger,
     _send_result_ok,
 )
+
+# ── v1.8.3 (P1, issue #18-2): platform isolation helper ─────────
+
+def _is_feishu_platform(source: Any) -> bool:
+    """True when the message source is a Feishu/Lark platform.
+
+    v1.8.3 (P1): single source of truth for platform gating in every
+    GatewayRunner wrapper. The previous pattern
+    ``getattr(getattr(source, "platform", None), "value", "")`` silently
+    fails when ``source.platform`` is a plain string (returns "") — hermes'
+    own code normalizes both shapes (gateway/platforms/base.py
+    ``_platform_name``: ``getattr(platform, "value", platform)``), proving
+    both Enum and raw string occur in the wild. A failed check let QQ/
+    Telegram/etc. messages reach Feishu-only card sessions (API error
+    99992354 on non-om_ message ids), and the string-platform shape would
+    have disabled Feishu streaming entirely.
+    """
+    platform = getattr(source, "platform", None)
+    value = getattr(platform, "value", platform)
+    return str(value or "").lower() in ("feishu", "lark")
+
+def _session_usage_from(ctx: dict | None, result: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """v1.8.3 (P1, issue #12): footer usage stats — agent session counters first.
+
+    The live AIAgent session counters (``agent.session_*``) are the primary
+    source: hermes maintains them for every provider in
+    ``agent/turn_usage.record_response_usage()``. The turn result dict is the
+    secondary source: current hermes copies the same counters into the result
+    (``agent/turn_finalizer.finalize_turn``), so both agree there; older
+    releases (v0.19.x, issue #12) left these keys out of the result entirely.
+    ``context_length`` (the context max) exists ONLY on
+    ``agent.context_compressor`` — no hermes release puts it into the result
+    dict, which is why the footer "context" field never rendered.
+
+    All readings are zero-skipping: a missing/zero value from one source
+    never overwrites a real reading from the other.
+    """
+    res = result if isinstance(result, dict) else {}
+    agent = (ctx or {}).get("_agent_ref")
+    compressor = getattr(agent, "context_compressor", None) if agent else None
+
+    def _first(*values: Any) -> int:
+        for v in values:
+            if v:
+                return int(v)
+        return 0
+
+    def _agent(attr: str) -> Any:
+        return getattr(agent, attr, 0) if agent else 0
+
+    tokens = {
+        "input_tokens": _first(_agent("session_input_tokens"), res.get("input_tokens", 0)),
+        "output_tokens": _first(_agent("session_output_tokens"), res.get("output_tokens", 0)),
+        "cache_read_tokens": _first(_agent("session_cache_read_tokens"), res.get("cache_read_tokens", 0)),
+        "cache_write_tokens": _first(_agent("session_cache_write_tokens"), res.get("cache_write_tokens", 0)),
+    }
+    context = {
+        # Last real prompt size — the result key (current hermes) and the
+        # compressor attribute hold the same value; compressor covers old hermes.
+        "used_tokens": _first(
+            getattr(compressor, "last_prompt_tokens", 0), res.get("last_prompt_tokens", 0)
+        ),
+        # Model context window — compressor-only (see docstring).
+        "max_tokens": _first(
+            getattr(compressor, "context_length", 0), res.get("context_length", 0)
+        ),
+    }
+    return tokens, context
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
 
@@ -41,8 +110,7 @@ def _wrap_handle_message(orig: Callable) -> Callable:
             _text = (getattr(event, "text", "") or "").strip()
             if _text.lower().startswith("/aowen"):
                 _source = getattr(event, "source", None)
-                _platform = getattr(getattr(_source, "platform", None), "value", "")
-                if _platform == "feishu" and hasattr(self, "_running_agents"):
+                if _is_feishu_platform(_source) and hasattr(self, "_running_agents"):
                     _quick_key = None
                     try:
                         _quick_key = self._session_key_for_source(_source)
@@ -72,6 +140,12 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
     @functools.wraps(orig)
     async def wrapper(self, event, source, *args, **kwargs):
+        # v1.8.3 (P1, issue #18-2): non-Feishu traffic is handled natively by
+        # hermes — no card sessions, no hooks, no _msg_ctx. Entry-point gate,
+        # Enum/str tolerant (see _is_feishu_platform).
+        if not _is_feishu_platform(source):
+            return await orig(self, event, source, *args, **kwargs)
+
         mid = event.message_id
         anchor_id = self._reply_anchor_for_event(event)
         chat_id = source.chat_id if hasattr(source, "chat_id") else ""
@@ -84,8 +158,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
         # 态、无泄漏，但每次都刷错误日志且纯飞书部署外的多渠道部署不可
         # 用）。源头堵：非飞书消息不建会话；下游回调包装器因查不到会话
         # 自然放行纯文本回复，行为不变。
-        _platform_name = getattr(getattr(source, "platform", None), "value", "").lower()
-        _is_feishu = _platform_name in ("feishu", "lark")
+        _is_feishu = True  # 已过入口门禁，见 _is_feishu_platform
 
         # Track this message as started (for interrupt detection)
         with _started_msg_ids_lock:
@@ -125,8 +198,45 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
         try:
             result = await orig(self, event, source, *args, **kwargs)
-        except BaseException:
-            _hls_cleanup_ctx()
+        except BaseException as exc:
+            # v1.8.3 (P1, issue #18-4): seal the card session on uncaught
+            # exceptions BEFORE cleanup. Previously this path only cleaned the
+            # ctx and re-raised — the session stayed non-terminal forever,
+            # _prune_stale_sessions skips active sessions to avoid killing
+            # live ones, so the session (and its card stuck on "正在加载上下
+            # 文...") leaked until process restart. Sealing via
+            # on_message_completed shows the error panel and puts the session
+            # into a terminal phase for TTL recycling. CancelledError counts
+            # as user-driven abort (/stop, shutdown); everything else as error.
+            try:
+                from ..controller import get_controller
+                from .hooks import on_message_completed
+
+                _ctrl = get_controller()
+                _sess = _ctrl._sess_get(mid) if (_ctrl and _ctrl.enabled) else None
+                if _sess is not None and not _sess.is_terminal_phase and _sess.state != CardPhase.COMPLETING:
+                    _err_elapsed = time.monotonic() - msg_context.get("_msg_start_time", time.monotonic())
+                    _is_cancel = isinstance(exc, asyncio.CancelledError)
+                    _err_msg = "Task cancelled" if _is_cancel else (
+                        f"agent error: {type(exc).__name__}: {str(exc)[:160]}".rstrip()
+                    )
+                    _sealed = on_message_completed(
+                        message_id=mid,
+                        answer="",
+                        duration=_err_elapsed,
+                        error_message=_err_msg,
+                        aborted=_is_cancel,
+                    )
+                    if _sealed:
+                        msg_context["card_sent"] = True
+                        _logger.info(
+                            "HLS: sealed card on uncaught %s msg=%s",
+                            type(exc).__name__, (mid or "?")[:12],
+                        )
+            except Exception:
+                _logger.debug("HLS: exception-path seal failed", exc_info=True)
+            finally:
+                _hls_cleanup_ctx()
             raise
 
         # point to the new message's context. We must use the original
@@ -256,6 +366,27 @@ def _wrap_run_agent(orig: Callable) -> Callable:
         channel_prompt=None,
         **kwargs,
     ):
+        # v1.8.3 (P1, issue #18-2): non-Feishu traffic passes through natively.
+        # Previously the interrupt-recursive path below fired on_message_interrupted
+        # + on_message_started UNCONDITIONALLY — a QQ/Telegram (or string-platform)
+        # message interrupting an agent run created a Feishu card session keyed on
+        # a non-om_ message id, and every card API call on it failed with 99992354.
+        if not _is_feishu_platform(source):
+            return await orig(
+                self,
+                message,
+                context_prompt,
+                history,
+                source,
+                session_id,
+                session_key=session_key,
+                run_generation=run_generation,
+                _interrupt_depth=_interrupt_depth,
+                event_message_id=event_message_id,
+                channel_prompt=channel_prompt,
+                **kwargs,
+            )
+
         # message's ID. We must create a fresh context for the recursive call
         _saved_parent_ctx = None  # Will hold parent context for restoration
         _original_msg_context_ref = None  # Reference to the original msg_context dict
@@ -409,27 +540,20 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                         )
 
                     _agent_ref_child = ctx.get("_agent_ref")
-                    cache_read_child = getattr(_agent_ref_child, "session_cache_read_tokens", 0) if _agent_ref_child else 0
-                    cache_write_child = getattr(_agent_ref_child, "session_cache_write_tokens", 0) if _agent_ref_child else 0
                     reasoning_tokens = getattr(_agent_ref_child, "session_reasoning_tokens", 0) if _agent_ref_child else 0
                     estimated_cost_usd = getattr(_agent_ref_child, "session_estimated_cost_usd", 0) if _agent_ref_child else 0
                     cost_status = getattr(_agent_ref_child, "session_cost_status", "unknown") if _agent_ref_child else "unknown"
+
+                    # v1.8.3 (P1, issue #12): unified usage extraction
+                    _tokens_child, _context_child = _session_usage_from(ctx, result)
 
                     card_sent_child = on_message_completed(
                         message_id=ctx["message_id"],
                         answer=result.get("final_response", ""),
                         duration=_elapsed_child,
                         model=result.get("model", ""),
-                        tokens={
-                            "input_tokens": result.get("input_tokens", 0),
-                            "output_tokens": result.get("output_tokens", 0),
-                            "cache_read_tokens": cache_read_child,
-                            "cache_write_tokens": cache_write_child,
-                        },
-                        context={
-                            "used_tokens": result.get("last_prompt_tokens", 0),
-                            "max_tokens": result.get("context_length", 0),
-                        },
+                        tokens=_tokens_child,
+                        context=_context_child,
                         api_calls=result.get("api_calls", 0),
                         history_offset=result.get("history_offset", 0),
                         compression_exhausted=result.get("compression_exhausted", False),
@@ -496,27 +620,20 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     )
 
                 _agent_ref = ctx.get("_agent_ref")
-                cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
-                cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
                 reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
                 estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                 cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
+
+                # v1.8.3 (P1, issue #12): unified usage extraction
+                _tokens, _context = _session_usage_from(ctx, result)
 
                 card_sent = on_message_completed(
                     message_id=ctx["message_id"],
                     answer=result.get("final_response", ""),
                     duration=_elapsed,
                     model=result.get("model", ""),
-                    tokens={
-                        "input_tokens": result.get("input_tokens", 0),
-                        "output_tokens": result.get("output_tokens", 0),
-                        "cache_read_tokens": cache_read,
-                        "cache_write_tokens": cache_write,
-                    },
-                    context={
-                        "used_tokens": result.get("last_prompt_tokens", 0),
-                        "max_tokens": result.get("context_length", 0),
-                    },
+                    tokens=_tokens,
+                    context=_context,
                     api_calls=result.get("api_calls", 0),
                     history_offset=result.get("history_offset", 0),
                     compression_exhausted=result.get("compression_exhausted", False),
@@ -584,6 +701,7 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
         finally:
             pass  # v1.3.0: inject_time guard removed
 
+    wrapper._hls_wrapped = True
     return wrapper
 
 # ── Background task wrapper ───────────────────────────────────────
@@ -593,9 +711,8 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
 
     @functools.wraps(orig)
     async def wrapper(self, prompt, source, task_id, event_message_id=None, **kwargs):
-        # Only intercept Feishu platform
-        platform_name = getattr(getattr(source, "platform", None), "value", "").lower()
-        if platform_name not in ("feishu", "lark"):
+        # Only intercept Feishu platform (v1.8.3: Enum/str tolerant helper)
+        if not _is_feishu_platform(source):
             return await orig(
                 self, prompt, source, task_id,
                 event_message_id=event_message_id, **kwargs,
@@ -680,27 +797,20 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
 
                     # Extract cache tokens from agent reference (set by _maybe_wrap_callbacks)
                     _agent_ref = ctx.get("_agent_ref")
-                    cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
-                    cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
                     reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
                     estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                     cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
+
+                    # v1.8.3 (P1, issue #12): unified usage extraction
+                    _tokens, _context = _session_usage_from(ctx, result)
 
                     card_sent = on_message_completed(
                         message_id=task_id,
                         answer=(result or {}).get("final_response", ""),
                         duration=_elapsed,
                         model=(result or {}).get("model", ""),
-                        tokens={
-                            "input_tokens": (result or {}).get("input_tokens", 0),
-                            "output_tokens": (result or {}).get("output_tokens", 0),
-                            "cache_read_tokens": cache_read,
-                            "cache_write_tokens": cache_write,
-                        },
-                        context={
-                            "used_tokens": (result or {}).get("last_prompt_tokens", 0),
-                            "max_tokens": (result or {}).get("context_length", 0),
-                        },
+                        tokens=_tokens,
+                        context=_context,
                         api_calls=(result or {}).get("api_calls", 0),
                         history_offset=(result or {}).get("history_offset", 0),
                         compression_exhausted=(result or {}).get("compression_exhausted", False),
@@ -855,4 +965,5 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
             # v1.3.2 fix (B3-06): default to 0 (not 1) for consistency.
             feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 0) - 1
 
+    wrapper._hls_wrapped = True
     return wrapper

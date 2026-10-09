@@ -324,16 +324,20 @@ async def test_create_linear_card_replies_to_anchor_id() -> None:
     test was rewritten to drive the linear ``_do_create_linear_card``
     path (the only creation path that remains). The behaviour under
     test — replying to ``anchor_id`` when present — is unchanged.
+
+    v1.8.3: the fixture anchor uses a realistic ``om_`` id — reply targets
+    are validated (issue #18-3) and non-om_ ids now route to the
+    chat-direct send instead of the reply API.
     """
     ctrl = _setup_ctrl(linear=True)
     session = _make_session("msg", linear=True)
-    session.anchor_id = "quoted"
+    session.anchor_id = "om_quoted"
     ctrl._sessions["msg"] = session
 
     await ctrl._do_create_linear_card(session)
 
     ctrl._client.reply_card_by_id.assert_called_once()
-    assert ctrl._client.reply_card_by_id.call_args.args[0] == "quoted"
+    assert ctrl._client.reply_card_by_id.call_args.args[0] == "om_quoted"
 
 
 def _capture_split_calls(
