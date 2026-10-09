@@ -307,24 +307,23 @@ def _strip_internal(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
 
 # ── 注册入口 ────────────────────────────────────────────────────────────────
 def _rebuild_class_with_real_base() -> Any:
-    """hermes 就绪后用真实基类重建适配器类.
+    """hermes 就绪后把适配器类切换到真实基类（原地换基）.
 
-    模块导入时 hermes 可能不在（占位基类）；register() 是必然运行在
-    hermes 进程内的入口，在此完成真实继承链组装并全局重绑定。
+    模块导入时 hermes 可能不在（占位基类 ``_MissingBuiltin``）；register() 是
+    必然运行在 hermes 进程内的入口，在此完成真实继承链组装。
+
+    实现说明（v2.0.0 生产修复）：不能用 ``type()`` 重建类——借用的方法函数
+    对象带有指向旧类的 ``__class__`` cell，零参 ``super()`` 在首次实例化时
+    抛 ``TypeError: obj ... is not an instance or subtype of type``（V2 上线
+    当日在 hermes 网关实测暴露；测试环境真实基类在导入期即绑定，rebuild 分支
+    从未执行，故 584 项测试无法捕获）。原地改 ``__bases__`` 保持类对象身份与
+    全部方法闭包一致，零参 super 语义不变。
     """
-    global FeishuStreamingAdapter
     base = _get_builtin().FeishuAdapter
-    if FeishuStreamingAdapter.__bases__ and FeishuStreamingAdapter.__bases__[0] is _MissingBuiltin:
-        ns = {
-            k: v for k, v in vars(FeishuStreamingAdapter).items()
-            if k not in ("__dict__", "__weakref__", "__module__", "__qualname__", "__doc__")
-        }
-        FeishuStreamingAdapter = type(
-            "FeishuStreamingAdapter", (base,),
-            {"__module__": __name__, "__qualname__": "FeishuStreamingAdapter",
-             "__doc__": FeishuStreamingAdapter.__doc__, **ns},
-        )
-    return FeishuStreamingAdapter
+    cls = FeishuStreamingAdapter
+    if cls.__bases__ and cls.__bases__[0] is _MissingBuiltin:
+        cls.__bases__ = (base,)  # 原地换基：身份/cell/MRO 一次到位，无第二类对象
+    return cls
 
 
 def register(ctx: Any) -> None:
