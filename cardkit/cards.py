@@ -141,13 +141,24 @@ def build_streaming_card_v2(
     include_unified_panel: bool = True,
     include_loading_hint: bool = True,
     include_answer_element: bool = True,
+    status_lines: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Card lifecycle (v1.0.2+):"""
+    """Card lifecycle (v1.0.2+):
+
+    ``status_lines``：V2 帧重组引擎的工具/思考/interim 状态行，
+    逐行渲染为面板内 markdown 元素（None/空 → 空占位面板）。
+    """
     elements: list[dict] = []
 
     # ── Unified panel placeholder (linear mode — single panel for reasoning+tools) ──
     if include_unified_panel:
-        elements.append(_build_unified_panel_placeholder(expanded=streaming_panel_expanded))
+        panel = _build_unified_panel_placeholder(expanded=streaming_panel_expanded)
+        if status_lines:
+            panel["elements"] = [
+                {"tag": "markdown", "content": line}
+                for line in status_lines
+            ]
+        elements.append(panel)
 
     # ── Streaming answer element ──
     if show_streaming_element and include_answer_element:

@@ -133,7 +133,7 @@ class _CardFactory:
         from .cardkit.cards import build_streaming_card_v2
 
         params = self._params()
-        return build_streaming_card_v2(**params)
+        return build_streaming_card_v2(status_lines=status_lines, **params)
 
     def final(self, **_: Any) -> dict[str, Any]:
         # V2 终态不重建卡片（answer 元素由 stream_element 落终值）。

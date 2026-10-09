@@ -43,7 +43,7 @@ hermes_lark_streaming = "."
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["controller*", "cardkit*", "patching*", "state*", "feishu*", "config*", "aowen*", "plugin*", "flush*"]
+include = ["cardkit*", "state*", "feishu*", "config*", "aowen*", "plugin*", "flush*", "composer*"]
 
 [tool.setuptools.package-data]
 hermes_lark_streaming = ["plugin.yaml"]

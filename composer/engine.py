@@ -100,7 +100,8 @@ class FrameComposer:
 
     def active_state(self, chat_id: str) -> CardTurnState | None:
         st = self._states.get(chat_id)
-        if st and not st.finalized and not st.degraded:
+        # card_id 为空 = 建卡前的 progress 暂存占位（非活跃卡片）
+        if st and st.card_id and not st.finalized and not st.degraded:
             return st
         return None
 
@@ -168,14 +169,27 @@ class FrameComposer:
         client = self._get_client()
         if client is None:
             return None
-        card = self._build_card()
+        # 并入建卡前暂存的 progress 行（首卡即带状态面板）
+        prev = self._states.get(chat_id)
+        pending = list(prev.pending_status)[-12:] if prev is not None else []
+        card = self._build_card(status_lines=pending or None)
         card_id = await client.cardkit_create(card)
         message_id = await client.send_card_by_id_to_chat(chat_id, card_id)
-        st = CardTurnState(chat_id=chat_id, card_id=card_id, card_message_id=str(message_id))
-        # 并入建卡前暂存的 progress 行
-        if st.pending_status:
-            st.status_lines = list(st.pending_status)[-12:]
-            st.pending_status.clear()
+        # 复用占位/上一 turn 状态对象（保留注册表连续性），升级为活跃卡片。
+        # 注意必须重置终态旗标：同 chat 连续 turn 时 prev 可能是上一 turn 的
+        # finalized 状态，不重置会导致第 2 turn active_state 恒 None（重复建卡）。
+        st = prev if prev is not None else CardTurnState(chat_id=chat_id)
+        st.chat_id = chat_id
+        st.card_id = card_id
+        st.card_message_id = str(message_id)
+        st.answer_text = ""
+        st.seq = 0
+        st.created_at = time.monotonic()
+        st.last_activity = time.monotonic()
+        st.finalized = False
+        st.degraded = False
+        st.status_lines = pending
+        st.pending_status.clear()
         self._states[chat_id] = st
         self._by_message[st.card_message_id] = chat_id
         st.answer_text = content or ""

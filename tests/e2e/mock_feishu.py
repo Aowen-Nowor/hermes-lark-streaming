@@ -3,16 +3,20 @@
 Records all API calls for later assertion. Does NOT actually serve
 cards to real users — just returns success responses and stores
 the card/element data for test verification.
+
+V2: 方法签名与 ``hermes_lark_streaming.feishu.client.FeishuClient`` 完全
+兼容（cardkit_create / send_card_by_id_to_chat / cardkit_stream_element /
+cardkit_update / cardkit_close_streaming / send_card_to_chat /
+send_text_to_chat / ...），因此实例可直接作为 FrameComposer 的 client
+使用（duck-typing，无需再包一层 MagicMock 委托）。
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import time
-from typing import Any
 from dataclasses import dataclass, field
+from typing import Any
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
@@ -90,7 +94,7 @@ class MockFeishuServer:
     async def reply_card(self, message_id: str, card: dict[str, Any]) -> str:
         msg_id = f"om_mock_{self._next_msg_id}"
         self._next_msg_id += 1
-        self._call_log.append({"op": "reply_card", "message_id": message_id, "msg_id": msg_id})
+        self._call_log.append({"op": "reply_card", "message_id": message_id, "msg_id": msg_id, "card": card})
         return msg_id
 
     async def cardkit_stream_element(
@@ -177,7 +181,25 @@ class MockFeishuServer:
     async def send_card_to_chat(self, chat_id: str, card: dict[str, Any]) -> str:
         msg_id = f"om_mock_{self._next_msg_id}"
         self._next_msg_id += 1
-        self._call_log.append({"op": "send_card_to_chat", "chat_id": chat_id, "msg_id": msg_id})
+        self._call_log.append({"op": "send_card_to_chat", "chat_id": chat_id, "msg_id": msg_id, "card": card})
+        return msg_id
+
+    async def send_card_by_id_to_chat(self, chat_id: str, card_id: str) -> str:
+        """V2 FrameComposer 建卡路径：CardKit 实体卡直发聊天（FeishuClient 同名 API）."""
+        if card_id not in self._cards:
+            raise RuntimeError(f"send_card_by_id_to_chat: card {card_id} not found")
+        msg_id = f"om_mock_{self._next_msg_id}"
+        self._next_msg_id += 1
+        self._call_log.append(
+            {"op": "send_card_by_id_to_chat", "chat_id": chat_id, "card_id": card_id, "msg_id": msg_id}
+        )
+        return msg_id
+
+    async def send_text_to_chat(self, chat_id: str, text: str) -> str:
+        """原生文本直发（FeishuClient 同名 API；plain 帧与连通性自检用）."""
+        msg_id = f"om_mock_{self._next_msg_id}"
+        self._next_msg_id += 1
+        self._call_log.append({"op": "send_text_to_chat", "chat_id": chat_id, "text": text[:50], "msg_id": msg_id})
         return msg_id
 
     async def reply_text(self, message_id: str, text: str) -> str:
