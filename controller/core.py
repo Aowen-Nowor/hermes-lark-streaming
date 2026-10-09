@@ -961,8 +961,32 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             for k in stale_keys:
                 del self._interrupt_map[k]
         # v1.4.0 fix: 清理 _continuation_map 中以本 message_id 为 old 或 new 的条目。
+        # v1.8.3 (P1, issue #15): 清理以本 message_id 为 KEY 的路由前，先检查
+        # 路由目标（continuation 会话）是否仍活跃。竞态链：重激活会先异步封
+        # 旧卡（_reactivate_session_for_continuation → _do_linear_complete →
+        # _cleanup(old)），路由注册发生在 fire 之后 —— 封卡任务先于注册完成
+        # 时 pop 是无害的空操作；但封卡任务在注册之后才完成时（常态，封卡含
+        # 多次网络往返），这里的无条件 pop 会删掉刚注册的路由，hermes 随后的
+        # on_completed(old) 重定向落空、命中旧卡幂等分支，续卡永不封闭（且
+        # 可能被后台审查继续写入）。目标仍活跃时保留路由，交给
+        # on_completed(old) 一次性消费（_pop_continuation_id）；目标已终态/
+        # 不存在时照常清理。
         with self._continuation_map_lock:
-            self._continuation_map.pop(message_id, None)
+            cont_target = self._continuation_map.get(message_id)
+            keep_route = False
+            if cont_target is not None:
+                cont_sess = self._sess_get(cont_target)
+                if cont_sess is not None and not cont_sess.is_terminal_phase:
+                    keep_route = True
+            if keep_route:
+                _logger.info(
+                    "HLS: cleanup keeps continuation route old=%s -> cont=%s "
+                    "(target still active; on_completed(old) will consume it)",
+                    (message_id or "?")[:12],
+                    (cont_target or "?")[:12],
+                )
+            else:
+                self._continuation_map.pop(message_id, None)
             stale_cont_keys = [k for k, v in self._continuation_map.items() if v == message_id]
             for k in stale_cont_keys:
                 del self._continuation_map[k]
@@ -1028,14 +1052,32 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             from ..cardkit.md import optimize_markdown_style
             content = optimize_markdown_style(text) or text
             reply_id = session.anchor_id or session.message_id
-            await self._client.reply_text(reply_id, content)
+            # v1.8.3 (P1, issue #18-3): reply API requires an om_ message id;
+            # a synthetic id (bg_* task id) fails with 99992354 and the old
+            # bare `except: pass` silently swallowed the text. For non-om_
+            # targets send directly to the chat — same delivery, correct API.
+            if reply_id and str(reply_id).startswith("om_"):
+                await self._client.reply_text(reply_id, content)
+            elif session.chat_id:
+                await self._client.send_text_to_chat(session.chat_id, content)
+            else:
+                _logger.warning(
+                    "text fallback dropped: no om_ reply target and no chat_id "
+                    "msg=%s",
+                    (session.message_id or "?")[:12],
+                )
+                return
             _logger.info(
                 "text fallback sent: msg=%s len=%d",
                 (session.message_id or "?")[:12],
                 len(content),
             )
         except Exception:
-            pass
+            _logger.warning(
+                "text fallback failed: msg=%s",
+                (session.message_id or "?")[:12],
+                exc_info=True,
+            )
 
     def _prune_stale_sessions(self) -> None:
         """v1.1.1: 只清理已终态的过期 session，保护活跃 session."""
