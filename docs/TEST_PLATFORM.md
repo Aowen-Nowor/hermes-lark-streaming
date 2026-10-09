@@ -47,16 +47,45 @@
 | 重写点存在 | send / edit_message / send_clarify | ✅ |
 | **零补丁验证** | 内置 `FeishuAdapter.send.__module__` 未被改写 | ✅ |
 
-### 1.4 单元测试套件（561/561 通过）
+### 1.4 单元测试套件（584/584 通过）
 
 ```
-pytest tests/ --ignore=tests/e2e
-561 passed in 5.40s
+pytest tests/ -q
+584 passed in 7.45s
 ```
 
 保留并适配：cardkit（含澄清卡片转义/i18n/归一化）、state（phase/linear/session/text/tooluse）、config、unavailable_guard、version。
 删除（V1 补丁架构专属，随 `patching/`/`controller/` 退役）：monkey_patch / patch / callback_interception / controller / concurrency / gateway_card / v1.2x–v1.8x 版本修复回归 / integration 哨兵。
 新增路径：clarify 存储注册表测试改指向 `hermes_lark_streaming.clarify`（语义不变）。
+
+### 1.5 tests/e2e 移植 V2（23/23 通过）
+
+V1 遗留的 `tests/e2e/`（挂在已退役的 StreamingController API 上，改前 2 failed + 20 errors）全部移植到 V2 FrameComposer 驱动：
+
+```
+pytest tests/e2e -q
+23 passed（mock 模式；real 模式接 FEISHU_E2E_APP_ID/SECRET/CHAT_ID 即用）
+```
+
+- `framework.py`：E2ETestRunner 改为驱动 FrameComposer（与 adapter.__init__ 同款接线），start_message/send_segment/feed_answer/feed_reasoning/feed_tool_update/complete 全部经 classify_send/classify_edit 真实分类后进 handle_send/handle_edit
+- 覆盖：基本答案流（建卡→分段→edit 全量→两步定稿）、思考+工具面板（含去重）、**建卡前 progress 暂存并入首卡**、20 段长答案 delta 计数、plain/降级与恢复、终态行为（error 定稿/新 turn 新卡）
+- 移植中发现并修复 V2 生产缺陷：`clarify.py` 3 处 `..cardkit` 相对导入越界 → 生产澄清卡片必静默降级纯文本；改 `.cardkit` 后 TestClarifySendPath 4 用例全绿
+
+### 1.6 真飞书 E2E 实测（scripts/e2e_v2.py，云服务器 + 真实凭证）
+
+在部署服务器（Ubuntu 26.04 / Python 3.14 / hermes v0.21.6）上用真实飞书应用凭证直驱 FrameComposer + 真实 FeishuClient，七场景全绿（25+ 项断言全 PASS）：
+
+| 场景 | 验证点 | 结果 |
+|---|---|---|
+| connect | tenant_access_token + send_text_to_chat 直发 | ✅ |
+| answer | 建卡 → 打字机流式 → 两步定稿（finalized + 终值落盘） | ✅ |
+| progress | 建卡前 thinking/工具行暂存并入首卡 status_lines、重复行去重、cardkit_update 增量 | ✅ |
+| interim | 分类断言 + 建卡后并入状态面板 | ✅ |
+| full | 仿真实 turn 六步时序（暂存×2 → 建卡带面板 → 流式 → 面板增量 → 定稿） | ✅ |
+| clarify | 澄清卡片构建（交互元素非空）+ 直发 + 提交态 | ✅ |
+| plain | 分类断言（不进卡片通道）+ 原生 send_text | ✅ |
+
+现场断言摘录：`暂存行并入 status_lines — lines=['💬 正在拆解…', '🔧 bash："echo e2e-progress"']`、`重复工具行去重 — lines=2`、`answer 终值完整 — len=73`、真实卡片 msg_id 全部返回。
 
 ## 2. 验收标准核验（对齐 TASK 文档）
 
@@ -71,11 +100,11 @@ pytest tests/ --ignore=tests/e2e
 
 ## 3. 已知限制与风险
 
-1. **端到端真飞书验证未执行**：本环境无飞书应用凭证（`FEISHU_APP_ID/SECRET`），CardKit create/stream/close 的真实 API 路径未在本次验收中打通；`tests/e2e/` 框架保留，可在凭证环境一键复验。风险缓解：CardKit API 封装自 V1 生产验证过的 `feishu/client.py` 原样继承，未改协议。
+1. **~~端到端真飞书验证未执行~~ 已完成**：真飞书 E2E 已在云服务器部署环境用真实应用凭证跑通（见 §1.6），CardKit create/stream/close 真实 API 路径全部打通；`tests/e2e/` 已同步移植 V2（§1.5）。遗留：网关全链路（飞书 WS 入站 → agent → 卡片出站）的长时稳定性观察继续在部署环境进行。
 2. **/aowen monitor 指标静态化**：V1 由 controller 上报的卡片创建/失败计数在 V2 暂未接线（composer 不依赖 aowen），monitor 卡片显示基础状态。计划 v2.1 通过 composer → metrics 轻量回调恢复。
 3. **progress 文本模板解析为启发式**：依赖 hermes locales 的稳定渲染格式（💬 前缀 / emoji 工具行）；格式变化时防御性兜底为 interim 原文展示，不丢失内容。
 4. **/aowen 中断提示卡片**：需要"会话运行中"内部状态，V2 未提供（无官方出口），随补丁架构退役。
 
 ## 4. 验收结论
 
-**通过（附条件）**。架构验收（零补丁、协议合规、能力继承、降级保障）全部达成；端到端卡片流需在真实飞书凭证环境做最终复验（E2E 框架已就位），通过后方可用于生产替换。
+**通过**。架构验收（零补丁、协议合规、能力继承、降级保障）全部达成；端到端卡片流已在真实飞书凭证环境实测打通（§1.6），单元 + E2E 套件 584/584 全绿，具备生产替换条件。
