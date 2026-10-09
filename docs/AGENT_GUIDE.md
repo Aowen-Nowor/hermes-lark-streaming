@@ -1,7 +1,7 @@
 # hermes-lark-streaming 安装指南
 
 > 高信息密度参考文档，专为 Agent 自动解析设计
-> 最后更新: 2026-10-08 (v1.8.3)
+> 最后更新: 2026-10-09 (v1.8.4)
 
 ## 快速概览
 
@@ -12,7 +12,7 @@
 | Python | >=3.11 |
 | 依赖 | lark-oapi>=1.6.4, PyYAML>=6.0 |
 | 插件类型 | standalone |
-| 验证基线 | hermes-agent v0.21.1 (tag v2026.9.7)；生产建议 >= v0.19.0 |
+| 验证基线 | hermes-agent v0.21.6；生产建议 >= v0.19.0 |
 | Gitee | https://gitee.com/Aowen-Nowor/hermes-lark-streaming |
 | GitHub | https://github.com/Aowen-Nowor/hermes-lark-streaming |
 
@@ -230,7 +230,7 @@ A: 在飞书开放平台创建应用后，在「凭证与基础信息」页面�
 A: 单卡片最多 200 个 Tag 对象，插件内置安全网自动裁剪超限内容。
 
 **Q: 支持哪些 Hermes Agent 版本？**  
-A: 需要支持插件系统的 Hermes Agent（v0.17+）。本插件按 hermes-agent v0.21.1（tag v2026.9.7）源码逐点验证兼容；生产建议 >= v0.19.0。RELAY 前置部署需 v0.20.5+。旧版 hermes（< 0.19）不受 lark-oapi 门槛影响，但建议同步升级。
+A: 需要支持插件系统的 Hermes Agent（v0.17+）。本插件按 hermes-agent v0.21.6 源码逐点验证兼容（v0.21.1/v0.21.6 双版本 30 集成用例全过）；生产建议 >= v0.19.0。注意：hermes v0.21.6 起依赖仅支持 Python 3.14 运行时安装（pyproject 全部依赖标记 python_version >= '3.14'，官方 .python-version=3.14），升级 hermes 时请确认宿主 Python。RELAY 前置部署需 v0.20.5+。旧版 hermes（< 0.19）不受 lark-oapi 门槛影响，但建议同步升级。
 
 **Q: 卸载时忘记运行 cleanup 怎么办？**  
 A: 可忽略，或手动清理 `~/.hermes/config.yaml` 中的相关配置。
