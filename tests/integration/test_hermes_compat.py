@@ -91,6 +91,23 @@ def _ast_class_has_method(tree: ast.Module, class_name: str, method_name: str) -
     return False
 
 
+def _ast_any_class_has_method(tree: ast.Module, method_name: str) -> bool:
+    """Check whether ANY class in the AST defines the given method.
+
+    v1.8.4: Mixin 布局的 AST 扫描助手 —— hermes v0.21.x 把 GatewayRunner 拆成
+    18 个 Mixin 组合、AIAgent 拆成 14 个，被补丁的方法可能定义在 Mixin 基类
+    而非组合类类体。对候选文件内所有 ClassDef 取并集，语义与
+    ``_AIAgent_CALLBACK_MODULE_CANDIDATES``（v1.8.2）一致。
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if item.name == method_name:
+                        return True
+    return False
+
+
 def _ast_module_has_function(tree: ast.Module, func_name: str) -> bool:
     """Check whether an AST tree contains a top-level function with the given name."""
     for node in ast.iter_child_nodes(tree):
@@ -199,6 +216,10 @@ class TestGatewayRunner:
             "GatewayRunner class not found in gateway/run.py (AST analysis)"
         )
 
+    # v1.8.4: 三个方法存在性测试的 AST 兜底统一改为候选并集扫描 —— import 层
+    # 语义不变（hasattr 经 MRO 命中 Mixin 方法，v0.21.x 运行时仍为 True）；
+    # AST 层此前只扫 gateway/run.py 单文件类体，v0.21.x Mixin 化后必然失明。
+
     def test_gateway_runner_has_handle_message(self, hermes_src: Path) -> None:
         """GatewayRunner should have _handle_message method."""
         try:
@@ -210,10 +231,13 @@ class TestGatewayRunner:
             return
         except (ImportError, AttributeError):
             pass
-        tree = _parse_ast(hermes_src, "gateway.run")
-        assert tree is not None, "gateway/run.py not found"
-        assert _ast_class_has_method(tree, "GatewayRunner", "_handle_message"), (
-            "GatewayRunner._handle_message not found (AST analysis)"
+        for mod_path in _GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is not None and _ast_any_class_has_method(tree, "_handle_message"):
+                return
+        assert False, (
+            f"GatewayRunner._handle_message not found in any candidate module "
+            f"{_GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES} (AST analysis)"
         )
 
     def test_gateway_runner_has_handle_message_with_agent(self, hermes_src: Path) -> None:
@@ -227,10 +251,15 @@ class TestGatewayRunner:
             return
         except (ImportError, AttributeError):
             pass
-        tree = _parse_ast(hermes_src, "gateway.run")
-        assert tree is not None, "gateway/run.py not found"
-        assert _ast_class_has_method(tree, "GatewayRunner", "_handle_message_with_agent"), (
-            "GatewayRunner._handle_message_with_agent not found (AST analysis)"
+        for mod_path in _GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is not None and _ast_any_class_has_method(
+                tree, "_handle_message_with_agent"
+            ):
+                return
+        assert False, (
+            f"GatewayRunner._handle_message_with_agent not found in any candidate "
+            f"module {_GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES} (AST analysis)"
         )
 
     def test_gateway_runner_has_run_agent(self, hermes_src: Path) -> None:
@@ -244,10 +273,13 @@ class TestGatewayRunner:
             return
         except (ImportError, AttributeError):
             pass
-        tree = _parse_ast(hermes_src, "gateway.run")
-        assert tree is not None, "gateway/run.py not found"
-        assert _ast_class_has_method(tree, "GatewayRunner", "_run_agent"), (
-            "GatewayRunner._run_agent not found (AST analysis)"
+        for mod_path in _GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is not None and _ast_any_class_has_method(tree, "_run_agent"):
+                return
+        assert False, (
+            f"GatewayRunner._run_agent not found in any candidate module "
+            f"{_GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES} (AST analysis)"
         )
 
 
@@ -265,6 +297,35 @@ _AIAgent_CALLBACK_MODULE_CANDIDATES = [
     "gateway.run_turn_runner",       # v0.21.1+ _wire_turn_agent_callbacks（4/5 赋值点）
     "agent.agent_init",              # v0.21.1+ AIAgent.__init__ 委托实现（background_review 赋值）
 ]
+
+# v1.8.4: GatewayRunner / AIAgent 方法存在性的 AST 扫描候选 —— hermes v0.21.x
+# 的 Mixin 化把被补丁方法搬出了原单体文件的类体：
+#   _handle_message            → gateway/run_inbound.py（GatewayInboundMixin）
+#   _handle_message_with_agent / _run_agent / _run_background_task
+#                              → gateway/run_turn.py（GatewayTurnMixin）
+#   AIAgent.run_conversation   → agent/turn_facade.py（TurnFacadeMixin）
+# 单文件类体扫描面（gateway.run / run_agent）上方法定义数归零，哨兵必然失明。
+# 候选文件在旧版 hermes 缺失时自动跳过（纯增量，不改旧语义，沿用
+# _AIAgent_CALLBACK_MODULE_CANDIDATES / _RUN_CONVERSATION_METHOD_CANDIDATES
+# 的既有候选并集模式）。
+_GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES = [
+    "gateway.run",          # 旧版单体：方法在 GatewayRunner 类体内（< v0.21.x）
+    "gateway.run_inbound",  # v0.21.x+ _handle_message（GatewayInboundMixin）
+    "gateway.run_turn",     # v0.21.x+ _handle_message_with_agent/_run_agent/
+                            # _run_background_task（GatewayTurnMixin）
+]
+
+_AIAGENT_METHOD_MODULE_CANDIDATES = [
+    "run_agent",            # 旧版单体：run_conversation 在 AIAgent 类体内（< v0.21.x）
+    "agent.turn_facade",    # v0.21.x+ run_conversation（TurnFacadeMixin，MRO 命中）
+]
+
+# v1.8.4: class_name → AST 候选模块映射（TestMonkeyPatchTargets 用）。
+# FeishuAdapter 不在此表 —— 它已有专属的多路径 + BasePlatformAdapter 继承链回退。
+_CLASS_METHOD_AST_MODULE_CANDIDATES = {
+    "GatewayRunner": _GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES,
+    "AIAgent": _AIAGENT_METHOD_MODULE_CANDIDATES,
+}
 
 
 class TestAIAgent:
@@ -295,10 +356,15 @@ class TestAIAgent:
             return
         except (ImportError, AttributeError):
             pass
-        tree = _parse_ast(hermes_src, "run_agent")
-        assert tree is not None, "run_agent.py not found"
-        assert _ast_class_has_method(tree, "AIAgent", "run_conversation"), (
-            "AIAgent.run_conversation not found (AST analysis)"
+        # v1.8.4: AST 兜底改候选并集 —— v0.21.x 起 run_conversation 经
+        # TurnFacadeMixin 进入 MRO（agent/turn_facade.py），run_agent.py 类体扫描失明。
+        for mod_path in _AIAGENT_METHOD_MODULE_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is not None and _ast_any_class_has_method(tree, "run_conversation"):
+                return
+        assert False, (
+            f"AIAgent.run_conversation not found in any candidate module "
+            f"{_AIAGENT_METHOD_MODULE_CANDIDATES} (AST analysis)"
         )
 
     def test_aiagent_callback_attributes(self, hermes_src: Path) -> None:
@@ -545,6 +611,13 @@ class TestMonkeyPatchTargets:
         tree = _parse_ast(hermes_src, module_path)
         if tree is not None and _ast_class_has_method(tree, class_name, method_name):
             return  # Found in declared path's class body
+        # v1.8.4: Mixin 布局回退 —— hermes v0.21.x 把 GatewayRunner/AIAgent 拆成
+        # Mixin 组合，方法定义搬到候选文件（run_inbound/run_turn/turn_facade）。
+        # 按候选并集扫描（any-class 语义），候选缺失自动跳过。
+        for cand_mod in _CLASS_METHOD_AST_MODULE_CANDIDATES.get(class_name, []):
+            cand_tree = _parse_ast(hermes_src, cand_mod)
+            if cand_tree is not None and _ast_any_class_has_method(cand_tree, method_name):
+                return  # Found in mixin candidate module
         # v1.4.0: 多路径回退（仅对 FeishuAdapter —— 其他 class 直接跳过）
         if class_name == "FeishuAdapter":
             for alt_path in self._FEISHU_ADAPTER_FALLBACK_PATHS:
@@ -612,6 +685,11 @@ class TestMonkeyPatchTargets:
         # skip even though _add_reaction/_remove_reaction exist.
         if module_path in _FEISHU_ADAPTER_MODULE_CANDIDATES:
             candidate_paths = list(_FEISHU_ADAPTER_MODULE_CANDIDATES)
+        elif class_name in _CLASS_METHOD_AST_MODULE_CANDIDATES:
+            # v1.8.4: GatewayRunner/AIAgent 可选目标（如 _run_background_task）
+            # 同样按 Mixin 候选并集扫描 —— v0.21.x 起该方法定义在
+            # gateway/run_turn.py（GatewayTurnMixin），单文件扫描会误报 skip。
+            candidate_paths = list(_CLASS_METHOD_AST_MODULE_CANDIDATES[class_name])
         else:
             candidate_paths = [module_path]
 
@@ -626,7 +704,15 @@ class TestMonkeyPatchTargets:
                 pass
             # Fallback: AST
             tree = _parse_ast(hermes_src, candidate)
-            if tree is not None and _ast_class_has_method(tree, class_name, method_name):
+            if tree is None:
+                continue
+            if class_name in _CLASS_METHOD_AST_MODULE_CANDIDATES:
+                # v1.8.4: Mixin 候选文件里方法定义在 Mixin 基类（如
+                # GatewayTurnMixin）而非组合类（GatewayRunner）类体 ——
+                # 用 any-class 并集语义扫描。
+                if _ast_any_class_has_method(tree, method_name):
+                    return  # Found via AST (mixin layout)
+            elif _ast_class_has_method(tree, class_name, method_name):
                 return  # Found via AST
         # Not found — issue a warning (not a failure)
         pytest.skip(
@@ -754,7 +840,25 @@ class TestV017SignatureChanges:
             return
         except (ImportError, AttributeError):
             pass
-        from run_agent import AIAgent
-        assert hasattr(AIAgent, "run_conversation"), (
-            "AIAgent.run_conversation 不存在（v0.17.0 重构可能移除了入口）"
+        try:
+            from run_agent import AIAgent
+
+            assert hasattr(AIAgent, "run_conversation"), (
+                "AIAgent.run_conversation 不存在（v0.17.0 重构可能移除了入口）"
+            )
+            return
+        except (ImportError, AttributeError):
+            pass
+        # v1.8.4: hermes 依赖不可用（CI Python < 3.14 装不上 hermes v0.21.6+ 的
+        # 3.14-only 依赖）时 conversation_loop 与 run_agent 的 import 都会失败 ——
+        # 此前第二个 import 无保护，ModuleNotFoundError 直接把用例炸成 error。
+        # AST 兜底按 run_conversation 双生产面候选（AIAgent / TurnFacadeMixin）扫描。
+        for mod_path, class_name in _RUN_CONVERSATION_METHOD_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is not None and _ast_any_class_has_method(tree, "run_conversation"):
+                return
+        assert False, (
+            f"run_conversation 入口不存在：conversation_loop 模块、"
+            f"AIAgent.run_conversation 与 AST 候选 "
+            f"{_RUN_CONVERSATION_METHOD_CANDIDATES} 全部落空"
         )
