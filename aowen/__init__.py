@@ -316,16 +316,21 @@ def build_help_card() -> dict[str, Any]:
 def build_status_card() -> dict[str, Any]:
     """Build status card — 3 metrics, patch status, collapsible config."""
     try:
-        from ..controller import get_controller
-        from ..patching import _patch_status
+        from .. import adapter as _adapter_mod
         from ..config import Config
 
-        ctrl = get_controller()
         cfg = Config()
 
-        ctrl_ready = ctrl.enabled and ctrl._client_ok()
+        adapters = _adapter_mod.get_active_adapters()
+        clients_ready = sum(1 for a in adapters if a._get_card_client() is not None)
+        ctrl_ready = bool(adapters) and clients_ready > 0
         creds_status = ("已就绪", "success") if ctrl_ready else ("未就绪", "error")
-        active_count = ctrl._sess_active_count()
+        active_count = sum(
+            1
+            for a in adapters
+            for st in getattr(a._composer, "_states", {}).values()
+            if not getattr(st, "finalized", True)
+        )
 
         from .. import __version__ as plugin_version
 
@@ -341,32 +346,13 @@ def build_status_card() -> dict[str, Any]:
             color="orange" if active_count > 0 else "default",
         )
 
-        # ── Patch status section ──
-        patch_elements: list[dict] = []
-        if _patch_status:
-            for key, val in _patch_status.items():
-                if key in ("version", "hermes_layout"):
-                    continue
-                if val in ("✓", "applied"):
-                    patch_elements.append(_icon_div(
-                        "success", f"`{key}` · {val}",
-                        icon_color="green", text_size="notation",
-                    ))
-                elif "pending" in str(val):
-                    patch_elements.append(_icon_div(
-                        "warning", f"`{key}` · {val}",
-                        icon_color="orange", text_size="notation",
-                    ))
-                else:
-                    patch_elements.append(_icon_div(
-                        "locked", f"`{key}` · {val}",
-                        icon_color="red", text_size="notation",
-                    ))
-        else:
-            patch_elements.append(_icon_div(
-                "warning", "补丁状态不可用",
-                icon_color="orange", text_size="notation",
-            ))
+        # ── Architecture status section (V2: zero monkey-patch) ──
+        patch_elements: list[dict] = [
+            _icon_div("success", "`adapter` · 继承内置 FeishuAdapter", icon_color="green", text_size="notation"),
+            _icon_div("success", "`composer` · CardKit 帧重组引擎", icon_color="green", text_size="notation"),
+            _icon_div("success", "`hooks` · 仅官方 register_hook（/aowen）", icon_color="green", text_size="notation"),
+            _icon_div("success", "`monkey-patch` · 0", icon_color="green", text_size="notation"),
+        ]
 
         # ── Config section (collapsible, grouped by category) ──
         has_creds = bool(cfg.feishu_app_id or cfg.env_app_id)
@@ -416,7 +402,7 @@ def build_status_card() -> dict[str, Any]:
                 "elements": [
                     _three_col(version_block, creds_block, active_block),
                     {"tag": "hr"},
-                    _section_title("补丁应用状态", color="grey"),
+                    _section_title("架构状态（零钩子）", color="grey"),
                     *patch_elements,
                     {"tag": "hr"},
                     _fold("当前配置（点击展开）", config_elements, expanded=False),
@@ -641,7 +627,7 @@ def handle_pre_gateway_dispatch(event: Any, gateway: Any = None, **kwargs) -> di
 
         source = getattr(event, "source", None)
         platform = getattr(getattr(source, "platform", None), "value", "")
-        if platform != "feishu":
+        if not str(platform).startswith("feishu"):
             return None
 
         chat_id = getattr(source, "chat_id", "") if source else ""
@@ -718,13 +704,14 @@ def _do_reset() -> None:
     _logger.info("HLS: metrics reset (was: created=%d, errors=%d)", old_created, old_errors)
 
 def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
-    """Send card fire-and-forget via FeishuClient. Lazy-inits if not yet ready."""
+    """Send card fire-and-forget via the active adapter's CardKit client."""
     import asyncio
-    from ..controller import get_controller
 
-    ctrl = get_controller()
-    if not ctrl.enabled:
-        _logger.warning("HLS: /aowen %s but controller not enabled", cmd_name)
+    from .. import adapter as _adapter_mod
+
+    client = _adapter_mod._any_card_client()
+    if client is None:
+        _logger.warning("HLS: /aowen %s but no active adapter card client", cmd_name)
         return
 
     # Pitfall: get_event_loop() raises RuntimeError in Python 3.14 when no loop running.
@@ -738,20 +725,15 @@ def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
         _logger.warning("HLS: /aowen %s but event loop not running", cmd_name)
         return
 
-    async def _init_and_send():
+    async def _send():
         try:
-            if not ctrl._client_ok():
-                await ctrl._ensure_init()
-            if not ctrl._client_ok():
-                _logger.warning("HLS: /aowen %s but controller init failed", cmd_name)
-                return
-            await ctrl._client.send_card_to_chat(chat_id, card)
+            await client.send_card_to_chat(chat_id, card)
             _logger.info("HLS: %s card sent to chat=%s", cmd_name, chat_id[:12])
         except Exception:
             _logger.error("HLS: failed to send %s card", cmd_name, exc_info=True)
 
     # Hold strong ref to prevent mid-execution GC.
-    task = loop.create_task(_init_and_send())
+    task = loop.create_task(_send())
     _aowen_pending_tasks.add(task)
     task.add_done_callback(_aowen_pending_tasks.discard)
 
@@ -759,19 +741,19 @@ def _skip(reason: str) -> dict:
     return {"action": "skip", "reason": reason}
 
 __all__ = [
-    "record_card_created",
-    "record_card_completed",
-    "record_card_failed",
-    "record_card_aborted",
+    "build_help_card",
+    "build_interrupt_hint_card",
+    "build_monitor_card",
+    "build_reset_card",
+    "build_status_card",
+    "get_metrics",
+    "handle_pre_gateway_dispatch",
     "record_api_call",
     "record_api_error",
+    "record_card_aborted",
+    "record_card_completed",
+    "record_card_created",
+    "record_card_failed",
     "record_inbound",
     "set_active_sessions",
-    "get_metrics",
-    "build_monitor_card",
-    "build_status_card",
-    "build_help_card",
-    "build_reset_card",
-    "build_interrupt_hint_card",
-    "handle_pre_gateway_dispatch",
 ]

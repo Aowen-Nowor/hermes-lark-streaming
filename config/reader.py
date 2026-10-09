@@ -74,9 +74,9 @@ def _to_float(val: Any, default: float) -> float:
 class Config:
     """插件配置, 惰性读取. 单例模式: reload() 才能清掉 controller 持有实例缓存."""
 
-    _instance: "Config | None" = None
+    _instance: Config | None = None
 
-    def __new__(cls) -> "Config":
+    def __new__(cls) -> Config:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
@@ -228,7 +228,8 @@ class Config:
     @property
     def gateway_cards(self) -> bool:
         """默认 True. TTL 缓存读取."""
-        sec = self._reload_cached().get("hermes_lark_streaming")
+        cached = self._reload_cached()
+        sec = cached.get("feishu_streaming") or cached.get("hermes_lark_streaming")
         if not isinstance(sec, dict):
             return True
         return _to_bool(sec.get("gateway_cards", True), default=True)
@@ -247,7 +248,7 @@ class Config:
 
     def _plugin_sec(self) -> dict[str, Any]:
         raw = self._load()
-        sec = raw.get("hermes_lark_streaming")
+        sec = raw.get("feishu_streaming") or raw.get("hermes_lark_streaming")
         if isinstance(sec, dict):
             return sec
         return {}

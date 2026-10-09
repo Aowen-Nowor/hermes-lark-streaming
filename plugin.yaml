@@ -1,17 +1,43 @@
-name: hermes-lark-streaming
-version: "1.8.4"
-description: "Feishu/Lark CardKit v2.0 streaming cards for Hermes Agent — real-time AI response display with typing effect, tool panels, reasoning, and more"
+name: feishu-streaming-platform
+label: Feishu / Lark (Streaming Cards)
+kind: platform
+version: "2.0.0"
+description: >
+  Feishu / Lark CardKit v2.0 streaming-card platform for Hermes Agent —
+  a drop-in, zero-monkey-patch replacement for the built-in Feishu platform.
+  Answers stream into live CardKit cards with a typing effect, tool progress
+  and thinking bubbles render into the card status panel, and clarification
+  prompts become interactive cards. Inherits the full built-in FeishuAdapter
+  surface (WebSocket/webhook, media, threads, DM pairing, group gating,
+  comments, meeting invites) and adds the card layer on top. Enable by
+  switching the platform name from `feishu` to `feishu-streaming` in the
+  gateway config; switch back anytime to restore native behavior.
 author: Aowen-Nowor
-kind: standalone
-provides_hooks:
-  - pre_gateway_dispatch
-  - on_feishu_normalize
-  - on_message_started
-  - on_message_completed
-  - on_message_aborted
-  - on_message_interrupted
-  - on_answer_delta
-  - on_thinking_delta
-  - on_reasoning_delta
-  - on_tool_updated
-  - on_background_review_message
+requires_env:
+  - name: FEISHU_APP_ID
+    description: "Feishu/Lark app ID"
+    prompt: "Feishu App ID"
+    url: "https://open.feishu.cn/"
+    password: false
+  - name: FEISHU_APP_SECRET
+    description: "Feishu/Lark app secret"
+    prompt: "Feishu App Secret"
+    url: "https://open.feishu.cn/"
+    password: true
+optional_env:
+  - name: FEISHU_DOMAIN
+    description: "Domain: 'feishu' (China) or 'lark' (International)"
+    prompt: "Domain (feishu/lark)"
+    password: false
+  - name: FEISHU_ALLOWED_USERS
+    description: "Comma-separated Feishu user IDs allowed to talk to the bot"
+    prompt: "Allowed users (comma-separated)"
+    password: false
+  - name: FEISHU_ALLOW_ALL_USERS
+    description: "Allow any Feishu user to trigger the bot (dev only)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: FEISHU_HOME_CHANNEL
+    description: "Default chat ID for cron / notification delivery"
+    prompt: "Home channel ID"
+    password: false

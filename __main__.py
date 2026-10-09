@@ -143,20 +143,20 @@ def _print_usage() -> None:
     print("  cleanup    Remove plugin-injected config from config.yaml (run after uninstall)")
     print("  python     Print the auto-detected Hermes Python interpreter path")
     print()
-    print("Note: This plugin uses runtime monkey patching (no file modification).")
-    print("      Install/uninstall via: hermes plugins install/uninstall")
+    print("Note: V2 is a native platform plugin — zero monkey-patching.")
+    print("      Enable by switching the gateway platform name: feishu -> feishu-streaming")
 
 def _cmd_status() -> int:
     try:
         from hermes_lark_streaming.config import Config
 
         cfg = Config()
-        print(f"Config hermes_lark_streaming.enabled: {cfg.enabled}")
-        print(f"Config hermes_lark_streaming.linear: {cfg.linear}")
+        print(f"Config feishu_streaming.enabled: {cfg.enabled}")
+        print(f"Config feishu_streaming.linear: {cfg.linear}")
         print(f"Feishu credentials: {'configured' if (cfg.env_app_id or cfg.feishu_app_id) else 'MISSING'}")
         print()
-        print("Plugin uses runtime monkey patching — no source files are modified.")
-        print("Install/uninstall via: hermes plugins install/uninstall")
+        print("V2 architecture: native platform plugin, zero monkey-patching.")
+        print("Enable by switching the gateway platform name: feishu -> feishu-streaming")
     except ImportError as e:
         print(f"Error: Cannot import hermes_lark_streaming: {e}")
         print("Please ensure the plugin is installed correctly.")
@@ -281,18 +281,11 @@ def _cmd_doctor() -> int:
         print("      ⚠ MISSING — cards will NOT work.")
 
     print()
+    print("[5/6] Architecture: native platform plugin (zero monkey-patch)")
     try:
-        from hermes_lark_streaming.patching import _patch_status
-        if _patch_status:
-            print("[5/6] Patch status:")
-            for key, val in _patch_status.items():
-                if key in ("version", "hermes_layout"):
-                    continue
-                icon = "✓" if val in ("✓", "applied") else ("⚠" if "pending" in str(val) else "✗")
-                print(f"      {icon} {key}: {val}")
-            print(f"      Hermes layout: {_patch_status.get('hermes_layout', {})}")
-        else:
-            print("[5/6] Patch status: (not available — gateway not started)")
+        from hermes_lark_streaming.adapter import get_active_adapters
+        adapters = get_active_adapters()
+        print(f"      Active adapter instances: {len(adapters)}")
     except ModuleNotFoundError as e:
         print(f"[5/6] Patch status: (skipped — {e})")
     except Exception as e:
