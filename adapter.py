@@ -229,6 +229,13 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             cls = classify_send(content, metadata)
         except Exception:  # noqa: BLE001 — 分类失败按 plain 走原生，永不阻断
             cls = None
+        if cls is not None and cls.channel == CH_PLAIN:
+            # v2.0.1 上下文升格：活跃卡片期内的裸进度气泡吸收进状态面板
+            #（详见 _upgrade_plain_to_progress；条件不满足维持原分类）。
+            upgraded = _upgrade_plain_to_progress(self._composer, chat_id, content)
+            if upgraded is not None:
+                cls = upgraded
+                _logger.debug("feishu-streaming: plain send upgraded to progress (active card)")
         if cls is None or cls.channel == CH_PLAIN:
             return await super().send(
                 chat_id, content, reply_to=reply_to, metadata=_strip_internal(metadata),
@@ -316,6 +323,49 @@ def _strip_internal(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
     return clean or None
 
 
+def _upgrade_plain_to_progress(composer: Any, chat_id: str, content: str) -> Any | None:
+    """v2.0.1 上下文升格：裸 send → CH_PROGRESS（仅活跃卡片期）.
+
+    edit-transport 平台（feishu）的工具进度气泡首条是裸 send —— hermes 只给
+    native-stream / 预览路径打 ``expect_edits``，工具进度气泡
+    （``run_turn_runner._send_progress_text``）首发不带任何标记。若无此规则，
+    气泡会落 CH_PLAIN 成独立纯文本消息，卡片状态面板永远为空。
+
+    升格条件（全部满足才吸收）：
+      1) 本 chat 存在活跃流式卡片（answer 打字机进行中 —— 正是工具事件产生的
+         窗口；cron / 后台 / 独立发送不受影响）；
+      2) 文本命中进度启发式（💬 前缀或 emoji 开头的短行）。
+
+    误吸收代价评估：同 chat 卡片活跃期内的短 emoji 文本只有进度气泡一种生产
+    形态（cron 定时投递不会撞在流式窗口内），可接受。
+
+    返回升格后的 ``ClassifyResult``；不满足条件返回 ``None``（维持原分类）。
+    永不抛异常（内部全吞，失败维持原分类）。
+    """
+    try:
+        from .composer.classify import (
+            CH_PROGRESS,
+            ClassifyResult,
+            is_progress_text,
+            parse_progress_line,
+        )
+
+        if not content or not is_progress_text(content):
+            return None
+        if composer.active_state(chat_id) is None:
+            return None
+        kind, tool, clean = parse_progress_line(content)
+        return ClassifyResult(
+            channel=CH_PROGRESS,
+            kind=kind,
+            tool_name=tool,
+            thinking_text=clean if kind == "thinking" else "",
+            raw_content=content,
+        )
+    except Exception:  # noqa: BLE001 — 升格失败维持原分类，永不阻断
+        return None
+
+
 # ── 注册入口 ────────────────────────────────────────────────────────────────
 def _rebuild_class_with_real_base() -> Any:
     """占位基类兜底路径：hermes 缺席时导入的类，在 register() 时换真实基类.
@@ -375,6 +425,12 @@ def register(ctx: Any) -> None:
         max_message_length=8000,
         emoji="🪽",
         allow_update_command=True,
+        # v2.0.1：显式声明 display tier。TIER_HIGH = streaming 跟随全局开关 +
+        # tool_progress "all"（进度行必须到达适配器才能进卡片状态面板）+
+        # interim_assistant_messages 开（commentary → CH_INTERIM → 面板）。
+        # 不声明时插件平台落 ""（全局默认），行为等价但受未来默认漂移影响；
+        # 显式声明把流式卡片体验所需的显示基线固化下来。
+        display_tier="high",
     )
     _logger.info("feishu-streaming: platform registered (zero monkey-patch)")
 

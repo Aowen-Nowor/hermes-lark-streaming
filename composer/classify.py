@@ -93,6 +93,12 @@ def parse_progress_line(content: str) -> tuple[str, str, str]:
     return "unknown", "", text
 
 
+# v2.0.1 公开别名：适配器层上下文升格规则需要复用进度启发式
+# （edit-transport 平台的进度气泡首条是裸 send，无任何标记，需在活跃卡片期
+# 结合启发式升格 CH_PROGRESS；详见 adapter.send 注释）。
+is_progress_text = _is_progress_text
+
+
 def classify_send(
     content: str,
     metadata: dict[str, Any] | None,

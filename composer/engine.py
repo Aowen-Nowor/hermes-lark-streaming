@@ -198,6 +198,10 @@ class FrameComposer:
             await client.cardkit_stream_element(
                 card_id, _answer_element_id(), st.answer_text, sequence=st.seq,
             )
+        _logger.info(
+            "composer: card created chat=%s card=%s msg=%s status_lines=%d",
+            chat_id, card_id, st.card_message_id, len(pending),
+        )
         return SendResult(success=True, message_id=st.card_message_id)
 
     async def _patch_answer(self, st: CardTurnState, content: str) -> SendResult:
@@ -217,21 +221,30 @@ class FrameComposer:
 
     async def _on_progress(self, chat_id: str, cls: ClassifyResult) -> SendResult | None:
         st = self.active_state(chat_id)
-        line = cls.raw_content.strip()
+        raw = (cls.raw_content or "").strip()
         if st is None:
             # 卡片未建立：暂存（turn 建卡时并入；TTL 兜底清理）
-            self._states.setdefault(chat_id, CardTurnState(chat_id=chat_id)).pending_status.append(line)
-            return SendResult(success=True)  # 已消费（不产生独立气泡）
-        if cls.kind == "thinking":
-            new_line = line
-        else:
-            new_line = line
-        if st.status_lines and st.status_lines[-1] == new_line:
-            return SendResult(success=True, message_id=st.card_message_id)
-        st.status_lines.append(new_line)
-        st.status_lines = st.status_lines[-12:]
+            self._states.setdefault(chat_id, CardTurnState(chat_id=chat_id)).pending_status.append(raw)
+            # 已消费但不回传 message_id：防止网关把返回 id 当作进度气泡 anchor
+            # 反复 edit（v2.0.1 事故预防：卡片消息被进度文本覆写）。
+            return SendResult(success=True)
+        # v2.0.1：网关 accumulate 模式下气泡文本是“当前全部进度行”的全量快照
+        # （edit_interval 每 tick 重发累积全文）；separate 模式则是单行增量。
+        # 按行拆分 + 集合去重后合并，两种模式都收敛为幂等追加。
+        lines = [ln for ln in (l.strip() for l in raw.splitlines()) if ln] or ([raw] if raw else [])
+        merged = list(st.status_lines)
+        for ln in lines:
+            if ln in merged:
+                continue
+            merged.append(ln)
+        if merged == st.status_lines:
+            # 无新增行：不触发 cardkit_update（API 经济性；V2.0.0 同语义）
+            return SendResult(success=True)
+        st.status_lines = merged[-12:]
         await self._patch_status(st)
-        return SendResult(success=True, message_id=st.card_message_id)
+        # 同上：不回传 message_id，网关进度气泡循环会继续 _send_progress_text
+        # （全量快照）而非 edit —— 面板更新由本引擎的 cardkit_update 驱动。
+        return SendResult(success=True)
 
     async def _on_interim(self, chat_id: str, content: str, cls: ClassifyResult) -> SendResult | None:
         st = self.active_state(chat_id)
@@ -268,6 +281,10 @@ class FrameComposer:
         st.last_activity = time.monotonic()
         await finalize_card(client, st, answer_element_id=_answer_element_id())
         st.finalized = True
+        _logger.info(
+            "composer: card finalized chat=%s card=%s answer_len=%d status_lines=%d",
+            st.chat_id, st.card_id, len(st.answer_text or ""), len(st.status_lines),
+        )
         return SendResult(success=True, message_id=st.card_message_id)
 
     # ── 降级 ────────────────────────────────────────────────────────────
