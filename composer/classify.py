@@ -8,6 +8,9 @@
 - ``edit_message(..., finalize=True)`` → 定稿编辑
 - progress 文本模板（hermes locales，稳定 i18n key 渲染产物）:
     thinking 前缀 ``💬 {text}``；工具行 ``{emoji} {tool}...`` / ``{emoji} {tool}："{preview}"``
+    v2.0.6 补真实模板（``agent/display.py`` + ``run_turn_runner``）：
+    tool_head + 围栏代码块（terminal）、中文/英文动词行（``💻 运行命令 ...``）、
+    裸围栏块（连续 terminal 调用省略 header）、去重后缀 ``(×N)``
 
 设计红线：分类器**永不抛异常**——任何解析失败都降级为最保守的通道（interim / plain），
 消息内容永不丢失（最坏情况走原生文本路径）。
@@ -61,12 +64,17 @@ def _strip_internal_meta(metadata: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _is_progress_text(content: str) -> bool:
-    """启发式：progress lane 文本 = thinking 气泡 或 emoji 开头的短工具行."""
+    """启发式：progress lane 文本 = thinking 气泡 或 emoji 开头的短工具行.
+
+    v2.0.6：裸围栏代码块（`` ``` `` 开头，连续 terminal 调用省略 header 的
+    真实形态）也判为 progress；上限放宽到 600（块含命令正文比单行预览长）。"""
     text = (content or "").strip()
     if not text:
         return False
     if text.startswith(_THINKING_PREFIX):
         return True
+    if text.startswith("```"):
+        return len(text) <= 600  # 命令块远短于 600；长文本不可能是进度块
     if len(text) > 300:  # 工具行都很短；长文本不可能是工具行
         return False
     return bool(_EMOJI_RE.match(text))

@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..cardkit.progline import split_progress_segments, strip_dedup_suffix
 from .classify import (
     _THINKING_PREFIX,
     CH_FINAL,
@@ -179,7 +180,12 @@ class FrameComposer:
         # 否则快照式暂存会把同一次调用的 pending 与 preview 双双带进首卡面板。
         prev = self._states.get(chat_id)
         raw_pending = list(prev.pending_status)[-12:] if prev is not None else []
-        pending = _merge_progress_lines([], raw_pending) or []
+        # v2.0.6：暂存行先过同一套逻辑分段（每条暂存可能是多段快照，
+        # 围栏块保持一体），再统一合并——与活跃卡片路径语义一致。
+        staged: list[str] = []
+        for item in raw_pending:
+            staged.extend(split_progress_segments(item) or ([item.strip()] if item.strip() else []))
+        pending = _merge_progress_lines([], staged) or []
         # v2.0.5：先落状态对象再建卡——面板标题需要 turn 计时。复用占位状态时
         # 保留本 turn 的 turn_started_at（首个进度帧即 turn 起点）；上一 turn
         # 残留 / 全新会话则重新起算。
@@ -263,7 +269,9 @@ class FrameComposer:
         # v2.0.5 合并语义升级（见 _merge_progress_lines）：
         #   完全同文本 → 幂等跳过；pending 行 → 同工具 preview/head 原地取代；
         #   思考行累积增长 → 原地替换（不膨胀行数、不计新轮次）。
-        lines = [ln for ln in (l.strip() for l in raw.splitlines()) if ln] or ([raw] if raw else [])
+        # v2.0.6：accumulate 快照按逻辑段拆分（围栏代码块与工具头一体），
+        # 直拆 splitlines 会把真实 terminal 块拆成破碎的 ``` 行（E2E ≠ 正式对话根因）。
+        lines = split_progress_segments(raw) or ([raw] if raw else [])
         merged = _merge_progress_lines(st.status_lines, lines)
         if merged is None:
             # 无新增/无变化：不触发 cardkit_update（API 经济性；V2.0.0 同语义）
@@ -378,10 +386,10 @@ def _turn_elapsed_ms(st: CardTurnState) -> float:
 def _merge_progress_lines(existing: list[str], incoming: list[str]) -> list[str] | None:
     """v2.0.5 进度行合并：幂等 + 状态推进原地取代.
 
-    - 完全同文本重发（accumulate 快照重复部分）→ 跳过
+    - 完全同文本重发（accumulate 快照重复部分，含 ``(×N)`` 去重后缀剥除）→ 跳过
     - 思考行累积增长（同轮 💬 文本变长）→ 原地替换最后一行（不膨胀、不计新轮）
-    - pending 行（尾部 ``...``）→ 同工具 preview/head 到达时原地取代（V1 语义：
-      同一次调用只有一个步骤行）
+    - pending 行（尾部 ``...``）→ 同工具 preview/head/代码块到达时原地取代
+      （V1 语义：同一次调用只有一个步骤行）
     - 其余 → 追加（同工具再次调用 = 新步骤）
 
     返回合并后的新列表；无任何变化返回 None（调用方跳过 cardkit_update）。
@@ -389,7 +397,8 @@ def _merge_progress_lines(existing: list[str], incoming: list[str]) -> list[str]
     merged = list(existing or [])
     changed = False
     for ln in incoming or []:
-        text = (ln or "").strip()
+        # v2.0.6：剥网关去重后缀（同文本重发变 "... (×N)"，不剥会当新行重复入面板）
+        text = strip_dedup_suffix(ln)
         if not text or text in merged:
             continue
         kind, tool, _clean = parse_progress_line(text)

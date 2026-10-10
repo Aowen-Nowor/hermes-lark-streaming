@@ -23,7 +23,12 @@ from .elements import (
     build_unified_panel,
 )
 from .i18n import _LOCALES, _T, _i18n, _t
-from .progline import _THINKING_PREFIX, parse_progress_line, preview_text
+from .progline import (
+    _THINKING_PREFIX,
+    parse_progress_line,
+    preview_text,
+    strip_dedup_suffix,
+)
 from .tool_icons import resolve_tool_icon, tool_display_title
 
 if TYPE_CHECKING:
@@ -62,12 +67,19 @@ def _render_status_children(lines: list[str]) -> list[dict[str, Any]]:
     - 工具行标题 humanize/描述符化（terminal→Terminal、grep→Search text）
     - pending 行（尾部 ``...``）橙色 running；已执行行绿色 success
     - 预览文本取引号内命令摘要渲染为缩进灰字（不再是含引号原文）
+
+    v2.0.6 真实帧格式（hermes v0.21.x gateway progress 模板）：
+    - ``{emoji} {tool}`` + 围栏代码块段 → 官方图标标题 + 缩进灰字命令
+      （块内首行，剥网关截断尾 " ..."）；无 header 的裸块 → 仅灰字命令行
+    - 中文/英文动词行（``💻 运行命令 echo ...`` / ``🔍 搜索网页 · q``）→
+      动词反查工具名 → 图标 + 标题 + 缩进灰字参数
+    - 裸工具头行（``💻 terminal``）→ 橙色 running 标题（无命令可展示）
     """
     children: list[dict[str, Any]] = []
     round_no = 0
     prev_thinking = False
     for line in lines:
-        text = (line or "").strip()
+        text = strip_dedup_suffix(line)
         if not text:
             continue
         kind, tool, clean = parse_progress_line(text)
@@ -84,20 +96,22 @@ def _render_status_children(lines: list[str]) -> list[dict[str, Any]]:
                 children.append(detail)
             continue
         prev_thinking = False
-        if kind == "tool" and tool:
+        if kind == "tool":
             pending = text.endswith("...")
-            children.append(_build_tool_step_title(
-                {"title": tool_display_title(tool),
-                 "status": "running" if pending else "success",
-                 "icon": resolve_tool_icon(tool)},
-            ))
+            if tool:
+                children.append(_build_tool_step_title(
+                    {"title": tool_display_title(tool),
+                     "status": "running" if pending else "success",
+                     "icon": resolve_tool_icon(tool)},
+                ))
             if not pending:
-                preview = _strip_md_quotes(preview_text(text))
+                preview = preview_text(text)  # v2.0.6：包裹引号已在 preview_text 内剥除，不再误伤命令尾部引号
                 if preview:
                     detail = _build_tool_step_detail({"detail": preview})
                     if detail is not None:
                         children.append(detail)
-            continue
+            if tool or preview_text(text):
+                continue
         children.append({"tag": "markdown", "content": text})
     return children or [{"tag": "markdown", "content": " "}]  # 飞书面板拒绝空 elements
 

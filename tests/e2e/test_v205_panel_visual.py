@@ -54,7 +54,9 @@ class TestProgline:
         assert kind == "tool" and tool == "terminal"
 
     def test_preview_text_extracts_command(self):
-        assert preview_text("🖥️ terminal：\"uname -r\"") == "\"uname -r\""
+        # v2.0.6：包裹引号在 preview_text 内剥除（渲染层不再二次剥壳，
+        # 不会误伤命令自身的尾部引号），legacy 引号预览返回干净命令
+        assert preview_text("🖥️ terminal：\"uname -r\"") == "uname -r"
         assert preview_text("🖥️ terminal...") == ""
         assert preview_text("普通文本") == ""
 

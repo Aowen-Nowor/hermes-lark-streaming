@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.0.6 (2026-10-10)
+
+**真实帧格式对齐：E2E ≠ 正式对话根因修复（用户验收反馈驱动）。**
+
+用户验收（2026-10-10）：「E2E 群聊消息已接近理想效果，但私聊正式对话面板里是
+`💻 terminal` + 行号代码块」。根因：v2.0.5 的 E2E 用合成帧（`🖥️ terminal："…"`）
+恰好命中解析正则，而 hermes v0.21.x 真实 progress 模板（`agent/display.py` +
+`gateway/run_turn_runner.py` + locales）完全不同——正式对话的行从未被结构化解析，
+面板只能原样渲染 emoji 原文。
+
+| 变更 | 文件 | 说明 |
+|---|---|---|
+| **新增** 真实格式解析 | `cardkit/progline.py` | ① terminal 围栏代码块（`💻 terminal` + ` ``` ` 块）→ (tool, 首行命令)；② 中文/英文动词行（`🔍 搜索网页 · q` / `💻 Running uname`）→ 动词反查工具名（hermes locales display.verb 双语动词表）；③ 裸围栏块（连续 terminal 调用省略 header）；④ 网关去重后缀 `(×N)` 剥除；⑤ `split_progress_segments`：accumulate 快照按逻辑段拆分，围栏块与 header 保持一体（直拆 splitlines 会把块拆成破碎 ` ``` ` 行——正是正式对话面板破碎的直接原因） |
+| **修复** 面板渲染 | `cardkit/cards.py` | 真实格式 → V1 风格元素：官方图标 + 彩色粗体工具标题 + 缩进灰字命令；emoji / ` ``` ` 围栏永不进面板元素；包裹引号在 `preview_text` 内剥除（不再误伤命令尾部引号） |
+| **修复** 合并语义 | `composer/engine.py` | `(×N)` 幂等；pending → 代码块原地取代；同工具再次调用追加新步骤；建卡前暂存行过同一套分段 |
+| **修复** 分类通道 | `composer/classify.py` | 裸围栏块判入 progress 通道（≤600 字符），真实会话裸 send 升格路径可用 |
+| **新增** 回归防线 | `tests/e2e/test_v206_real_formats.py` | 固化真实格式的解析/分段/合并/渲染/引擎端到端语义（22 用例），防再次回退 |
+
+套件 663/663；ruff 新代码零新增告警。
+
 ## v2.0.1 (2026-10-10)
 
 **生产部署夜修复：进度帧上下文升格 + 进度气泡快照合并 + 网关咬合加固。**
