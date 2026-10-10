@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .classify import (
+    _THINKING_PREFIX,
     CH_FINAL,
     CH_INTERIM,
     CH_PROGRESS,
@@ -54,6 +55,9 @@ class CardTurnState:
     status_lines: list[str] = field(default_factory=list)   # 工具/思考/interim 状态行
     seq: int = 0                       # CardKit sequence 递增
     created_at: float = field(default_factory=time.monotonic)
+    # v2.0.5：turn 起点（首个进度帧/首帧到达），驱动面板标题「· 总耗时」。
+    # 与 created_at 区分：created_at 随建卡重置，turn_started_at 只随 turn 重置。
+    turn_started_at: float | None = None
     last_activity: float = field(default_factory=time.monotonic)
     finalized: bool = False
     degraded: bool = False             # 卡片 API 失败 → 本 turn 走原生
@@ -170,16 +174,27 @@ class FrameComposer:
         client = self._get_client()
         if client is None:
             return None
-        # 并入建卡前暂存的 progress 行（首卡即带状态面板）
+        # 并入建卡前暂存的 progress 行（首卡即带状态面板）。
+        # v2.0.5：暂存行过同一套合并语义（幂等/pending→preview 取代/思考累积），
+        # 否则快照式暂存会把同一次调用的 pending 与 preview 双双带进首卡面板。
         prev = self._states.get(chat_id)
-        pending = list(prev.pending_status)[-12:] if prev is not None else []
-        card = self._build_card(status_lines=pending or None, panel_title=_panel_title(pending))
+        raw_pending = list(prev.pending_status)[-12:] if prev is not None else []
+        pending = _merge_progress_lines([], raw_pending) or []
+        # v2.0.5：先落状态对象再建卡——面板标题需要 turn 计时。复用占位状态时
+        # 保留本 turn 的 turn_started_at（首个进度帧即 turn 起点）；上一 turn
+        # 残留 / 全新会话则重新起算。
+        st = prev if prev is not None else CardTurnState(chat_id=chat_id)
+        if prev is None or prev.finalized or prev.turn_started_at is None:
+            st.turn_started_at = time.monotonic()
+        card = self._build_card(
+            status_lines=pending or None,
+            panel_title=_panel_title(pending, elapsed_ms=_turn_elapsed_ms(st)),
+        )
         card_id = await client.cardkit_create(card)
         message_id = await client.send_card_by_id_to_chat(chat_id, card_id)
         # 复用占位/上一 turn 状态对象（保留注册表连续性），升级为活跃卡片。
         # 注意必须重置终态旗标：同 chat 连续 turn 时 prev 可能是上一 turn 的
         # finalized 状态，不重置会导致第 2 turn active_state 恒 None（重复建卡）。
-        st = prev if prev is not None else CardTurnState(chat_id=chat_id)
         st.chat_id = chat_id
         st.card_id = card_id
         st.card_message_id = str(message_id)
@@ -224,8 +239,13 @@ class FrameComposer:
         st = self.active_state(chat_id)
         raw = (cls.raw_content or "").strip()
         if st is None:
-            # 卡片未建立：暂存（turn 建卡时并入；TTL 兜底清理）
-            self._states.setdefault(chat_id, CardTurnState(chat_id=chat_id)).pending_status.append(raw)
+            # 卡片未建立：暂存（turn 建卡时并入；TTL 兜底清理）。
+            # v2.0.5：占位状态即 turn 起点（面板标题「· 总耗时」从此起算）。
+            placeholder = self._states.setdefault(
+                chat_id, CardTurnState(chat_id=chat_id))
+            if placeholder.turn_started_at is None:
+                placeholder.turn_started_at = time.monotonic()
+            placeholder.pending_status.append(raw)
             # v2.0.4（s70 回流）：立即建占位卡（还原 V1 体验：卡片先现，工具/思考
             # 实时进面板，不再裸奔成独立气泡）。pending 已并入首卡面板；答案元素
             # 留空待流式。仍不回传 message_id：防网关把返回 id 当作进度气泡
@@ -240,15 +260,13 @@ class FrameComposer:
             return SendResult(success=True)
         # v2.0.1：网关 accumulate 模式下气泡文本是“当前全部进度行”的全量快照
         # （edit_interval 每 tick 重发累积全文）；separate 模式则是单行增量。
-        # 按行拆分 + 集合去重后合并，两种模式都收敛为幂等追加。
+        # v2.0.5 合并语义升级（见 _merge_progress_lines）：
+        #   完全同文本 → 幂等跳过；pending 行 → 同工具 preview/head 原地取代；
+        #   思考行累积增长 → 原地替换（不膨胀行数、不计新轮次）。
         lines = [ln for ln in (l.strip() for l in raw.splitlines()) if ln] or ([raw] if raw else [])
-        merged = list(st.status_lines)
-        for ln in lines:
-            if ln in merged:
-                continue
-            merged.append(ln)
-        if merged == st.status_lines:
-            # 无新增行：不触发 cardkit_update（API 经济性；V2.0.0 同语义）
+        merged = _merge_progress_lines(st.status_lines, lines)
+        if merged is None:
+            # 无新增/无变化：不触发 cardkit_update（API 经济性；V2.0.0 同语义）
             return SendResult(success=True)
         st.status_lines = merged[-12:]
         await self._patch_status(st)
@@ -278,7 +296,7 @@ class FrameComposer:
         card = self._build_card(
             status_lines=st.status_lines,
             answer_text=st.answer_text,   # 防全量更新把已流 answer 重置为空
-            panel_title=_panel_title(st.status_lines),
+            panel_title=_panel_title(st.status_lines, elapsed_ms=_turn_elapsed_ms(st)),
         )
         st.seq += 1
         st.last_activity = time.monotonic()
@@ -346,13 +364,101 @@ def _answer_element_id() -> str:
     return ANSWER_ELEMENT_ID
 
 
-def _panel_title(status_lines: list[str]) -> str:
-    """V1 风格面板动态标题："agent loop" / "agent loop · N 个工具".
+def _turn_elapsed_ms(st: CardTurnState) -> float:
+    """turn 已耗时（ms；无起点记录返回 0 = 标题省略 elapsed 段）."""
+    ts = getattr(st, "turn_started_at", None)
+    if not ts:
+        return 0.0
+    try:
+        return max(0.0, (time.monotonic() - ts) * 1000.0)
+    except Exception:  # noqa: BLE001 — 标题装饰性数据，绝不影响主流程
+        return 0.0
 
-    V2 帧无单工具耗时，标题不带 elapsed（避免伪造数据）。
+
+def _merge_progress_lines(existing: list[str], incoming: list[str]) -> list[str] | None:
+    """v2.0.5 进度行合并：幂等 + 状态推进原地取代.
+
+    - 完全同文本重发（accumulate 快照重复部分）→ 跳过
+    - 思考行累积增长（同轮 💬 文本变长）→ 原地替换最后一行（不膨胀、不计新轮）
+    - pending 行（尾部 ``...``）→ 同工具 preview/head 到达时原地取代（V1 语义：
+      同一次调用只有一个步骤行）
+    - 其余 → 追加（同工具再次调用 = 新步骤）
+
+    返回合并后的新列表；无任何变化返回 None（调用方跳过 cardkit_update）。
+    """
+    merged = list(existing or [])
+    changed = False
+    for ln in incoming or []:
+        text = (ln or "").strip()
+        if not text or text in merged:
+            continue
+        kind, tool, _clean = parse_progress_line(text)
+        if kind == "thinking":
+            new_body = text[len(_THINKING_PREFIX):].strip()
+            replaced = False
+            for i in range(len(merged) - 1, -1, -1):
+                prev = merged[i]
+                if not prev.startswith(_THINKING_PREFIX):
+                    break
+                old_body = prev[len(_THINKING_PREFIX):].strip()
+                if new_body.startswith(old_body) or old_body.startswith(new_body):
+                    merged[i] = text
+                    replaced = True
+                    break
+            if replaced:
+                changed = True
+                continue
+        elif kind == "tool" and tool and not text.endswith("..."):
+            replaced = False
+            for i in range(len(merged) - 1, -1, -1):
+                k2, t2, _c2 = parse_progress_line(merged[i])
+                if k2 == "tool" and t2 == tool:
+                    if merged[i].endswith("..."):
+                        merged[i] = text
+                        replaced = True
+                    break  # 最近同工具行已执行 → 新一次调用，追加
+            if replaced:
+                changed = True
+                continue
+        merged.append(text)
+        changed = True
+    return merged if changed else None
+
+
+def _panel_title(status_lines: list[str], *, elapsed_ms: float = 0.0) -> str:
+    """V1(1.8.1) 同款面板动态标题.
+
+    "agent loop" ·（N 轮）·（M 个工具）·（X.Xs）——各段有数据才拼接：
+    轮次数 = 💬 思考行分组数；工具数 = 工具行条数（pending 已被取代不重复计）；
+    elapsed = 首帧→当前实测（v2.0.3 曾以「帧无耗时」为由省略，v2.0.5 起由
+    composer 本地实测，非网关伪造）。永不抛异常。
     """
     try:
-        n = sum(1 for ln in status_lines or [] if parse_progress_line(ln)[0] == "tool")
+        rounds = tools = 0
+        prev_thinking = False
+        for ln in status_lines or []:
+            try:
+                kind, _tool, _c = parse_progress_line(ln)
+            except Exception:  # noqa: BLE001
+                kind = "unknown"
+            if kind == "tool":
+                tools += 1
+                prev_thinking = False
+            elif kind == "thinking":
+                if not prev_thinking:
+                    rounds += 1
+                prev_thinking = True
+            else:
+                prev_thinking = False
+        parts = ["agent loop"]
+        if rounds:
+            parts.append(f"{rounds} 轮")
+        if tools:
+            parts.append(f"{tools} 个工具")
+        if elapsed_ms >= 100:  # <0.1s 不显示（避免 "0.0s" 噪音）
+            from ..cardkit.elements import _format_elapsed
+
+            parts.append(_format_elapsed(elapsed_ms))
+        return " · ".join(parts)
     except Exception:  # noqa: BLE001 — 标题永不影响主流程
-        n = 0
-    return f"agent loop · {n} 个工具" if n else "agent loop"
+        return "agent loop"

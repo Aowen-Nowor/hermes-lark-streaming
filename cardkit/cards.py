@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 from .elements import (
+    _LOADING_ELEMENT_ID,
+    _LOADING_HINT_ELEMENT_ID,
     ANSWER_ELEMENT_ID,
     STREAMING_ELEMENT_ID,
     UNIFIED_PANEL_ELEMENT_ID,
-    _LOADING_ELEMENT_ID,
-    _LOADING_HINT_ELEMENT_ID,
     _build_footer_elements,
+    _build_reasoning_round_title,
     _build_tool_step_detail,
     _build_tool_step_title,
     _build_unified_panel_placeholder,
@@ -22,15 +22,16 @@ from .elements import (
     _streaming_element,
     build_unified_panel,
 )
-from .tool_icons import resolve_tool_icon
 from .i18n import _LOCALES, _T, _i18n, _t
+from .progline import _THINKING_PREFIX, parse_progress_line, preview_text
+from .tool_icons import resolve_tool_icon, tool_display_title
 
 if TYPE_CHECKING:
     from ..state.linear import ReasoningRound
 
 __all__ = [
-    'build_streaming_card_v2',
     '_enforce_card_element_limit',
+    'build_streaming_card_v2',
 ]
 
 # Feishu Card 2.0 element limit — every JSON object with a ``tag`` key
@@ -39,15 +40,13 @@ _FEISHU_ELEMENT_LIMIT = 200
 
 _ELEMENT_LIMIT_MARGIN = 5
 
-# ── v2.0.3 状态面板 V1 风格渲染 ──────────────────────────────────────────────
-# hermes gateway.progress 模板渲染产物（locales/*.yaml）：
-#   thinking: "💬 {text}"   tool_head: "{emoji} {tool}"
-#   tool_pending: "{emoji} {tool}..."   tool_preview: "{emoji} {tool}：\"{preview}\""
-# 这里把 raw 行拆解为 V1 插件同款视觉：
-#   工具行 = standard_icon + 彩色加粗工具名 + 缩进灰色等宽命令摘要
-#   思考行 = 缩进灰色小字（低调，不喧宾夺主）
-_THINKING_PREFIX = "\U0001f4ac"  # 💬
-_TOOL_ROW_RE = re.compile(r"^(\S+)\s+([A-Za-z_][\w.\-]*?)\.*(?:\s*[：:]\s*(.*))?$")
+# ── v2.0.5 状态面板 V1(1.8.1) 同款渲染 ────────────────────────────────────────
+# gateway progress 模板行 → V1 unified panel 子元素：
+#   💬 思考行 → 分组为推理轮次：robot-add 图标 + 绿色粗体「第 N 轮」+ 缩进灰字正文
+#   工具行   → official standard_icon + 彩色粗体工具标题（pending=橙 running /
+#              已执行=绿 success）+ 缩进灰字命令摘要（仅已执行行）
+#   其余     → 原样 markdown（降级路径）
+# 标题/图标解析见 tool_icons.py（V1 state/tooluse.py 移植）。
 
 
 def _strip_md_quotes(text: str) -> str:
@@ -55,35 +54,49 @@ def _strip_md_quotes(text: str) -> str:
 
 
 def _render_status_children(lines: list[str]) -> list[dict[str, Any]]:
-    """status_lines → V1 风格面板子元素（解析失败降级为原始 markdown 行）.
+    """status_lines → V1 风格面板子元素（解析失败行降级为原始 markdown）.
 
-    v2.0.4：工具行图标由硬编码 tool_02 升级为 V1 同款按工具名映射的
-    飞书官方 standard_icon（state/tooluse.py _TOOL_DESCRIPTORS 移植）。
+    v2.0.5 对齐 V1(1.8.1)：
+    - 连续 💬 行分组为一轮推理（第 N 轮标题绿色 + robot-add_outlined；V1 的
+      橙色仅用于流式中未定稿轮次，V2 的 💬 行到达即完整，恒绿不伪造状态）
+    - 工具行标题 humanize/描述符化（terminal→Terminal、grep→Search text）
+    - pending 行（尾部 ``...``）橙色 running；已执行行绿色 success
+    - 预览文本取引号内命令摘要渲染为缩进灰字（不再是含引号原文）
     """
     children: list[dict[str, Any]] = []
+    round_no = 0
+    prev_thinking = False
     for line in lines:
         text = (line or "").strip()
         if not text:
             continue
-        if text.startswith(_THINKING_PREFIX):
-            body = text[len(_THINKING_PREFIX):].strip()
-            detail = _build_tool_step_detail({"detail": body or text})
+        kind, tool, clean = parse_progress_line(text)
+        if kind == "thinking":
+            if not prev_thinking:
+                round_no += 1
+                children.append(
+                    _build_reasoning_round_title(round_no, 0, finalized=True)
+                )
+            prev_thinking = True
+            body = clean or text[len(_THINKING_PREFIX):].strip() or text
+            detail = _build_tool_step_detail({"detail": body})
             if detail is not None:
                 children.append(detail)
             continue
-        m = _TOOL_ROW_RE.match(text)
-        if m and m.group(2):
-            # group(2) 非贪婪排除尾部省略号（tool_pending 的 "..."）；
-            # preview 捕获含引号，剥壳后为纯命令摘要。
+        prev_thinking = False
+        if kind == "tool" and tool:
+            pending = text.endswith("...")
             children.append(_build_tool_step_title(
-                {"title": m.group(2), "status": "success",
-                 "icon": resolve_tool_icon(m.group(2))},
+                {"title": tool_display_title(tool),
+                 "status": "running" if pending else "success",
+                 "icon": resolve_tool_icon(tool)},
             ))
-            preview = _strip_md_quotes(m.group(3)) if m.group(3) else ""
-            if preview:
-                detail = _build_tool_step_detail({"detail": preview})
-                if detail is not None:
-                    children.append(detail)
+            if not pending:
+                preview = _strip_md_quotes(preview_text(text))
+                if preview:
+                    detail = _build_tool_step_detail({"detail": preview})
+                    if detail is not None:
+                        children.append(detail)
             continue
         children.append({"tag": "markdown", "content": text})
     return children or [{"tag": "markdown", "content": " "}]  # 飞书面板拒绝空 elements

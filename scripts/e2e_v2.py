@@ -56,14 +56,14 @@ if "hermes_lark_streaming" not in sys.modules:
     sys.modules["hermes_lark_streaming"] = _mod
     _spec.loader.exec_module(_mod)
 
-from hermes_lark_streaming.adapter import _CardFactory  # noqa: E402
-from hermes_lark_streaming.composer.classify import (  # noqa: E402
+from hermes_lark_streaming.adapter import _CardFactory
+from hermes_lark_streaming.composer.classify import (
     classify_edit,
     classify_send,
 )
-from hermes_lark_streaming.composer.engine import FrameComposer  # noqa: E402
-from hermes_lark_streaming.config.reader import Config  # noqa: E402
-from hermes_lark_streaming.feishu.client import FeishuClient, FeishuClientConfig  # noqa: E402
+from hermes_lark_streaming.composer.engine import FrameComposer
+from hermes_lark_streaming.config.reader import Config
+from hermes_lark_streaming.feishu.client import FeishuClient, FeishuClientConfig
 
 STREAM_INTERVAL_SEC = 0.4   # 单卡 stream_element 限频保护（10 次/秒）
 SCENARIO_GAP_SEC = 2.0      # 场景间隔（create/close 计入 1000 次/分）
@@ -167,10 +167,11 @@ async def scenario_answer(composer: FrameComposer, client: FeishuClient, chat_id
 
 async def scenario_progress(composer: FrameComposer, client: FeishuClient, chat_id: str) -> None:
     print("== 场景 progress：工具/思考状态面板 ==")
-    # ① 建卡前的 progress（暂存 → 首卡并入）
+    # ① 建卡前的 progress（暂存 → 首卡并入）；帧格式 = hermes 真实模板产物
+    #    （locales/zh.yaml gateway.progress：{emoji} {tool}："{preview}"）
     r = await adapter_send(composer, chat_id, "💬 正在拆解 E2E 场景的验证点…", {"_interim_send": True})
     check("建卡前 thinking 暂存（不抛错）", r is not None)
-    r = await adapter_send(composer, chat_id, "🔧 bash：\"echo e2e-progress\"", {"_interim_send": True})
+    r = await adapter_send(composer, chat_id, "🖥️ terminal：\"echo e2e-progress && date +%H:%M:%S\"", {"_interim_send": True})
     check("建卡前工具行暂存", r is not None)
 
     # ② 首条 answer 建卡（应带状态面板）
@@ -185,7 +186,7 @@ async def scenario_progress(composer: FrameComposer, client: FeishuClient, chat_
 
     # ③ 建卡后增量更新（去重 + 追加）
     await asyncio.sleep(STREAM_INTERVAL_SEC)
-    await adapter_send(composer, chat_id, "🔧 bash：\"echo e2e-progress\"", {"_interim_send": True})
+    await adapter_send(composer, chat_id, "🖥️ terminal：\"echo e2e-progress && date +%H:%M:%S\"", {"_interim_send": True})
     st2 = composer.state_by_message(msg_id)
     check("重复工具行去重", bool(st2 and len(st2.status_lines) == 2), f"lines={len(st2.status_lines) if st2 else 0}")
 
@@ -229,38 +230,54 @@ async def scenario_interim(composer: FrameComposer, client: FeishuClient, chat_i
 async def scenario_full(composer: FrameComposer, client: FeishuClient, chat_id: str) -> None:
     print("== 场景 full：仿真实 turn 全时序 ==")
     seq = [
-        # (kind, content, meta)
-        ("progress", "🔧 terminal：\"pytest tests/ -q\"", {"_interim_send": True}),
+        # (kind, content, meta) —— 帧格式 = hermes 真实模板产物，含 pending→preview
+        # 状态推进（v2.0.5 合并语义：同工具 pending 行被 preview 原地取代）
+        ("progress", "💬 正在检查系统状态，先收集内核与运行时长…", {"_interim_send": True}),
+        ("progress", "🖥️ terminal...", {"_interim_send": True}),
+        ("progress", "🖥️ terminal：\"echo \"===[时间]==\"; date \"+%Y-%m-%d %H:%M:%S\"\"", {"_interim_send": True}),
+        ("stream", "全部检查完成。", {"expect_edits": True}),
+        ("stream", "全部检查完成。\n\n**系统正常**，负载 0.12，运行 22 小时。", {"expect_edits": True}),
         ("progress", "💬 工具跑完了，正在汇总结果…", {"_interim_send": True}),
-        ("stream", "全部测试通过。", {"expect_edits": True}),
-        ("stream", "全部测试通过。\n\n**561 passed**, 0 failed。", {"expect_edits": True}),
-        ("progress", "🔧 notify：\"推送结果卡片\"", {"_interim_send": True}),
-        ("final", "全部测试通过。\n\n**561 passed**, 0 failed。\n\n— feishu-streaming v2.0.0 full-scenario E2E", None),
+        ("progress", "⚡ notify：\"推送结果卡片\"", {"_interim_send": True}),
+        ("final", "全部检查完成。\n\n**系统正常**，负载 0.12，运行 22 小时。\n\n— feishu-streaming v2.0.5 full-scenario E2E", None),
     ]
     r = await adapter_send(composer, chat_id, seq[0][1], seq[0][2])
-    check("① 工具行（建卡前暂存）", r is not None)
+    check("① thinking 行（建卡前暂存）", r is not None)
     r = await adapter_send(composer, chat_id, seq[1][1], seq[1][2])
-    check("② thinking 行（暂存）", r is not None)
-    r1 = await adapter_send(composer, chat_id, seq[2][1], seq[2][2])
-    check("③ answer 首帧建卡（带面板）", bool(r1 and r1.success), f"msg={getattr(r1, 'message_id', None)}")
+    check("② pending 行（暂存）", r is not None)
+    r = await adapter_send(composer, chat_id, seq[2][1], seq[2][2])
+    check("③ preview 取代 pending（暂存合并）", r is not None)
+    r1 = await adapter_send(composer, chat_id, seq[3][1], seq[3][2])
+    check("④ answer 首帧建卡（带面板）", bool(r1 and r1.success), f"msg={getattr(r1, 'message_id', None)}")
     msg_id = str(getattr(r1, "message_id", "") or "")
     if msg_id:
         artifacts.append(f"full 卡片消息: {msg_id}")
+    st = composer.state_by_message(msg_id) if msg_id else None
+    check("⑤ 首卡面板 2 行（无 pending 残留）",
+          bool(st and len(st.status_lines) == 2 and not any(ln.endswith("...") for ln in st.status_lines)),
+          f"lines={list(st.status_lines) if st else None}")
     await asyncio.sleep(STREAM_INTERVAL_SEC)
-    r = await adapter_edit(composer, chat_id, msg_id, seq[3][1], finalize=False)
-    check("④ answer 流式更新", bool(r and r.success))
+    r = await adapter_edit(composer, chat_id, msg_id, seq[4][1], finalize=False)
+    check("⑥ answer 流式更新", bool(r and r.success))
     await asyncio.sleep(STREAM_INTERVAL_SEC)
-    r = await adapter_send(composer, chat_id, seq[4][1], seq[4][2])
+    r = await adapter_send(composer, chat_id, seq[5][1], seq[5][2])
     st = composer.state_by_message(msg_id)
-    check("⑤ 面板增量（工具行入面板）", bool(r and r.success and st and len(st.status_lines) == 3))
+    check("⑦ thinking 第 2 轮入面板", bool(r and r.success and st and len(st.status_lines) == 3))
     await asyncio.sleep(STREAM_INTERVAL_SEC)
-    r = await adapter_edit(composer, chat_id, msg_id, seq[5][1], finalize=True)
-    check("⑥ 定稿", bool(r and r.success))
+    r = await adapter_send(composer, chat_id, seq[6][1], seq[6][2])
+    st = composer.state_by_message(msg_id)
+    check("⑧ notify 工具行入面板", bool(r and r.success and st and len(st.status_lines) == 4))
+    await asyncio.sleep(STREAM_INTERVAL_SEC)
+    r = await adapter_edit(composer, chat_id, msg_id, seq[7][1], finalize=True)
+    check("⑨ 定稿（页脚 + 关流式）", bool(r and r.success))
 
 
 async def scenario_clarify(composer: FrameComposer, client: FeishuClient, chat_id: str) -> None:
     print("== 场景 clarify：澄清交互卡片 ==")
-    from hermes_lark_streaming.cardkit import build_clarify_card, normalize_clarify_choices
+    from hermes_lark_streaming.cardkit import (
+        build_clarify_card,
+        normalize_clarify_choices,
+    )
 
     choices = normalize_clarify_choices(["继续全量 E2E", "只跑冒烟", "先停一下"])
     card = build_clarify_card(question="E2E 场景全部跑完了，接下来做什么？", choices=choices, clarify_id="e2e-clarify-001")
@@ -296,7 +313,7 @@ async def run(selected: list[str]) -> int:
     client = _build_client(app_id, app_secret)
     composer, _factory = _build_composer(client)
 
-    print(f"feishu-streaming v2.0.0 真飞书 E2E")
+    print("feishu-streaming v2.0.0 真飞书 E2E")
     print(f"  app_id={app_id[:12]}…  chat_id={chat_id[:16]}…  场景={','.join(selected)}")
     print()
 
@@ -318,7 +335,7 @@ async def run(selected: list[str]) -> int:
                 await scenario_plain(client, chat_id)
             else:  # pragma: no cover
                 check(f"未知场景 {name}", False)
-        except Exception as exc:  # noqa: BLE001 — 单场景失败不拖垮其余场景
+        except Exception as exc:
             import traceback
             traceback.print_exc()
             check(f"场景 {name} 异常", False, f"{type(exc).__name__}: {exc}")

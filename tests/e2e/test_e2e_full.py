@@ -170,7 +170,9 @@ class TestPendingProgress:
 
             contents = [_flat(el) for el in panel.get("elements", [])]
             assert any("先暂存这条思考" in c for c in contents), f"首卡面板缺思考行: {contents}"
-            assert any("terminal" in c for c in contents), f"首卡面板缺工具行: {contents}"
+            # v2.0.5：工具行标题人性化（terminal → Terminal，V1 截图同款）
+            assert any("Terminal" in c for c in contents), f"首卡面板缺工具行: {contents}"
+            assert any("第 1 轮" in c for c in contents), f"首卡面板缺思考轮次标题: {contents}"
 
         await runner.complete(session, answer="暂存场景定稿")
         await runner.assert_card_sealed(session)

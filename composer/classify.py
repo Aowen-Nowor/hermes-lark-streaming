@@ -16,9 +16,18 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Any
+
+# v2.0.5：进度行解析下沉到 cardkit.progline 叶子模块（cards.py 渲染面板时需要
+# 同一套解析，原地对拷会漂移；从 classify 导入又会 cardkit←composer 循环）。
+# re-export 既有公开名（_THINKING_PREFIX / parse_progress_line）；
+# _EMOJI_RE 供 _is_progress_text 启发式使用。
+from ..cardkit.progline import (
+    _EMOJI_RE,
+    _THINKING_PREFIX,
+    parse_progress_line,
+)  # noqa: F401 — re-export 供既有导入方使用
 
 _logger = logging.getLogger("hermes_lark_streaming.composer")
 
@@ -28,16 +37,6 @@ CH_PROGRESS = "progress"  # 工具进度行 / thinking 气泡（progress lane）
 CH_INTERIM = "interim"    # interim 播报（非工具非思考的中途文本）
 CH_FINAL = "final"        # turn 定稿
 CH_PLAIN = "plain"        # 普通消息（cron / 后台 / 无标记发送）→ 原生路径
-
-# hermes gateway.progress thinking 气泡的 i18n 前缀（locales/*.yaml: "💬 {text}"）
-_THINKING_PREFIX = "\U0001f4ac"  # 💬
-# 工具行首 emoji 检测（hermes tool_head/tool_pending/tool_preview 均以 emoji 开头）
-_EMOJI_RE = re.compile(
-    "^[\U0001f300-\U0001faff\u2600-\u27bf\U0001f1e6-\U0001f1ff\u2b00-\u2bff\u23e9-\u23fa]"
-)
-# 工具预览行的引号模式：{emoji} {tool}："..." / {emoji} {tool}("...")
-_TOOL_PREVIEW_RE = re.compile(r"^(\S+)\s+([A-Za-z_][\w.\-]*)\s*[：（(]")
-_TOOL_PENDING_RE = re.compile(r"^(\S+)\s+([A-Za-z_][\w.\-]*)\.\.\.$")
 
 
 @dataclass
@@ -71,26 +70,6 @@ def _is_progress_text(content: str) -> bool:
     if len(text) > 300:  # 工具行都很短；长文本不可能是工具行
         return False
     return bool(_EMOJI_RE.match(text))
-
-
-def parse_progress_line(content: str) -> tuple[str, str, str]:
-    """把 progress 文本拆成 (kind, tool_name, clean_text).
-
-    kind: "thinking" | "tool" | "unknown"（unknown 时 clean_text 为原文）
-    永不抛异常；解析不出结构时返回原文。
-    """
-    text = (content or "").strip()
-    if text.startswith(_THINKING_PREFIX):
-        return "thinking", "", text[len(_THINKING_PREFIX):].strip()
-    m = _TOOL_PENDING_RE.match(text)
-    if m:
-        return "tool", m.group(2), text
-    m = _TOOL_PREVIEW_RE.match(text)
-    if m:
-        return "tool", m.group(2), text
-    if _EMOJI_RE.match(text):
-        return "tool", "", text
-    return "unknown", "", text
 
 
 # v2.0.1 公开别名：适配器层上下文升格规则需要复用进度启发式

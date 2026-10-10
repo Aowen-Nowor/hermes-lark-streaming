@@ -1,12 +1,17 @@
-"""CardKit v2.0.4 — 工具名 → 飞书官方 standard_icon 映射.
+"""CardKit v2.0.4/2.0.5 — 工具名 → 飞书官方 standard_icon / 展示标题映射.
 
-V1 插件 ``state/tooluse.py::_TOOL_DESCRIPTORS`` 的图标表移植（仅图标解析，
-sanitizer/title 机制不随迁 —— V2 的面板行文本由 gateway progress 模板渲染，
-这里只负责把硬编码 tool_02 升级为按工具名匹配的官方图标，对齐 V1 观感）。
+V1 插件 ``state/tooluse.py::_TOOL_DESCRIPTORS`` 的移植（v2.0.4 仅图标表；
+v2.0.5 补齐 V1 的标题机制）：
 
-匹配规则与 V1 一致：别名归一化（小写、``-``→``_``）后全等或 ``{alias}_`` 前缀
-命中（如 ``read_file`` → read 系、``web_search`` → search 系）；未命中回退
-``tool_02``（通用工具图标）。永不抛异常。
+- ``resolve_tool_icon(name)``：别名归一化后匹配官方图标 token（未命中 ``tool_02``）
+- ``tool_display_title(name)``：描述符标题（V1: read→"Read"、grep→"Search text"…），
+  未命中回退 ``humanize_tool_name``（``-``/``_``→空格 + 首字母大写，如
+  hermes 的 ``terminal`` → "Terminal"——与 V1 截图中的工具行标题完全一致）
+- ``humanize_tool_name(name)``：V1 state/tooluse.py 同名函数移植
+
+注意：``terminal`` 只进图标表（v2.0.4 生产补充），**不进标题表**——V1 的
+描述符表没有 terminal，实际显示的是 humanize 产物 "Terminal"，为对齐用户
+看到的 V1 效果保持一致。匹配永不抛异常。
 """
 
 from __future__ import annotations
@@ -15,7 +20,12 @@ import logging
 
 _logger = logging.getLogger("hermes_lark_streaming.cardkit.tool_icons")
 
-__all__ = ["DEFAULT_TOOL_ICON", "resolve_tool_icon"]
+__all__ = [
+    "DEFAULT_TOOL_ICON",
+    "resolve_tool_icon",
+    "humanize_tool_name",
+    "tool_display_title",
+]
 
 DEFAULT_TOOL_ICON = "tool_02"
 
@@ -36,6 +46,49 @@ _TOOL_ICONS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("check", "determine", "verify"), "list-check_outlined"),
     (("summarize", "analyze", "prepare"), "report_outlined"),
 )
+
+
+# V1 state/tooluse.py::_TOOL_DESCRIPTORS 标题表（aliases → 展示标题）。
+# 与图标表同构但不含 terminal（V1 无 terminal 条目 → humanize → "Terminal"）。
+_TOOL_TITLES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("skill",), "Load skill"),
+    (("read", "open"), "Read"),
+    (("write", "edit"), "Edit"),
+    (("web_search", "web-search", "search"), "Search"),
+    (("web_fetch", "web-fetch", "fetch"), "Fetch web page"),
+    (("grep",), "Search text"),
+    (("glob",), "Search files"),
+    (("exec", "bash", "command", "run"), "Run command"),
+    (("browser", "playwright", "navigate"), "Browser"),
+    (("agent", "task", "spawn"), "Run sub-agent"),
+    (("check", "determine", "verify"), "Check"),
+    (("summarize", "analyze", "prepare"), "Analyze"),
+)
+
+
+def humanize_tool_name(name: str | None) -> str:
+    """V1 state/tooluse.py 同款：``-``/``_``→空格、首字母大写（terminal→Terminal）."""
+    try:
+        cleaned = (name or "").replace("-", " ").replace("_", " ").strip()
+        if not cleaned:
+            return "Tool"
+        return cleaned[0].upper() + cleaned[1:]
+    except Exception:  # noqa: BLE001 — 标题解析绝不影响面板渲染
+        return "Tool"
+
+
+def tool_display_title(name: str | None) -> str:
+    """V1 build_display_steps 同款：描述符标题优先，未命中 humanize 回退。"""
+    try:
+        normalized = (name or "").strip().lower().replace("-", "_")
+        if normalized:
+            for aliases, title in _TOOL_TITLES:
+                for alias in aliases:
+                    if normalized == alias or normalized.startswith(f"{alias}_"):
+                        return title
+    except Exception:  # noqa: BLE001
+        pass
+    return humanize_tool_name(name)
 
 
 def resolve_tool_icon(name: str | None) -> str:
