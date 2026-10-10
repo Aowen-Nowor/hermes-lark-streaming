@@ -24,6 +24,7 @@ from .classify import (
     CH_PROGRESS,
     CH_STREAM,
     ClassifyResult,
+    parse_progress_line,
 )
 
 _logger = logging.getLogger("hermes_lark_streaming.composer")
@@ -172,7 +173,7 @@ class FrameComposer:
         # 并入建卡前暂存的 progress 行（首卡即带状态面板）
         prev = self._states.get(chat_id)
         pending = list(prev.pending_status)[-12:] if prev is not None else []
-        card = self._build_card(status_lines=pending or None)
+        card = self._build_card(status_lines=pending or None, panel_title=_panel_title(pending))
         card_id = await client.cardkit_create(card)
         message_id = await client.send_card_by_id_to_chat(chat_id, card_id)
         # 复用占位/上一 turn 状态对象（保留注册表连续性），升级为活跃卡片。
@@ -265,7 +266,11 @@ class FrameComposer:
         client = self._get_client()
         if client is None:
             raise RuntimeError("card client unavailable")
-        card = self._build_card(status_lines=st.status_lines)
+        card = self._build_card(
+            status_lines=st.status_lines,
+            answer_text=st.answer_text,   # 防全量更新把已流 answer 重置为空
+            panel_title=_panel_title(st.status_lines),
+        )
         st.seq += 1
         st.last_activity = time.monotonic()
         await client.cardkit_update(st.card_id, card, sequence=st.seq)
@@ -279,7 +284,11 @@ class FrameComposer:
         if content:
             st.answer_text = content
         st.last_activity = time.monotonic()
-        await finalize_card(client, st, answer_element_id=_answer_element_id())
+        await finalize_card(
+            client, st, answer_element_id=_answer_element_id(),
+            footer_fields=self._footer_fields(),
+            footer_show_label=self._footer_show_label(),
+        )
         st.finalized = True
         _logger.info(
             "composer: card finalized chat=%s card=%s answer_len=%d status_lines=%d",
@@ -308,8 +317,33 @@ class FrameComposer:
         self._states.clear()
         self._by_message.clear()
 
+    # ── 页脚配置桥（插件 Config 惰性属性；异常回退 finalize 默认） ──────
+    def _footer_fields(self) -> list[list[str]] | None:
+        try:
+            return self._config.footer_fields  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _footer_show_label(self) -> bool:
+        try:
+            return bool(self._config.footer_show_label)  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            return False
+
 
 def _answer_element_id() -> str:
     from ..cardkit.elements import ANSWER_ELEMENT_ID
 
     return ANSWER_ELEMENT_ID
+
+
+def _panel_title(status_lines: list[str]) -> str:
+    """V1 风格面板动态标题："agent loop" / "agent loop · N 个工具".
+
+    V2 帧无单工具耗时，标题不带 elapsed（避免伪造数据）。
+    """
+    try:
+        n = sum(1 for ln in status_lines or [] if parse_progress_line(ln)[0] == "tool")
+    except Exception:  # noqa: BLE001 — 标题永不影响主流程
+        n = 0
+    return f"agent loop · {n} 个工具" if n else "agent loop"

@@ -152,12 +152,20 @@ class TestPendingProgress:
 
         if not runner.is_real_mode:
             # 首卡卡片 JSON 的状态面板即带两条暂存行（build_card(status_lines=pending)）
+            # v2.0.3 起面板行渲染为 V1 风格 div（文本在 el["text"]["content"]），
+            # 同时兼容旧 markdown 行（顶层 content）。
             from hermes_lark_streaming.cardkit.elements import UNIFIED_PANEL_ELEMENT_ID
 
             card = runner.get_card(session)
             assert card is not None
             panel = card.elements.get(UNIFIED_PANEL_ELEMENT_ID, {})
-            contents = [str(el.get("content", "")) for el in panel.get("elements", [])]
+
+            def _flat(el: dict) -> str:
+                text = el.get("text")
+                nested = text.get("content", "") if isinstance(text, dict) else ""
+                return f"{el.get('content', '')} {nested}"
+
+            contents = [_flat(el) for el in panel.get("elements", [])]
             assert any("先暂存这条思考" in c for c in contents), f"首卡面板缺思考行: {contents}"
             assert any("terminal" in c for c in contents), f"首卡面板缺工具行: {contents}"
 

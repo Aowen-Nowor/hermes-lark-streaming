@@ -140,11 +140,19 @@ class _CardFactory:
             "print_step": int(getattr(cfg, "print_step", 4) or 4),
         }
 
-    def streaming(self, *, status_lines: list[str] | None = None) -> dict[str, Any]:
+    def streaming(
+        self,
+        *,
+        status_lines: list[str] | None = None,
+        answer_text: str = "",
+        panel_title: str = "",
+    ) -> dict[str, Any]:
         from .cardkit.cards import build_streaming_card_v2
 
         params = self._params()
-        return build_streaming_card_v2(status_lines=status_lines, **params)
+        return build_streaming_card_v2(
+            status_lines=status_lines, answer_text=answer_text, panel_title=panel_title, **params,
+        )
 
     def final(self, **_: Any) -> dict[str, Any]:
         # V2 终态不重建卡片（answer 元素由 stream_element 落终值）。
