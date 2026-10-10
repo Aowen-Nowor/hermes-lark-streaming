@@ -4,8 +4,9 @@
 
 1. 进度帧上下文升格（adapter._upgrade_plain_to_progress）：
    edit-transport 平台的进度气泡首条是裸 send（无任何 metadata 标记），
-   活跃卡片期 + 进度启发式文本 → CH_PROGRESS 吸收进状态面板；
-   无活跃卡片 / 非进度文本 → 维持 CH_PLAIN（cron / 后台发送不受影响）。
+   进度启发式文本 → CH_PROGRESS 吸收进状态面板；
+   v2.0.4 起不再要求活跃卡片（工具帧常早于答案首帧，升格后由 engine 暂存
+   并立即建卡）；非进度文本 → 维持 CH_PLAIN（cron / 后台发送不受影响）。
 
 2. 进度快照合并（engine._on_progress）：
    网关 accumulate 模式每 tick 重发「当前全部进度行」的全量快照 →
@@ -30,7 +31,7 @@ from hermes_lark_streaming.composer.classify import CH_PLAIN, CH_PROGRESS, class
 
 
 class TestUpgradePlainToProgress:
-    """裸 send → CH_PROGRESS 升格规则（活跃卡片期上下文）."""
+    """裸 send → CH_PROGRESS 升格规则（v2.0.4：不再要求活跃卡片）."""
 
     async def test_upgrades_with_active_card(self, runner):
         """活跃卡片 + emoji 短行 → 升格 CH_PROGRESS。"""
@@ -51,10 +52,13 @@ class TestUpgradePlainToProgress:
         assert upgraded.kind == "thinking"
         assert upgraded.thinking_text == "让我想想"
 
-    async def test_no_upgrade_without_active_card(self, runner):
-        """无活跃卡片 → 维持 None（调用方保持 CH_PLAIN 原生路径）。"""
+    async def test_upgrades_without_active_card(self, runner):
+        """无活跃卡片 + 进度文本 → 仍升格（v2.0.4：由 engine 暂存并立即建卡）。"""
         chat = runner.chat_id + "-nocard"
-        assert _upgrade_plain_to_progress(runner.composer, chat, '🔧 terminal："date"') is None
+        upgraded = _upgrade_plain_to_progress(runner.composer, chat, '🔧 terminal："date"')
+        assert upgraded is not None
+        assert upgraded.channel == CH_PROGRESS
+        assert upgraded.kind == "tool"
 
     async def test_no_upgrade_for_long_text(self, runner):
         """长文本（>300 字符）不是进度行 → 不升格（cron 长答案保护）。"""
@@ -67,23 +71,28 @@ class TestUpgradePlainToProgress:
         session = await runner.start_message("建卡。")
         assert _upgrade_plain_to_progress(runner.composer, session.chat_id, "这是一句普通的话") is None
 
-    async def test_finalized_card_no_upgrade(self, runner):
-        """已定稿卡片不算活跃 → 不升格（turn 间的独立消息不受污染）。"""
+    async def test_finalized_card_still_upgrades(self, runner):
+        """已定稿卡片 + 进度文本 → 仍升格（v2.0.4：下一个 _on_progress 暂存/建新卡；
+        cron / 后台投递带 notify=True → CH_FINAL 不受影响）。"""
         session = await runner.start_message("建卡后定稿。")
         await runner.complete(session, answer="完")
-        assert _upgrade_plain_to_progress(runner.composer, session.chat_id, '🔧 terminal："ls"') is None
+        upgraded = _upgrade_plain_to_progress(runner.composer, session.chat_id, '🔧 terminal："ls"')
+        assert upgraded is not None
+        assert upgraded.channel == CH_PROGRESS
 
     async def test_empty_content_no_upgrade(self, runner):
         """空内容 → 不升格、不抛异常。"""
         assert _upgrade_plain_to_progress(runner.composer, runner.chat_id, "") is None
 
     def test_never_raises_on_broken_composer(self):
-        """composer 异常 → 返回 None（永不阻断主路径）。"""
+        """composer 异常对象也不阻断（v2.0.4：升格不再查询 composer 状态）。"""
         class _Boom:
             def active_state(self, _chat: str):
                 raise RuntimeError("boom")
 
-        assert _upgrade_plain_to_progress(_Boom(), "chat", '🔧 t："x"') is None
+        # 不抛异常即通过（v2.0.4 不再访问 composer；返回升格结果）
+        result = _upgrade_plain_to_progress(_Boom(), "chat", '🔧 t："x"')
+        assert result is None or result.channel == CH_PROGRESS
 
 
 # ---------------------------------------------------------------------------
@@ -142,27 +151,23 @@ class TestProgressSnapshotMerge:
         assert len(st.status_lines) == 12
         assert st.status_lines[-1] == "🔧 tool19"
 
-    async def test_progress_before_card_stages_into_pending(self, runner):
-        """建卡前裸进度帧（经适配器升格）→ 暂存 pending_status。
+    async def test_progress_before_card_creates_card_and_merges(self, runner):
+        """建卡前裸进度帧（经适配器升格）→ 暂存并立即建占位卡（v2.0.4 s70 回流）.
 
         生产路径：adapter.send → classify_send(CH_PLAIN) → _upgrade_plain_to_progress
-        → handle_send(CH_PROGRESS) → 建卡前暂存。测试按同链路直驱。
+        → handle_send(CH_PROGRESS) → 暂存 pending + 立即建卡（卡片先现，V1 体验）。
         """
         chat = runner.chat_id + "-pending"
         cls = classify_send('🔧 early："setup"', None)  # 裸 send → CH_PLAIN
         assert cls.channel == CH_PLAIN
         upgraded = _upgrade_plain_to_progress(runner.composer, chat, '🔧 early："setup"')
-        # 无活跃卡片 → 不升格（升格只在卡片活跃期生效）；建卡前暂存走的是
-        # _interim_send 标记路径（hermes commentary/思考帧带标记）。
-        assert upgraded is None
+        # v2.0.4：不再要求活跃卡片——工具帧常早于答案首帧
+        assert upgraded is not None and upgraded.channel == CH_PROGRESS
         r = await runner.send_raw('🔧 early："setup"', {"_interim_send": True}, chat_id=chat)
-        assert r.success and r.message_id is None  # 暂存消费，无气泡
+        assert r.success and r.message_id is None  # 不回传 message_id（防网关 anchor 复写）
         st = runner.composer._states.get(chat)
-        assert st is not None and st.pending_status == ['🔧 early："setup"']
-
-        # 首卡创建时并入状态面板
-        session = await runner.start_message("首帧。", chat_id=chat)
-        st = runner.get_state(session)
+        assert st is not None and st.card_id, "进度帧应立即建占位卡"
+        assert st.pending_status == [], "已并入首卡面板"
         assert '🔧 early："setup"' in st.status_lines
 
 

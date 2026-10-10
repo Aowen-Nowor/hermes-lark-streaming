@@ -779,13 +779,13 @@ class TestLoadingHintElement:
         assert "i18n_content" in el["text"]
 
     def test_streaming_card_does_not_include_hint(self) -> None:
-        """流式占位卡片默认包含占位提示（v1.0.2: 嵌入初始卡片，不再单独API插入）."""
+        """流式占位卡片默认不含占位提示（v2.0.4: hint 已按用户要求移除）."""
         card = build_streaming_card_v2()
         element_ids = [e.get("element_id") for e in card["body"]["elements"]]
-        assert _LOADING_HINT_ELEMENT_ID in element_ids  # v1.0.2: hint is now pre-embedded
+        assert _LOADING_HINT_ELEMENT_ID not in element_ids  # v2.0.4: hint removed
 
     def test_streaming_card_without_loading_hint(self) -> None:
-        """include_loading_hint=False 时占位卡片不包含占位提示."""
+        """include_loading_hint 显式 False 时占位卡片同样不含占位提示."""
         card = build_streaming_card_v2(include_loading_hint=False)
         element_ids = [e.get("element_id") for e in card["body"]["elements"]]
         assert _LOADING_HINT_ELEMENT_ID not in element_ids

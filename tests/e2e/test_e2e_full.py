@@ -137,12 +137,15 @@ class TestPendingProgress:
         await runner.feed_reasoning(pend, "卡片还没建，先暂存这条思考")
         await runner.feed_tool_update(pend, tool_name="terminal", detail="pytest tests/ -q")
 
-        # 建卡前：无任何卡片 API 调用（暂存进占位状态）
-        assert runner.get_call_count("cardkit_create") == 0
-        assert runner.get_call_count("cardkit_update") == 0
+        # v2.0.4（s70 回流）：首个进度帧即建占位卡（卡片先现，V1 体验），
+        # 后续帧经 _patch_status 合并进面板；不再有裸奔的独立气泡。
+        assert runner.get_call_count("cardkit_create") == 1
 
         session = await runner.start_message("首帧建卡应并入暂存的状态行")
         runner.assert_card_created(session)
+
+        # 首帧并入既有卡片而非重复建卡
+        assert runner.get_call_count("cardkit_create") == 1
 
         st = runner.get_state(session)
         assert len(st.status_lines) == 2, f"暂存行未并入首卡: {st.status_lines}"

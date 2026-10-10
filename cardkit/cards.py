@@ -22,6 +22,7 @@ from .elements import (
     _streaming_element,
     build_unified_panel,
 )
+from .tool_icons import resolve_tool_icon
 from .i18n import _LOCALES, _T, _i18n, _t
 
 if TYPE_CHECKING:
@@ -54,7 +55,11 @@ def _strip_md_quotes(text: str) -> str:
 
 
 def _render_status_children(lines: list[str]) -> list[dict[str, Any]]:
-    """status_lines → V1 风格面板子元素（解析失败降级为原始 markdown 行）."""
+    """status_lines → V1 风格面板子元素（解析失败降级为原始 markdown 行）.
+
+    v2.0.4：工具行图标由硬编码 tool_02 升级为 V1 同款按工具名映射的
+    飞书官方 standard_icon（state/tooluse.py _TOOL_DESCRIPTORS 移植）。
+    """
     children: list[dict[str, Any]] = []
     for line in lines:
         text = (line or "").strip()
@@ -71,7 +76,8 @@ def _render_status_children(lines: list[str]) -> list[dict[str, Any]]:
             # group(2) 非贪婪排除尾部省略号（tool_pending 的 "..."）；
             # preview 捕获含引号，剥壳后为纯命令摘要。
             children.append(_build_tool_step_title(
-                {"title": m.group(2), "status": "success", "icon": "tool_02"},
+                {"title": m.group(2), "status": "success",
+                 "icon": resolve_tool_icon(m.group(2))},
             ))
             preview = _strip_md_quotes(m.group(3)) if m.group(3) else ""
             if preview:
@@ -199,7 +205,7 @@ def build_streaming_card_v2(
     print_strategy: str = "delay",
     print_step: int = 4,
     include_unified_panel: bool = True,
-    include_loading_hint: bool = True,
+    include_loading_hint: bool = False,  # v2.0.4: 已废弃，保留签名兼容（不再渲染）
     include_answer_element: bool = True,
     status_lines: list[str] | None = None,
     answer_text: str = "",
@@ -227,10 +233,9 @@ def build_streaming_card_v2(
     if show_streaming_element and include_answer_element:
         elements.append(_streaming_element(content=answer_text or "", element_id=ANSWER_ELEMENT_ID))
 
-    # ── Loading hint (context loading placeholder, removed on first LLM token) ──
-    if include_loading_hint:
-        elements.append(_loading_hint_element())
-
+    # ── Loading hint: v2.0.4 移除（用户确认走平台后无需"正在加载上下文..."占位；
+    #    v2.0.3 部署时曾从服务器热补丁回退，本版起仓库内永久移除）。
+    #    spinner 保留作为封卡 insert_before 锚点 + 首卡 loading 指示。
     # ── Loading spinner ──
     elements.append(_loading_element())
 

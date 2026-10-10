@@ -226,8 +226,17 @@ class FrameComposer:
         if st is None:
             # 卡片未建立：暂存（turn 建卡时并入；TTL 兜底清理）
             self._states.setdefault(chat_id, CardTurnState(chat_id=chat_id)).pending_status.append(raw)
-            # 已消费但不回传 message_id：防止网关把返回 id 当作进度气泡 anchor
-            # 反复 edit（v2.0.1 事故预防：卡片消息被进度文本覆写）。
+            # v2.0.4（s70 回流）：立即建占位卡（还原 V1 体验：卡片先现，工具/思考
+            # 实时进面板，不再裸奔成独立气泡）。pending 已并入首卡面板；答案元素
+            # 留空待流式。仍不回传 message_id：防网关把返回 id 当作进度气泡
+            # anchor 反复 edit（v2.0.1 事故预防）。
+            try:
+                await self._create_card(chat_id, "")
+            except Exception:  # 建卡失败维持暂存语义（TTL 兜底），不阻断
+                _logger.debug(
+                    "composer: early card creation failed — staged pending only chat=%s",
+                    chat_id, exc_info=True,
+                )
             return SendResult(success=True)
         # v2.0.1：网关 accumulate 模式下气泡文本是“当前全部进度行”的全量快照
         # （edit_interval 每 tick 重发累积全文）；separate 模式则是单行增量。
