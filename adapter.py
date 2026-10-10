@@ -197,6 +197,13 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             build_final_card=self._card_factory.final,
             config=self._card_config,
         )
+        # v2.0.7：reasoning 隐藏流 → 面板思考行（第 N 轮）落点注册
+        try:
+            from .reasoning_feed import bind_composer
+
+            bind_composer(self._composer)
+        except Exception:  # 思考回灌是增强能力，失败不影响卡片主链（BLE 未启用，noqa 触发 RUF100）
+            _logger.debug("feishu-streaming: reasoning feed bind skipped", exc_info=True)
         _ACTIVE_ADAPTERS.add(self)
 
     # ── 初始化辅助 ──────────────────────────────────────────────────────
@@ -467,6 +474,16 @@ def register(ctx: Any) -> None:
         _logger.info("feishu-streaming: /aowen commands registered (help, status, monitor)")
     except Exception:
         _logger.debug("feishu-streaming: /aowen hook registration skipped", exc_info=True)
+
+    # v2.0.7：reasoning 隐藏流观察者（on_stream_delta/on_stream_end）——
+    # 需 config `plugins.stream_reasoning_deltas: true` 才有数据投递；
+    # 钩子回调内部自兑底，注册失败仅降级为「无思考行」。
+    try:
+        from . import reasoning_feed
+
+        reasoning_feed.register_hooks(ctx)
+    except Exception:
+        _logger.debug("feishu-streaming: reasoning feed registration skipped", exc_info=True)
 
 
 def _prewarm_config() -> None:

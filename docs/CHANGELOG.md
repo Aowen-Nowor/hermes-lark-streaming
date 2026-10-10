@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.0.7 (2026-10-11)
+
+**思考行修复：DeepSeek reasoning 隐藏流 → 面板「第 N 轮」思考记录（零 monkey-patch）。**
+
+用户验收（2026-10-11）：「折叠面板里为何没有思考、推理的记录，只有工具的记录」。
+根因（日志+源码+端点实测三重定位）：hermes 网关 `thinking_progress` 只中继模型在
+工具调用之间的**可见间歇文本**（`_relay_thinking` 读 assistant content）；而
+DeepSeek-v4-flash 的思考走 `reasoning_content` 隐藏流（端点流式实测 62 reasoning
+块/次回答）——网关主代理路径不接 `reasoning_callback`（仅 api_server 接），
+`_fire_reasoning_delta` 静默丢弃，面板永远收不到 💬 行。
+
+| 变更 | 文件 | 说明 |
+|---|---|---|
+| **新增** reasoning 流桥 | `reasoning_feed.py` | 注册官方 `on_stream_delta`/`on_stream_end` 观察者钩子；`kind="reasoning"` delta 按会话（`gateway.session_context` ContextVar 定位 chat）累积、节流（1.5s/400 字符）、间隔 >8s 断轮重置，回灌 composer 的 CH_PROGRESS/thinking 通道 → 面板按既有合并语义（增长原地替换）渲染「第 N 轮」思考行；600 字符冻结上限保前缀增长幂等 |
+| **新增** 线程安全回灌 | `composer/engine.py` | `submit_progress_from_thread()`：捕获事件循环引用（构造期/帧入口），`call_soon_threadsafe` → handle_send 消费；已定稿/已降级丢弃 |
+| **新增** 适配器接线 | `adapter.py` | 实例化时 `bind_composer()`；`register(ctx)` 注册观察者钩子（需 config `plugins.stream_reasoning_deltas: true` 才有投递；未配置/失败仅降级为无思考行） |
+
+**部署要求**：config.yaml 增加 `plugins: {stream_reasoning_deltas: true}`。
+
+套件 674/674（新增 11 用例）；ruff 新代码零新增告警。
+
 ## v2.0.6 (2026-10-10)
 
 **真实帧格式对齐：E2E ≠ 正式对话根因修复（用户验收反馈驱动）。**

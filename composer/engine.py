@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -86,6 +87,12 @@ class FrameComposer:
         self._config = config
         self._states: dict[str, CardTurnState] = {}
         self._by_message: dict[str, str] = {}  # card_message_id -> chat_id
+        # v2.0.7：reasoning 流回灌的线程安全入口需要事件循环引用 ——
+        # 构造期若已在 loop 内则直接捕获，否则首个 async 帧入口补捕获。
+        try:
+            self._loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
 
     # ── 状态表管理 ──────────────────────────────────────────────────────
     def _ttl_sec(self) -> int:
@@ -126,6 +133,7 @@ class FrameComposer:
         metadata: dict[str, Any] | None,
         cls: ClassifyResult,
     ) -> SendResult | None:
+        self._loop = asyncio.get_running_loop()  # v2.0.7：供线程安全回灌入口使用
         self._gc()
         try:
             if cls.channel == CH_STREAM:
@@ -140,6 +148,35 @@ class FrameComposer:
         except Exception as exc:  # noqa: BLE001 — 降级红线：任何失败走原生
             self._degrade(chat_id, "send", exc)
             return None
+
+    # ── reasoning 流回灌（v2.0.7，插件 stream-hook 守护线程 → 事件循环）───
+    def submit_progress_from_thread(self, chat_id: str, raw_line: str) -> bool:
+        """线程安全地把一行进度文本（如 reasoning_feed 的 💬 行）投递进面板.
+
+        仅活跃卡片期消费：未建卡（思考先于 answer 首帧）由 handle_send 的
+        暂存分支处理；已定稿/已降级则丢弃（终态卡片不再变化）。返回是否受理。
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return False
+        st = self._states.get(chat_id)
+        if st is not None and (st.finalized or st.degraded):
+            return False
+        try:
+            loop.call_soon_threadsafe(self._spawn_progress, chat_id, raw_line)
+            return True
+        except RuntimeError:
+            return False
+
+    def _spawn_progress(self, chat_id: str, raw_line: str) -> None:
+        asyncio.ensure_future(self._feed_progress(chat_id, raw_line))
+
+    async def _feed_progress(self, chat_id: str, raw_line: str) -> None:
+        cls = ClassifyResult(CH_PROGRESS, kind="thinking", raw_content=raw_line)
+        try:
+            await self.handle_send(chat_id, raw_line, None, None, cls)
+        except Exception:  # 回灌失败不影响主流程（BLE 未启用，noqa 触发 RUF100）
+            _logger.debug("composer: reasoning feed drop chat=%s", chat_id, exc_info=True)
 
     async def handle_edit(
         self,
