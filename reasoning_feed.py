@@ -35,7 +35,9 @@ __all__ = ["bind_composer", "register_hooks", "reset_for_tests"]
 # ── 节流参数 ────────────────────────────────────────────────────────────────
 _FLUSH_INTERVAL_SEC = 1.5   # 两次面板刷新的最小间隔（cardkit_update 经济性）
 _FLUSH_CHARS = 400          # 距上次刷新新增字符达到该值立即刷新
-_MAX_LINE_CHARS = 600       # 思考行冻结上限（保前缀增长语义；重发同文本幂等跳过）
+_MAX_LINE_CHARS = 2000      # 思考行冻结上限（v2.0.8：600→2000，V1
+                            # _REASONING_DISPLAY_LIMIT 对齐——600 会把推理
+                            # 正文/新闻草稿腰斩，用户验收「后面格式不对」伴生）
 _GAP_RESET_SEC = 8.0        # delta 间隔超过该值（工具执行中）→ 清缓冲开新行
 
 # 会话变量名（gateway/session_context.py _SESSION_VARS）

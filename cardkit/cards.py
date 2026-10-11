@@ -58,7 +58,53 @@ def _strip_md_quotes(text: str) -> str:
     return text.strip().strip('"“”').strip()
 
 
-def _render_status_children(lines: list[str]) -> list[dict[str, Any]]:
+# v2.0.8：单条思考正文显示上限（V1 _REASONING_DISPLAY_LIMIT 同款）
+_REASONING_DISPLAY_LIMIT = 2000
+
+
+def _truncate_reasoning_body(text: str) -> str:
+    """思考正文截断（V1 elements._truncate_reasoning 同语义）."""
+    text = (text or "").strip()
+    if len(text) <= _REASONING_DISPLAY_LIMIT:
+        return text
+    return text[:_REASONING_DISPLAY_LIMIT] + f"……（已截断，共 {len(text)} 字）"
+
+
+def _round_elapsed_ms(lines: list[str], line_times: list[float]) -> dict[int, float]:
+    """思考轮次耗时表：{轮次首个 💬 行的 index: elapsed_ms}（v2.0.8）.
+
+    V1 语义：轮次在下一个非思考行（工具/通知）到达时定稿，耗时 =
+    定稿时间 - 轮次首行到达时间；仍在进行中的末轮以最后一行时间为准。
+    line_times 缺失/不对齐时返回空表（标题省略 elapsed，不伪造）。
+    """
+    out: dict[int, float] = {}
+    try:
+        if not line_times or len(line_times) < len(lines):
+            return out
+        i = 0
+        while i < len(lines):
+            if not lines[i].startswith(_THINKING_PREFIX):
+                i += 1
+                continue
+            start_i = i
+            while i < len(lines) and lines[i].startswith(_THINKING_PREFIX):
+                i += 1
+            end_i = i - 1  # 思考连续段最后一行
+            # 定稿时刻：下一个非思考行到达时间；无则用末行（进行中轮次）
+            end_t = line_times[i] if i < len(lines) else line_times[end_i]
+            elapsed = (end_t - line_times[start_i]) * 1000.0
+            if elapsed > 0:
+                out[start_i] = elapsed
+    except Exception:  # noqa: BLE001 — 装饰性数据，永不抛
+        return {}
+    return out
+
+
+def _render_status_children(
+    lines: list[str],
+    durations: dict[str, str] | None = None,
+    line_times: list[float] | None = None,
+) -> list[dict[str, Any]]:
     """status_lines → V1 风格面板子元素（解析失败行降级为原始 markdown）.
 
     v2.0.5 对齐 V1(1.8.1)：
@@ -68,17 +114,19 @@ def _render_status_children(lines: list[str]) -> list[dict[str, Any]]:
     - pending 行（尾部 ``...``）橙色 running；已执行行绿色 success
     - 预览文本取引号内命令摘要渲染为缩进灰字（不再是含引号原文）
 
-    v2.0.6 真实帧格式（hermes v0.21.x gateway progress 模板）：
-    - ``{emoji} {tool}`` + 围栏代码块段 → 官方图标标题 + 缩进灰字命令
-      （块内首行，剥网关截断尾 " ..."）；无 header 的裸块 → 仅灰字命令行
-    - 中文/英文动词行（``💻 运行命令 echo ...`` / ``🔍 搜索网页 · q``）→
-      动词反查工具名 → 图标 + 标题 + 缩进灰字参数
-    - 裸工具头行（``💻 terminal``）→ 橙色 running 标题（无命令可展示）
+    v2.0.8（用户验收：耗时缺失/思考格式破碎）：
+    - 工具行标题追加单工具耗时「Terminal (2.3 s)」（V1 state/tooluse.py 同款，
+      数据源 = 官方 post_tool_call 钩子 duration_ms，非伪造）
+    - 思考轮次标题追加「第 N 轮 · X.Xs」（V1 elements 同款，耗时 = 行时间戳
+      到下一工具行到达；line_times 缺失时省略不伪造）
+    - 思考正文整段渲染（多行吸附由 progline.split_progress_segments 保证），
+      超过 2000 字截断（V1 _REASONING_DISPLAY_LIMIT 同款）
     """
     children: list[dict[str, Any]] = []
     round_no = 0
     prev_thinking = False
-    for line in lines:
+    elapsed_by_line = _round_elapsed_ms(lines, list(line_times or []))
+    for idx, line in enumerate(lines):
         text = strip_dedup_suffix(line)
         if not text:
             continue
@@ -87,11 +135,13 @@ def _render_status_children(lines: list[str]) -> list[dict[str, Any]]:
             if not prev_thinking:
                 round_no += 1
                 children.append(
-                    _build_reasoning_round_title(round_no, 0, finalized=True)
+                    _build_reasoning_round_title(
+                        round_no, elapsed_by_line.get(idx, 0.0), finalized=True)
                 )
             prev_thinking = True
             body = clean or text[len(_THINKING_PREFIX):].strip() or text
-            detail = _build_tool_step_detail({"detail": body})
+            detail = _build_tool_step_detail(
+                {"detail": _truncate_reasoning_body(body)})
             if detail is not None:
                 children.append(detail)
             continue
@@ -99,8 +149,12 @@ def _render_status_children(lines: list[str]) -> list[dict[str, Any]]:
         if kind == "tool":
             pending = text.endswith("...")
             if tool:
+                title = tool_display_title(tool)
+                label = (durations or {}).get(strip_dedup_suffix(text))
+                if label and not pending:  # V1：已执行才带耗时（running 行无耗时可计）
+                    title = f"{title} ({label})"
                 children.append(_build_tool_step_title(
-                    {"title": tool_display_title(tool),
+                    {"title": title,
                      "status": "running" if pending else "success",
                      "icon": resolve_tool_icon(tool)},
                 ))
@@ -237,6 +291,8 @@ def build_streaming_card_v2(
     status_lines: list[str] | None = None,
     answer_text: str = "",
     panel_title: str = "",
+    status_durations: dict[str, str] | None = None,  # v2.0.8：工具行耗时表
+    status_times: list[float] | None = None,         # v2.0.8：行到达时间戳
 ) -> dict[str, Any]:
     """Card lifecycle (v1.0.2+):
 
@@ -245,6 +301,8 @@ def build_streaming_card_v2(
     ``answer_text``：已流出的 answer 缓冲——cardkit_update 全量更新时
     回填 answer 元素，防止工具帧刷新面板把已流内容重置为空。
     ``panel_title``：面板动态标题（V1: "agent loop · N 个工具"；空 → 静态 "agent loop"）。
+    ``status_durations``：单工具耗时表（行 → "2.3 s"）；``status_times``：
+    行到达时间戳（思考轮次耗时）。均 v2.0.8，缺失时对应装饰省略。
     """
     elements: list[dict] = []
 
@@ -253,7 +311,8 @@ def build_streaming_card_v2(
         panel = _build_unified_panel_placeholder(expanded=streaming_panel_expanded)
         _apply_panel_title(panel, panel_title)
         if status_lines:
-            panel["elements"] = _render_status_children(status_lines)
+            panel["elements"] = _render_status_children(
+                status_lines, durations=status_durations, line_times=status_times)
         elements.append(panel)
 
     # ── Streaming answer element ──

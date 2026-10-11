@@ -146,12 +146,15 @@ class _CardFactory:
         status_lines: list[str] | None = None,
         answer_text: str = "",
         panel_title: str = "",
+        status_durations: dict[str, str] | None = None,
+        status_times: list[float] | None = None,
     ) -> dict[str, Any]:
         from .cardkit.cards import build_streaming_card_v2
 
         params = self._params()
         return build_streaming_card_v2(
-            status_lines=status_lines, answer_text=answer_text, panel_title=panel_title, **params,
+            status_lines=status_lines, answer_text=answer_text, panel_title=panel_title,
+            status_durations=status_durations, status_times=status_times, **params,
         )
 
     def final(self, **_: Any) -> dict[str, Any]:
@@ -204,6 +207,13 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             bind_composer(self._composer)
         except Exception:  # 思考回灌是增强能力，失败不影响卡片主链（BLE 未启用，noqa 触发 RUF100）
             _logger.debug("feishu-streaming: reasoning feed bind skipped", exc_info=True)
+        # v2.0.8：post_tool_call 官方钩子 → 单工具耗时（「Terminal (2.3 s)」）落点注册
+        try:
+            from .tool_timing import bind_composer as _bind_tool_timing
+
+            _bind_tool_timing(self._composer)
+        except Exception:  # 耗时是增强能力，失败不影响卡片主链
+            _logger.debug("feishu-streaming: tool timing bind skipped", exc_info=True)
         _ACTIVE_ADAPTERS.add(self)
 
     # ── 初始化辅助 ──────────────────────────────────────────────────────
@@ -260,7 +270,8 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         if cls is not None and cls.channel == CH_PLAIN:
             # v2.0.1 上下文升格：裸进度气泡吸收进状态面板
             #（详见 _upgrade_plain_to_progress；条件不满足维持原分类）。
-            upgraded = _upgrade_plain_to_progress(self._composer, chat_id, content)
+            # v2.0.8：透传 metadata——非对话通知/notify 帧永不升格。
+            upgraded = _upgrade_plain_to_progress(self._composer, chat_id, content, metadata)
             if upgraded is not None:
                 cls = upgraded
                 _logger.debug("feishu-streaming: plain send upgraded to progress (progress lane)")
@@ -351,7 +362,9 @@ def _strip_internal(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
     return clean or None
 
 
-def _upgrade_plain_to_progress(composer: Any, chat_id: str, content: str) -> Any | None:
+def _upgrade_plain_to_progress(
+    composer: Any, chat_id: str, content: str, metadata: dict[str, Any] | None = None,
+) -> Any | None:
     """v2.0.1 上下文升格：裸 send → CH_PROGRESS（v2.0.4 起不再要求活跃卡片）.
 
     edit-transport 平台（feishu）的工具进度气泡首条是裸 send —— hermes 只给
@@ -377,11 +390,19 @@ def _upgrade_plain_to_progress(composer: Any, chat_id: str, content: str) -> Any
         from .composer.classify import (
             CH_PROGRESS,
             ClassifyResult,
+            _is_notice_text,
             is_progress_text,
             parse_progress_line,
         )
 
-        if not content or not is_progress_text(content):
+        meta = metadata or {}
+        # v2.0.8：notify/非对话通知（💾 Self-improvement review 等）永不升格 ——
+        # 这类帧在建卡条件不成立时会新建跑马灯卡（用户验收问题4 根因家族）。
+        if meta.get("notify") or meta.get("non_conversational"):
+            return None
+        if not content or _is_notice_text(content):
+            return None
+        if not is_progress_text(content):
             return None
         # v2.0.4（s70 回流）：不再要求"必须有活跃卡片"——工具帧常早于答案首帧
         #（卡片尚未建立），升格后由 engine._on_progress 暂存并立即建卡。非 turn
@@ -484,6 +505,15 @@ def register(ctx: Any) -> None:
         reasoning_feed.register_hooks(ctx)
     except Exception:
         _logger.debug("feishu-streaming: reasoning feed registration skipped", exc_info=True)
+
+    # v2.0.8：post_tool_call 官方钩子（单工具耗时 →「Terminal (2.3 s)」）——
+    # 钩子回调内部自兑底，注册失败仅降级为「无耗时」。
+    try:
+        from . import tool_timing
+
+        tool_timing.register_hooks(ctx)
+    except Exception:
+        _logger.debug("feishu-streaming: tool timing registration skipped", exc_info=True)
 
 
 def _prewarm_config() -> None:

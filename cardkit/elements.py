@@ -41,6 +41,7 @@ __all__ = [
     '_render_footer_field',
     '_compact',
     '_format_elapsed',
+    '_format_duration_label',
     '_build_unified_panel_placeholder',
     'build_unified_panel',
     'build_panel_header',
@@ -915,3 +916,16 @@ def _compact(n: int) -> str:
 def _format_elapsed(ms: float) -> str:
     seconds = ms / 1000
     return f"{seconds:.1f}s" if seconds < 60 else f"{int(seconds // 60)}m {int(seconds % 60)}s"
+
+
+def _format_duration_label(ms: float) -> str:
+    """单工具耗时标签（v2.0.8，V1 state/tooluse.py 同款）："820 ms" / "2.3 s".
+
+    V1 原文：``f"{ms:.0f} ms" if ms < 1000 else f"{(ms / 1000):.1f} s"``。
+    注意 V1 标签含空格（"2.3 s"），渲染进标题时外层再包一层括号。
+    """
+    try:
+        ms = max(0.0, float(ms))
+    except Exception:  # noqa: BLE001 — 装饰性数据，永不抛
+        return ""
+    return f"{ms:.0f} ms" if ms < 1000 else f"{(ms / 1000):.1f} s"

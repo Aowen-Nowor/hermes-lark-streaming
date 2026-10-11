@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.0.8 (2026-10-11)
+
+**流式面板质量四连修：多行思考吸附 / 答案复读过滤 / 单工具耗时 / 非对话通知永不建卡。**
+
+用户验收（2026-10-11）四问题：①「思考部分只有前面格式对，后面格式不对」②
+「"SpaceX买" 不知道是什么」③「每一条都没有耗时记录，而插件都有的」④「Self-
+improvement review 新起一个卡片，跑马灯一直在」。逐项根因与修复：
+
+| 问题 | 根因 | 修复 |
+|---|---|---|
+| ① 多行思考后段格式乱 | reasoning_feed / 网关中继的 `💬 {text}` 自带换行，`split_progress_segments` 按行直拆把首行后的内容打碎成独立 raw 行（仅首行保留思考样式） | `progline.split_progress_segments` 多行思考吸附：💬 行与其后非 emoji/非围栏连续行合成单一逻辑段；思考正文整段渲染（超 2000 字截断，V1 `_REASONING_DISPLAY_LIMIT` 同款）；`reasoning_feed` 冻结上限 600→2000（600 会把推理正文腰斩） |
+| ② "SpaceX买" 碎片 | 模型可见间歇文本（commentary）经 CH_INTERIM 直 append 成无样式裸行；且网关 `_relay_thinking` 把**每次响应**（含最终答案）的可见正文前 500 字中继成 💬 行 | 非 emoji 播报归入思考轮次（V1 on_thinking 语义，灰色 notation + 合并幂等）；`_is_answer_duplicate` 前缀过滤最终答案中继复读（V1 从不把 final answer 展示进面板；≥40 字符才判，隐藏推理绝不误伤） |
+| ③ 无每条耗时 | V2 帧协议无工具事件；V1 由工具事件实测 | **新增 `tool_timing.py`**：官方 `post_tool_call` 生命周期钩子（payload 自带 `duration_ms`，`model_tools.py::_emit_post_tool_call_hook`）→ 线程安全回灌 → 工具标题「Terminal (2.3 s)」（V1 `_format_duration_label` 同款）；钩子先于行时入 pending 队列由行追加认领。思考轮次标题「第 N 轮 · X.Xs」：行到达时间戳对账（`_reconcile_line_times`，增长取代继承起点不重置），轮次在下一工具行到达时定稿 |
+| ④ 💾 通知新卡 + 跑马灯不止 | 后台通知（`_make_bg_review_callbacks` → `_send_status_text`，metadata 仅 `_interim_send`；`non_conversational` 标记仅 Discord 生效）带 💾 emoji → 命中进度启发式 → 卡片定稿后仍触发 `_on_progress` 建新卡（streaming_mode + spinner，永无 finalize） | `classify` 官方非对话通知清单（对齐内置 Discord 适配器 `_DISCORD_NONCONVERSATIONAL_*` 正则子集：💾 Self-improvement review / ⏳ Working / Hermes update / Gateway restart）→ CH_INTERIM：活跃卡并入面板（V1 `defer_background_review` 语义）/ 无卡走原生文本；`_upgrade_plain_to_progress` 增加 metadata 守卫（notify/non_conversational/通知文本永不升格） |
+
+套件 712/712（新增 32 用例）；ruff 新代码零新增告警。
+
 ## v2.0.7 (2026-10-11)
 
 **思考行修复：DeepSeek reasoning 隐藏流 → 面板「第 N 轮」思考记录（零 monkey-patch）。**

@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,6 +41,30 @@ CH_PROGRESS = "progress"  # 工具进度行 / thinking 气泡（progress lane）
 CH_INTERIM = "interim"    # interim 播报（非工具非思考的中途文本）
 CH_FINAL = "final"        # turn 定稿
 CH_PLAIN = "plain"        # 普通消息（cron / 后台 / 无标记发送）→ 原生路径
+
+
+# ── v2.0.8 非对话通知识别（用户验收「Self-improvement review 新卡跑马灯不止」）──
+# hermes 的后台通知（background_review / 长任务心跳 / 更新通告）经
+# _send_status_text 投递，metadata 只带 _interim_send（_non_conversational
+# 标记仅 Discord 生效，见 gateway/run.py）。这类文本带 emoji → 命中进度启发式
+# → 卡片定稿后仍触发 _on_progress 建新卡（streaming_mode + spinner）→ 永无
+# finalize → 跑马灯不止。官方先例：内置 Discord 适配器同清单正则抑制
+# （plugins/platforms/discord/adapter.py _DISCORD_NONCONVERSATIONAL_*）。
+# V2 语义对齐 V1 defer_background_review：活跃卡 → 并入面板；无卡 → 原生文本。
+_NOTICE_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*💾\s*Self-improvement review:\s+\S", re.IGNORECASE),
+    re.compile(r"^\s*⏳\s+Working\s+—\s+\d+\s+min(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^\s*(?:✅|❌)\s+Hermes update\s+(?:finished|failed|timed out)", re.IGNORECASE),
+    re.compile(r"^\s*♻️?\s+Gateway\s+(?:restarted successfully|online\b)", re.IGNORECASE),
+)
+
+
+def _is_notice_text(content: str) -> bool:
+    """hermes 后台非对话通知（💾 Self-improvement review 等）→ 永不进卡片通道."""
+    text = (content or "").strip()
+    if not text:
+        return False
+    return any(rx.match(text) for rx in _NOTICE_RES)
 
 
 @dataclass
@@ -103,6 +128,11 @@ def classify_send(
 
         # 2) mid-turn 状态帧（progress 气泡首条 / interim 播报共用 _interim_send 标记）
         if interim:
+            # v2.0.8：后台非对话通知（💾 Self-improvement review 等）→ interim
+            # 语义（活跃卡并入面板 / 无卡原生文本），永不触发建卡（跑马灯根因）。
+            if _is_notice_text(content):
+                return ClassifyResult(CH_INTERIM, kind="advisory", raw_content=content,
+                                      meta=_strip_internal_meta(meta))
             if _is_progress_text(content):
                 kind, tool, clean = parse_progress_line(content)
                 return ClassifyResult(CH_PROGRESS, kind=kind, tool_name=tool, thinking_text=clean,

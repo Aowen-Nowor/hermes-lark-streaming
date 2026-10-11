@@ -272,32 +272,43 @@ def split_progress_segments(raw: str) -> list[str]:
     （``` 独立成行 → 面板渲染破碎）。本函数保证：
 
     - 围栏块（```...```）整体成段，且**向前吸附紧邻的单行 header**
-      （``💻 terminal`` + 块 → 一个段，合并/渲染语义完整）
+      （``💻 terminal`` + 块 → 一个段，合并/渲染语义完整；💬 思考行
+      不被吸附——思考文本是面板独立步骤，不能变回代码块 header）
     - 无 header 的裸围栏块（连续 terminal 调用）独立成段
     - 未闭合围栏按到文本末尾处理（部分帧也渲染，不丢内容）
     - 普通行逐行成段；空行丢弃
+
+    v2.0.8 多行思考吸附（用户验收 2026-10-11「思考后面格式不对」根因）：
+    reasoning_feed / 网关中继的 ``💬 {text}`` 思考文本自带换行（推理正文/
+    新闻草稿列表），按行直拆会把首行后的内容打碎成独立 raw 行（只有首行
+    保留思考样式）。本函数把 💬 行与其后的**非 emoji 非围栏连续行**吸附为
+    一个逻辑段（思考块是多行逻辑单元），直到下一个 emoji 行/围栏/结尾。
     """
     if not raw or not raw.strip():
         return []
     segments: list[str] = []
     buf: list[str] = []
     in_fence = False
+    in_thinking = False
     for line in raw.splitlines():
         stripped = line.strip()
         if in_fence:
             buf.append(stripped)
             if stripped.startswith("```"):
                 in_fence = False
+                in_thinking = False
                 segments.append("\n".join(buf))
                 buf = []
             continue
         if stripped.startswith("```"):
             in_fence = True
+            in_thinking = False
             # 向前吸附紧邻单行工具头（emoji 开头：tool_head/pending/preview/动词行），
-            # 块与头一体；普通文本行不吸附（避免吞掉 advisory 内容）
+            # 块与头一体；普通文本行与 💬 思考行不吸附（思考块独立成段）
             if segments:
                 prev = segments[-1]
-                if "\n" not in prev and not prev.startswith("```") and _EMOJI_RE.match(prev):
+                if ("\n" not in prev and not prev.startswith("```")
+                        and not prev.startswith(_THINKING_PREFIX) and _EMOJI_RE.match(prev)):
                     buf.append(segments.pop())
             buf.append(stripped)
             continue
@@ -305,8 +316,22 @@ def split_progress_segments(raw: str) -> list[str]:
             # 未闭合围栏中遇到的非围栏行不应出现（防御）：先落盘已开段
             segments.append("\n".join(buf))
             buf = []
-        if stripped:
-            segments.append(stripped)
+        if not stripped:
+            continue  # 空行丢弃（思考段内段落分隔坍缩，正文语义不变）
+        if stripped.startswith(_THINKING_PREFIX):
+            # 思考行开启/延续思考块：同一快照内的同块续行不再新开段
+            if in_thinking and segments:
+                segments[-1] = f"{segments[-1]}\n{stripped}"
+            else:
+                segments.append(stripped)
+                in_thinking = True
+            continue
+        if in_thinking and not _EMOJI_RE.match(stripped):
+            # 思考块续行（非 emoji 普通文本）→ 吸附进当前思考段
+            segments[-1] = f"{segments[-1]}\n{stripped}"
+            continue
+        in_thinking = False
+        segments.append(stripped)
     if buf:
         segments.append("\n".join(buf))
     return segments

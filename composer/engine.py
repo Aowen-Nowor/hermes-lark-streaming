@@ -21,6 +21,7 @@ from typing import Any
 
 from ..cardkit.progline import split_progress_segments, strip_dedup_suffix
 from .classify import (
+    _EMOJI_RE,
     _THINKING_PREFIX,
     CH_FINAL,
     CH_INTERIM,
@@ -55,6 +56,14 @@ class CardTurnState:
     card_message_id: str = ""          # 卡片作为飞书消息的 id
     answer_text: str = ""              # answer 全量缓冲（hermes 帧是全量语义）
     status_lines: list[str] = field(default_factory=list)   # 工具/思考/interim 状态行
+    # v2.0.8：与 status_lines 对齐的到达时间戳（monotonic）——
+    # 思考轮次标题「第 N 轮 · X.Xs」的耗时数据源（V1 对齐）。
+    line_times: list[float] = field(default_factory=list)
+    # v2.0.8：单工具耗时（V1 对齐「Terminal (2.3s)」）。key=状态行原文
+    # （merge 后已剥 (×N)），value=格式化标签；post_tool_call 官方钩子数据。
+    tool_durations: dict[str, str] = field(default_factory=dict)
+    # 钩子先于文本帧到达时的排队区（tool_name → 待认领标签，cap 4）
+    pending_tool_durations: dict[str, list[str]] = field(default_factory=dict)
     seq: int = 0                       # CardKit sequence 递增
     created_at: float = field(default_factory=time.monotonic)
     # v2.0.5：turn 起点（首个进度帧/首帧到达），驱动面板标题「· 总耗时」。
@@ -171,6 +180,74 @@ class FrameComposer:
     def _spawn_progress(self, chat_id: str, raw_line: str) -> None:
         asyncio.ensure_future(self._feed_progress(chat_id, raw_line))
 
+    # ── 工具耗时回灌（v2.0.8，post_tool_call 官方钩子线程 → 事件循环）─────
+    def submit_tool_duration_from_thread(self, chat_id: str, tool_name: str, duration_ms: float) -> bool:
+        """线程安全地把单工具耗时（官方钩子 duration_ms）挂到面板工具行.
+
+        V1 的「Terminal (2.3s)」由工具事件实测；V2 零补丁架构下数据源是
+        hermes 官方 ``post_tool_call`` 钩子（payload 自带 duration_ms）。
+        已定稿/已降级丢弃；行未到达时入 pending 队列由 _on_progress 认领。
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return False
+        if not tool_name or duration_ms <= 0:
+            return False
+        st = self._states.get(chat_id)
+        if st is not None and (st.finalized or st.degraded):
+            return False
+        try:
+            loop.call_soon_threadsafe(
+                self._spawn_tool_duration, chat_id, str(tool_name), float(duration_ms))
+            return True
+        except RuntimeError:
+            return False
+
+    def _spawn_tool_duration(self, chat_id: str, tool_name: str, duration_ms: float) -> None:
+        asyncio.ensure_future(self._feed_tool_duration(chat_id, tool_name, duration_ms))
+
+    async def _feed_tool_duration(self, chat_id: str, tool_name: str, duration_ms: float) -> None:
+        try:
+            st = self._states.get(chat_id)
+            if st is None or st.finalized or st.degraded:
+                return
+            from ..cardkit.elements import _format_duration_label
+
+            label = _format_duration_label(duration_ms)
+            for i in range(len(st.status_lines) - 1, -1, -1):
+                line = st.status_lines[i]
+                key = strip_dedup_suffix(line)
+                if key in st.tool_durations:
+                    continue
+                kind, tool, _c = parse_progress_line(line)
+                if kind == "tool" and tool == tool_name:
+                    st.tool_durations[key] = label
+                    await self._patch_status(st)
+                    return
+            # 行未到达（钩子先于文本帧 drain）：入队等该工具下一行认领
+            queue = st.pending_tool_durations.setdefault(tool_name, [])
+            if len(queue) < 4:
+                queue.append(label)
+        except Exception:  # 耗时是装饰性数据，绝不影响主流程
+            _logger.debug("composer: tool duration feed failed chat=%s", chat_id, exc_info=True)
+
+    def _attach_pending_durations(self, st: CardTurnState, old: list[str], new: list[str]) -> None:
+        """新追加的工具行认领 pending 队列里的耗时（钩子先到场景）."""
+        if not st.pending_tool_durations:
+            return
+        old_set = set(old)
+        for text in new:
+            if text in old_set:
+                continue
+            kind, tool, _c = parse_progress_line(text)
+            if kind != "tool" or not tool:
+                continue
+            queue = st.pending_tool_durations.get(tool)
+            if queue:
+                st.tool_durations[strip_dedup_suffix(text)] = queue.pop(0)
+                if not queue:
+                    st.pending_tool_durations.pop(tool, None)
+
     async def _feed_progress(self, chat_id: str, raw_line: str) -> None:
         cls = ClassifyResult(CH_PROGRESS, kind="thinking", raw_content=raw_line)
         try:
@@ -232,6 +309,8 @@ class FrameComposer:
         card = self._build_card(
             status_lines=pending or None,
             panel_title=_panel_title(pending, elapsed_ms=_turn_elapsed_ms(st)),
+            status_durations=dict(st.tool_durations),
+            status_times=[time.monotonic()] * len(pending),
         )
         card_id = await client.cardkit_create(card)
         message_id = await client.send_card_by_id_to_chat(chat_id, card_id)
@@ -248,6 +327,7 @@ class FrameComposer:
         st.finalized = False
         st.degraded = False
         st.status_lines = pending
+        st.line_times = [time.monotonic()] * len(pending)
         st.pending_status.clear()
         self._states[chat_id] = st
         self._by_message[st.card_message_id] = chat_id
@@ -309,11 +389,20 @@ class FrameComposer:
         # v2.0.6：accumulate 快照按逻辑段拆分（围栏代码块与工具头一体），
         # 直拆 splitlines 会把真实 terminal 块拆成破碎的 ``` 行（E2E ≠ 正式对话根因）。
         lines = split_progress_segments(raw) or ([raw] if raw else [])
+        # v2.0.8：过滤「最终答案复读」——网关 _relay_thinking 把每次响应的可见
+        # 正文前 500 字都中继成 💬 行（最终答案也不例外）。答案已在 answer 区域
+        # 完整呈现；V1 从不把 final answer 展示进面板（走 stream 通道），对齐。
+        lines = [ln for ln in lines if not _is_answer_duplicate(ln, st.answer_text)]
+        if not lines:
+            return SendResult(success=True)
         merged = _merge_progress_lines(st.status_lines, lines)
         if merged is None:
             # 无新增/无变化：不触发 cardkit_update（API 经济性；V2.0.0 同语义）
             return SendResult(success=True)
+        new_times = _reconcile_line_times(st.status_lines, st.line_times, merged)
+        self._attach_pending_durations(st, st.status_lines, merged)
         st.status_lines = merged[-12:]
+        st.line_times = new_times[-12:]
         await self._patch_status(st)
         # 同上：不回传 message_id，网关进度气泡循环会继续 _send_progress_text
         # （全量快照）而非 edit —— 面板更新由本引擎的 cardkit_update 驱动。
@@ -321,10 +410,21 @@ class FrameComposer:
 
     async def _on_interim(self, chat_id: str, content: str, cls: ClassifyResult) -> SendResult | None:
         st = self.active_state(chat_id)
-        if st is None:
-            return None  # 无卡片：原生小气泡
-        st.status_lines.append(content.strip())
-        st.status_lines = st.status_lines[-12:]
+        text = (content or "").strip()
+        if st is None or not text:
+            return None  # 无卡片：原生（含 💾/⏳ 后台通知——永不建卡，跑马灯根因修复）
+        # v2.0.8：非 emoji 播报（模型可见间歇文本 commentary，如「SpaceX买」碎片）
+        # 按 V1 语义归入思考轮次（灰色 notation 行 + 合并/幂等/增长取代）；
+        # emoji 通报（⏳/💾 等）保持原样独立行。
+        if not _EMOJI_RE.match(text):
+            text = f"{_THINKING_PREFIX} {text}"
+        lines = split_progress_segments(text) or ([text] if text else [])
+        merged = _merge_progress_lines(st.status_lines, lines)
+        if merged is None:
+            return SendResult(success=True, message_id=st.card_message_id)
+        new_times = _reconcile_line_times(st.status_lines, st.line_times, merged)
+        st.status_lines = merged[-12:]
+        st.line_times = new_times[-12:]
         await self._patch_status(st)
         return SendResult(success=True, message_id=st.card_message_id)
 
@@ -342,6 +442,8 @@ class FrameComposer:
             status_lines=st.status_lines,
             answer_text=st.answer_text,   # 防全量更新把已流 answer 重置为空
             panel_title=_panel_title(st.status_lines, elapsed_ms=_turn_elapsed_ms(st)),
+            status_durations=dict(st.tool_durations),
+            status_times=list(st.line_times),
         )
         st.seq += 1
         st.last_activity = time.monotonic()
@@ -469,6 +571,76 @@ def _merge_progress_lines(existing: list[str], incoming: list[str]) -> list[str]
         merged.append(text)
         changed = True
     return merged if changed else None
+
+
+def _is_answer_duplicate(line: str, answer_text: str) -> bool:
+    """💬 思考行是否为已流答案的复读（v2.0.8）.
+
+    网关 ``_relay_thinking``（agent/turn_response_intake.py）把每次模型响应的
+    **可见正文**前 500 字都中继成 ``💬 {text}`` 进度行——最终答案也不例外。
+    答案已完整出现在卡片 answer 区域；V1 从不把 final answer 展示进面板
+    （final 走 stream 通道），本过滤器对齐该语义。
+
+    仅做前缀匹配（归一化空白后取前 60 字符、≥40 才判）：隐藏推理（reasoning
+    内容与答案正文不同源）绝不误伤；碎片（<40 字符）保留。永不抛异常。
+    """
+    try:
+        text = (line or "").strip().removeprefix(_THINKING_PREFIX).strip()
+        body = " ".join(text.split())[:60]
+        if len(body) < 40:
+            return False
+        answer = " ".join((answer_text or "").split())
+        if not answer:
+            return False
+        return answer[:len(body)] == body
+    except Exception:  # noqa: BLE001 — 过滤纯装饰，失败保留原行
+        return False
+
+
+def _reconcile_line_times(
+    old: list[str], old_times: list[float], new: list[str],
+) -> list[float]:
+    """合并后的新行列表 → 对齐的到达时间戳（v2.0.8，思考轮次耗时数据源）.
+
+    规则（对齐 _merge_progress_lines 的三种变更形态）：
+    - 同位置同文本 → 继承原时间（未变化）
+    - 思考行增长原地取代 → 继承被取代行的起点（轮次耗时从轮次首行起算，
+      不随每次 flush 重置）
+    - 其余（新增/移动）→ now
+
+    永不抛异常；输出长度恒等于 ``len(new)``。
+    """
+    try:
+        now = time.monotonic()
+        if not new:
+            return []
+        times: list[float] = []
+        for i, text in enumerate(new):
+            if i < len(old) and i < len(old_times) and old[i] == text:
+                times.append(old_times[i])
+                continue
+            inherited: float | None = None
+            # 思考增长取代：向前找同轮前缀行继承起点（与合并器同款回走语义）
+            if text.startswith(_THINKING_PREFIX):
+                body = text[len(_THINKING_PREFIX):].strip()
+                for j in range(min(len(old), len(old_times)) - 1, -1, -1):
+                    prev = old[j]
+                    if not prev.startswith(_THINKING_PREFIX):
+                        break  # 思考轮连续段结束（合并器同款边界）
+                    old_body = prev[len(_THINKING_PREFIX):].strip()
+                    if body.startswith(old_body) or old_body.startswith(body):
+                        inherited = old_times[j]
+                        break
+            if inherited is None:
+                for j in range(min(len(old), len(old_times))):
+                    if old[j] == text:
+                        inherited = old_times[j]
+                        break
+            times.append(inherited if inherited is not None else now)
+        return times
+    except Exception:  # noqa: BLE001 — 耗时纯装饰，失败退化为全 now
+        now = time.monotonic()
+        return [now] * len(new)
 
 
 def _panel_title(status_lines: list[str], *, elapsed_ms: float = 0.0) -> str:
