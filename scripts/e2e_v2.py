@@ -372,6 +372,8 @@ async def run(selected: list[str]) -> int:
                 await scenario_interim(composer, client, chat_id)
             elif name == "full":
                 await scenario_full(composer, client, chat_id)
+            elif name == "burst":
+                await scenario_burst(composer, client, chat_id)
             elif name == "clarify":
                 await scenario_clarify(composer, client, chat_id)
             elif name == "plain":
