@@ -6,8 +6,13 @@
    create → send_card_by_id → stream_element（answer 打字机）→ update（状态区）→ close_streaming
 3. 降级保障：任何卡片 API 失败 → per-chat 降级旗标 → 后续帧全部走原生路径，**永不丢消息**
 
-线程/并发模型：全部方法在适配器的事件循环内串行调用（hermes 对单 chat 的出站
-天然串行）；跨 chat 状态互不共享。
+线程/并发模型：v2.0.11 起 handle_send/handle_edit 按 chat 串行化（per-chat
+asyncio.Lock）。历史假设“hermes 对单 chat 的出站天然串行”不成立——reasoning
+回灌与工具耗时经 ``ensure_future``/``call_soon_threadsafe`` 火忘任务投递，网关
+多 lane（进度气泡/思考中继/status 通报/流式消费者）在回合事件密集期亚秒级齐发；
+建卡窗口（cardkit_create + send_card_by_id ≈ 0.5-1s 网络挂起）内并发帧各自看到
+“无活跃卡”而重复建卡（2026-10-12 14:30 “几点了”一轮 3 卡；10-11 23:13 同族
+孤儿卡）。锁内 active_state 复查天然提供双重检查语义；跨 chat 状态互不共享。
 """
 
 from __future__ import annotations
@@ -97,6 +102,10 @@ class FrameComposer:
         self._config = config
         self._states: dict[str, CardTurnState] = {}
         self._by_message: dict[str, str] = {}  # card_message_id -> chat_id
+        # v2.0.11 P0：per-chat 帧处理串行化锁（见模块头并发模型说明）。
+        # 锁随 chat 惰性创建；只在 clear() 全量清空，forget() 不清——在途持有者
+        # 与后来者必须共用同一把锁才有互斥意义（chat 级锁对象内存可忽略）。
+        self._chat_locks: dict[str, asyncio.Lock] = {}
         # v2.0.7：reasoning 流回灌的线程安全入口需要事件循环引用 ——
         # 构造期若已在 loop 内则直接捕获，否则首个 async 帧入口补捕获。
         try:
@@ -138,6 +147,12 @@ class FrameComposer:
             if st and st.card_message_id:
                 self._by_message.pop(st.card_message_id, None)
 
+    def _chat_lock(self, chat_id: str) -> asyncio.Lock:
+        lock = self._chat_locks.get(chat_id)
+        if lock is None:
+            lock = self._chat_locks[chat_id] = asyncio.Lock()
+        return lock
+
     def active_state(self, chat_id: str) -> CardTurnState | None:
         st = self._states.get(chat_id)
         # card_id 为空 = 建卡前的 progress 暂存占位（非活跃卡片）
@@ -161,20 +176,23 @@ class FrameComposer:
         cls: ClassifyResult,
     ) -> SendResult | None:
         self._loop = asyncio.get_running_loop()  # v2.0.7：供线程安全回灌入口使用
-        self._gc()
-        try:
-            if cls.channel == CH_STREAM:
-                return await self._on_stream(chat_id, content)
-            if cls.channel == CH_PROGRESS:
-                return await self._on_progress(chat_id, cls)
-            if cls.channel == CH_INTERIM:
-                return await self._on_interim(chat_id, content, cls)
-            if cls.channel == CH_FINAL:
-                return await self._on_final_send(chat_id, content)
-            return None  # CH_PLAIN → 原生
-        except Exception as exc:  # noqa: BLE001 — 降级红线：任何失败走原生
-            self._degrade(chat_id, "send", exc)
-            return None
+        # v2.0.11 P0：同 chat 帧串行化——建卡/定稿的挂起窗口内，后续帧在锁上
+        # 排队而非并发进建卡分支；锁内 active_state 复查即双重检查。
+        async with self._chat_lock(chat_id):
+            self._gc()
+            try:
+                if cls.channel == CH_STREAM:
+                    return await self._on_stream(chat_id, content)
+                if cls.channel == CH_PROGRESS:
+                    return await self._on_progress(chat_id, cls)
+                if cls.channel == CH_INTERIM:
+                    return await self._on_interim(chat_id, content, cls)
+                if cls.channel == CH_FINAL:
+                    return await self._on_final_send(chat_id, content)
+                return None  # CH_PLAIN → 原生
+            except Exception as exc:  # noqa: BLE001 — 降级红线：任何失败走原生
+                self._degrade(chat_id, "send", exc)
+                return None
 
     # ── reasoning 流回灌（v2.0.7，插件 stream-hook 守护线程 → 事件循环）───
     def submit_progress_from_thread(
@@ -338,17 +356,21 @@ class FrameComposer:
         finalize: bool,
         cls: ClassifyResult,
     ) -> SendResult | None:
-        self._gc()
-        try:
-            st = self.state_by_message(message_id)
-            if st is None or st.degraded:
+        # v2.0.11 P0：edit 与 send 共用 per-chat 锁——定稿与下一回合建卡复用
+        # 同一状态对象，无锁并发时 finalize_card 的挂起段可能与 _create_card 的
+        # 状态重置交错（footer 落错卡）。
+        async with self._chat_lock(chat_id):
+            self._gc()
+            try:
+                st = self.state_by_message(message_id)
+                if st is None or st.degraded:
+                    return None
+                if finalize:
+                    return await self._finalize(st, content)
+                return await self._patch_answer(st, content)
+            except Exception as exc:  # noqa: BLE001 — 降级红线：任何失败走原生
+                self._degrade(chat_id, "edit", exc)
                 return None
-            if finalize:
-                return await self._finalize(st, content)
-            return await self._patch_answer(st, content)
-        except Exception as exc:  # noqa: BLE001 — 降级红线：任何失败走原生
-            self._degrade(chat_id, "edit", exc)
-            return None
 
     # ── 通道实现 ────────────────────────────────────────────────────────
     async def _on_stream(self, chat_id: str, content: str) -> SendResult | None:
@@ -587,6 +609,7 @@ class FrameComposer:
     def clear(self) -> None:
         self._states.clear()
         self._by_message.clear()
+        self._chat_locks.clear()
 
     # ── 页脚配置桥（插件 Config 惰性属性；异常回退 finalize 默认） ──────
     def _footer_fields(self) -> list[list[str]] | None:

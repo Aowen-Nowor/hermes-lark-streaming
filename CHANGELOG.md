@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.0.11 (2026-10-12)
+
+**一轮对话生成多张卡片（孤儿卡）——per-chat 帧串行化（用户飞书验收反馈：「一个问题生成了多张卡片」）。**
+
+事故链（2026-10-12 gateway21 生产日志 + 用户截图逐卡比对）：用户发送「几点了」→ 主模型 deepseek-v4-flash 流式 429003 中断（429 in 1.5s，流未交付）→ 官方 fallback 0.04s 内切换 sensenova-6.8-flash-lite → 工具回合完成瞬间（response #1 intake + 工具行 + 思考中继 + status 通报）多 lane 亚秒级齐发 6 帧 → `_on_progress` early-create 路径（active_state 检查 → cardkit_create + send_card_by_id ≈0.5-1s 网络挂起 → 注册状态）的挂起窗口内，后续并发帧各自看到「无活跃卡」→ 1.2 秒内连建 3 张卡（seeds 1/1/2 行，日志 `composer: card created` ×3），仅末张被定稿，前两张成为无页脚孤儿卡。10-11 23:13 已有同族先例（两卡相隔 145ms，其一为 0 行空面板孤儿卡）。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| P0 | 一轮对话生成多张卡片：burst 帧在建卡窗口内各自建卡，仅末张存活，其余成无页脚孤儿卡（2026-10-12 14:30「几点了」3 卡；10-11 23:13 同族） | engine 模块头假设「hermes 对单 chat 的出站天然串行」不成立——reasoning 回灌/工具耗时经 `ensure_future`/`call_soon_threadsafe` 火忘任务投递，网关多 lane（进度气泡/思考中继/status 通报/流式消费者）在回合事件密集期亚秒级齐发；`_on_progress`/`_on_stream` 的「检查活跃状态 → 建卡 → 注册」跨 await 无互斥（check-then-act 竞态） | FrameComposer 新增 **per-chat `asyncio.Lock`**：`handle_send`/`handle_edit` 全帧路径串行化——建卡窗口内后续帧在锁上排队，锁内 `active_state` 复查即双重检查；首帧建卡、后续帧合并进同一卡（或暂存随建卡并入面板种子）。锁随 chat 惰性创建、仅 `clear()` 全量清空（forget 不清，保证在途持有者与后来者共用同一把锁）。降级红线/幂等定稿/自愈语义不变 |
+| P0 伴生 | 定稿与下一回合建卡共用同一状态对象，无锁并发时 `finalize_card` 挂起段可与 `_create_card` 状态重置交错（页脚落错卡风险） | 同上——`handle_edit` 未与 `handle_send` 互斥 | `handle_edit` 接入同一 per-chat 锁 |
+| 文档 | 仓库层级与 README 老化：API.md 游离根目录、CHANGELOG 藏于 docs/、无引用头像资产、README 死链（docs/DESIGN.md 已于 v2.0.9 删除）、缺 v2.0.6-v2.0.11 特性记载、安装路径与真实部署不符、无徽章无仓库结构说明 | 多版本迭代只增不梳 | `API.md → docs/`、`docs/CHANGELOG.md → CHANGELOG.md`（开源惯例位）、删除无引用 `assets/avatars/`、README 全量重写（徽章/实景主图/架构图/真实配置键/仓库结构及「根=包」加载器契约说明/测试与 E2E 指引）；`create_release.py` 的 CHANGELOG 链接同步 |
+
+**审计方法**: gateway21.log + agent.log 全帧取证（3 条 `card created` / 1 条 `card finalized`，无 degrade/finalize/建卡失败日志夹于其间 → 并发重叠排除法）→ engine/adapter/reasoning_feed 源码逐行核对（fire-and-forget 任务投递点清单）→ 10-11 23:13 历史同族事故回溯 → 竞态确定性复现测试（慢速 mock client 放大建卡窗口：无锁 6 帧 = 6 卡，有锁恒 1 卡，7 用例）→ 全量 530/530 → 真飞书 e2e_v2 新增 `burst` 场景（并发帧 gather 投递，断言单卡片 + 全行并入）。
+
+**已知限制**:
+- 已产生的孤儿卡（历史事故遗留）不自动删除——删除用户可见历史的风险大于留置；新竞态已从根因闭合
+- per-chat 锁使同 chat 帧严格排队：建卡窗口（≈0.5-1s）内的帧延迟到达属预期（原语义即串行合并，无功能损失）
+- `submit_tool_duration_from_thread`（装饰性耗时）不经锁、自带终态守卫，极端并发下耗时标签可能缺失（诚实不伪造，CHANGELOG v2.0.9 P2-8 已知限制同族）
+
+---
+
 ## v2.0.10 (2026-10-12)
 
 **面板通报行官方图标统一 + status 通道语义层（用户飞书验收反馈：限流提示行样式不一致且用 emoji，违反"面板一律飞书官方图标"标准）。**

@@ -103,7 +103,7 @@ def build_release_body(tag: str, owner: str, repo: str) -> str:
     不再把 CHANGELOG.md 全部内容塞进 Release body（太长）。
     用户点击链接即可查看完整更新日志。
     """
-    changelog_url = f"https://gitee.com/{owner}/{repo}/raw/github_sync/docs/CHANGELOG.md"
+    changelog_url = f"https://gitee.com/{owner}/{repo}/raw/github_sync/CHANGELOG.md"
     return f"完整更新日志：{changelog_url}"
 
 

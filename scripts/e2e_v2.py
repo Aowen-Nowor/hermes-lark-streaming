@@ -10,6 +10,7 @@ close_streaming / 澄清卡），在真实聊天里可视化验证：
     progress — 工具/思考状态面板：建卡前暂存并入 + 建卡后增量更新 + 去重
     interim  — 建卡前 interim 暂存 / 建卡后 interim 状态行
     full     — 仿真实 turn 全时序（progress → 建卡 → 面板 → 流式 → 定稿）
+    burst    — 并发帧 burst → 单卡片（v2.0.11 per-chat 串行化真飞书验证）
     clarify  — 澄清交互卡片（select 分支，真实可点）
     plain    — 原生路径（无标记 send → 原生文本，非卡片）
 
@@ -272,6 +273,48 @@ async def scenario_full(composer: FrameComposer, client: FeishuClient, chat_id: 
     check("⑨ 定稿（页脚 + 关流式）", bool(r and r.success))
 
 
+async def scenario_burst(composer: FrameComposer, client: FeishuClient, chat_id: str) -> None:
+    """v2.0.11：并发帧 burst —— per-chat 串行化锁的真飞书验证.
+
+    复现 2026-10-12 14:30 生产事故的帧形态（工具完成后思考中继/工具行/
+    answer 首帧多 lane 齐发）：全部帧 asyncio.gather 真并发投递。无锁时建卡
+    窗口（真飞书 create+send ≈0.5-1s）内每帧各建一张卡（一轮 3 卡事故）；
+    有锁时恒 1 张，全部行并入同一张卡。
+    """
+    print("== 场景 burst：并发帧 → 单卡片（v2.0.11 串行化）==")
+    frames = [
+        ("progress", "💬 burst 场景：并发思考行一", {"_interim_send": True}),
+        ("progress", "🖥️ terminal...", {"_interim_send": True}),
+        ("progress", '🖥️ terminal："echo burst"', {"_interim_send": True}),
+        ("progress", "💬 burst 场景：并发思考行二", {"_interim_send": True}),
+        ("stream", "burst 场景并发答案第一段。", {"expect_edits": True}),
+        ("stream", "burst 场景并发答案第二段。", {"expect_edits": True}),
+    ]
+    results = await asyncio.gather(
+        *(adapter_send(composer, chat_id, content, meta) for _k, content, meta in frames)
+    )
+    stream_ids = {str(getattr(r, "message_id", "") or "") for r in results[4:]}
+    stream_ids.discard("")
+    check("并发 answer 帧落在同一张卡（无重复建卡）", len(stream_ids) == 1, f"ids={stream_ids}")
+    msg_id = next(iter(stream_ids)) if stream_ids else ""
+    if msg_id:
+        artifacts.append(f"burst 卡片消息: {msg_id}")
+    st = composer.state_by_message(msg_id) if msg_id else None
+    check("answer 缓冲两段保序并存",
+          bool(st and "第一段" in st.answer_text and "第二段" in st.answer_text),
+          f"answer={getattr(st, 'answer_text', None)!r:.80}")
+    check("面板行并入同一卡（思考×2 + 工具 preview）",
+          bool(st and len(st.status_lines) >= 3),
+          f"lines={list(getattr(st, 'status_lines', []))}")
+    if msg_id:
+        r = await adapter_edit(
+            composer, chat_id, msg_id,
+            "burst 场景并发答案第一段。\n\nburst 场景并发答案第二段。",
+            finalize=True,
+        )
+        check("burst 卡定稿", bool(r and r.success))
+
+
 async def scenario_clarify(composer: FrameComposer, client: FeishuClient, chat_id: str) -> None:
     print("== 场景 clarify：澄清交互卡片 ==")
     from hermes_lark_streaming.cardkit import (
@@ -305,7 +348,7 @@ async def scenario_plain(client: FeishuClient, chat_id: str) -> None:
 
 
 # ── 主流程 ──────────────────────────────────────────────────────────────────
-SCENARIOS = ("connect", "answer", "progress", "interim", "full", "clarify", "plain")
+SCENARIOS = ("connect", "answer", "progress", "interim", "full", "burst", "clarify", "plain")
 
 
 async def run(selected: list[str]) -> int:
