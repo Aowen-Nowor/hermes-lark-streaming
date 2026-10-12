@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .tool_icons import DEFAULT_TOOL_ICON
 from .i18n import _LOCALES, _T, _i18n, _t
 from .md import (
     _downgrade_tables,
@@ -465,7 +466,7 @@ def _build_tool_step_title(step: dict) -> dict:
         "tag": "div",
         "icon": {
             "tag": "standard_icon",
-            "token": step.get("icon", "tool_02"),
+            "token": step.get("icon") or DEFAULT_TOOL_ICON,
             "color": "grey",
         },
         "text": {

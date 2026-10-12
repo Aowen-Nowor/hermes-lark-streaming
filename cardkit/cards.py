@@ -29,7 +29,7 @@ from .progline import (
     preview_text,
     strip_dedup_suffix,
 )
-from .tool_icons import resolve_tool_icon, tool_display_title
+from .tool_icons import resolve_tool_icon, split_notice_lead, tool_display_title
 
 __all__ = [
     '_enforce_card_element_limit',
@@ -163,8 +163,39 @@ def _render_status_children(
                         children.append(detail)
             if tool or preview_text(text):
                 continue
+        # v2.0.10：未识别通报行（限流/警告/后台通知等 emoji 开头且解析不出
+        # 工具结构的行）→ 官方图标 + 统一 notation 样式；emoji 从正文剥除。
+        # 其余真未知行维持裸 markdown 兑底（可能含用户 markdown 语义）。
+        notice = split_notice_lead(text)
+        if notice is not None:
+            children.append(_build_notice_row(notice[0], notice[1]))
+            continue
         children.append({"tag": "markdown", "content": text})
     return children or [{"tag": "markdown", "content": " "}]  # 飞书面板拒绝空 elements
+
+
+def _build_notice_row(icon_token: str, body: str) -> dict[str, Any]:
+    """通报行：官方 standard_icon + 灰色 notation 正文（v2.0.10）.
+
+    与工具标题行同构（div + standard_icon + notation 字号），正文用
+    plain_text 灰色（与思考/预览详情同字体体系，无 markdown 注入面），
+    保证未识别通报行与面板其余行视觉一致——用户验收要求“面板一律
+    飞书官方图标 + 统一样式”（限流提示行 ⏱️ 裸 markdown 事故 2026-10-12）。
+    """
+    return {
+        "tag": "div",
+        "icon": {
+            "tag": "standard_icon",
+            "token": icon_token,
+            "color": "grey",
+        },
+        "text": {
+            "tag": "plain_text",
+            "content": body,
+            "text_color": "grey",
+            "text_size": "notation",
+        },
+    }
 
 
 def _apply_panel_title(panel: dict[str, Any], title: str) -> None:

@@ -89,7 +89,7 @@ class TestToolDisplay:
         assert resolve_tool_icon("terminal") == "setting_outlined"
         assert resolve_tool_icon("grep") == "doc-search_outlined"
         assert resolve_tool_icon("read_file") == "file-link-text_outlined"
-        assert resolve_tool_icon("unknown_thing") == "tool_02"
+        assert resolve_tool_icon("unknown_thing") == "code_outlined"  # v2.0.10 官方枚举默认
 
 
 # ---------------------------------------------------------------------------

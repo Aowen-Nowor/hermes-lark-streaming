@@ -3,7 +3,8 @@
 V1 插件 ``state/tooluse.py::_TOOL_DESCRIPTORS`` 的移植（v2.0.4 仅图标表；
 v2.0.5 补齐 V1 的标题机制）：
 
-- ``resolve_tool_icon(name)``：别名归一化后匹配官方图标 token（未命中 ``tool_02``）
+- ``resolve_tool_icon(name)``：别名归一化后匹配官方图标 token（未命中
+  ``DEFAULT_TOOL_ICON``；v2.0.10 起为官方枚举 token ``code_outlined``）
 - ``tool_display_title(name)``：描述符标题（V1: read→"Read"、grep→"Search text"…），
   未命中回退 ``humanize_tool_name``（``-``/``_``→空格 + 首字母大写，如
   hermes 的 ``terminal`` → "Terminal"——与 V1 截图中的工具行标题完全一致）
@@ -22,12 +23,37 @@ _logger = logging.getLogger("hermes_lark_streaming.cardkit.tool_icons")
 
 __all__ = [
     "DEFAULT_TOOL_ICON",
+    "DEFAULT_NOTICE_ICON",
     "resolve_tool_icon",
+    "resolve_notice_icon",
+    "split_notice_lead",
     "humanize_tool_name",
     "tool_display_title",
 ]
 
-DEFAULT_TOOL_ICON = "tool_02"
+# v2.0.10：默认工具图标从 tool_02 换为官方枚举 token（用户验收要求“面板一律
+# 飞书官方图标”，而 tool_02 不在官方 enumerations-for-icons 清单内；
+# code_outlined 语义中性，且与 terminal 的 setting_outlined 视觉区分）。
+DEFAULT_TOOL_ICON = "code_outlined"
+
+# v2.0.10：非工具类通报行（限流/警告/后台通知等 emoji 开头且解析不出工具结构
+# 的行）→ 官方图标映射。emoji token 全部取自官方 enumerations-for-icons 清单
+# （2026-10 抓取存档：time/warning/info/storage/refresh 均 _outlined 线性风格）。
+# 键为 emoji 首字符（剥 U+FE0F 变体选择符后），覆盖同族常见变体。
+DEFAULT_NOTICE_ICON = "info_outlined"
+_NOTICE_ICONS: dict[str, str] = {
+    "\u23f1": "time_outlined",      # ⏱（限流/耗时提示，含 U+FE0F 变体）
+    "\u23f2": "time_outlined",      # ⏲
+    "\u23f0": "time_outlined",      # ⏰
+    "\u23f3": "time_outlined",      # ⏳（Working / 等待）
+    "\u26a0": "warning_outlined",   # ⚠（provider 错误/警告）
+    "\U0001f6a8": "warning_outlined",  # 🚨
+    "\u2139": "info_outlined",      # ℹ
+    "\U0001f4a1": "info_outlined",  # 💡
+    "\U0001f4be": "storage_outlined",  # 💾（Self-improvement review）
+    "\U0001f504": "refresh_outlined",  # 🔄
+    "\u267b": "refresh_outlined",   # ♻
+}
 
 # V1 state/tooluse.py::_TOOL_DESCRIPTORS 图标表（aliases → standard_icon token）
 _TOOL_ICONS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -91,8 +117,50 @@ def tool_display_title(name: str | None) -> str:
     return humanize_tool_name(name)
 
 
+def resolve_notice_icon(lead_token: str | None) -> str:
+    """通报行 emoji 首字符 → 官方图标 token；未命中 ``info_outlined``.
+
+    ``lead_token`` 允许带 U+FE0F 变体选择符（如 "⏱️"）；剥除后查表。
+    永不抛异常。
+    """
+    try:
+        key = (lead_token or "").replace("\ufe0f", "").strip()
+        return _NOTICE_ICONS.get(key, DEFAULT_NOTICE_ICON)
+    except Exception:  # noqa: BLE001 — 图标解析绝不影响面板渲染
+        return DEFAULT_NOTICE_ICON
+
+
+def split_notice_lead(text: str) -> tuple[str, str] | None:
+    """emoji 开头的通报行 → ``(官方图标 token, 剥 emoji 后正文)``；非 emoji 行 None.
+
+    仅对“解析不出工具结构的 emoji 行”由渲染层兑底调用（工具行/动词行在
+    ``parse_progress_line`` 已被结构化吸收，不进本函数）。首 token 必须
+    整体是 emoji（剥 U+FE0F/ZWJ 后逐字校验，或命中通报图标表——覆盖
+    U+2139 等不在 _EMOJI_RE 区间的符号），否则维持裸 markdown 兑底。
+    永不抛异常。
+    """
+    try:
+        t = (text or "").strip()
+        if not t:
+            return None
+        from .progline import _EMOJI_LEAD_RE, _EMOJI_RE
+
+        m = _EMOJI_LEAD_RE.match(t)
+        if not m:
+            return None
+        lead, rest = m.group(1), m.group(2).strip()
+        core = lead.replace("\ufe0f", "").replace("\u200d", "")
+        if not core or not rest:
+            return None
+        if core not in _NOTICE_ICONS and not all(_EMOJI_RE.match(ch) for ch in core):
+            return None
+        return resolve_notice_icon(lead), rest
+    except Exception:  # noqa: BLE001 — 兑底解析绝不影响面板渲染
+        return None
+
+
 def resolve_tool_icon(name: str | None) -> str:
-    """按工具名解析官方图标 token；未命中返回 ``tool_02``."""
+    """按工具名解析官方图标 token；未命中返回 ``DEFAULT_TOOL_ICON``."""
     try:
         normalized = (name or "").strip().lower().replace("-", "_")
         if not normalized:

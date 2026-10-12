@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.0.10 (2026-10-12)
+
+**面板通报行官方图标统一 + status 通道语义层（用户飞书验收反馈：限流提示行样式不一致且用 emoji，违反"面板一律飞书官方图标"标准）。**
+
+事故链（2026-10-12 gateway20 生产日志 + 用户截图文字逐字比对）：主模型 deepseek-v4-flash 撞 429003 三连（会话 ~75K tokens 吃满账户 TPM）→ 重试耗尽 → agent 发出 lifecycle 状态 → 网关 `_prepare_gateway_status_message` 判定 provider 错误信封 → 官方转换 `_gateway_provider_error_reply` → i18n 文案「⏱️ The AI model service is rate-limiting requests. Wait a moment, then use /retry.」→ status 通道（`send_or_update_status` 兜底 `send()`，metadata 无 notify）→ v2.0.1 升格启发式把 emoji 短行误判为进度 → 无活跃卡时建占位卡（spinner 永不定稿，用户"卡住了"体感）→ 渲染层不匹配任何已知模式 → 裸 markdown 兜底（字体与其他行不一致 + emoji 原样保留）。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| P1 | status 通报建幽灵卡（"卡住了"根因）：终态错误通报被当进度行，无活跃卡时建占位卡且永不定稿 | 网关 `send_or_update_status` 契约此前无平台实现 → 兜底 plain `send()`（metadata 无 notify/`_interim_send` 标记）→ CH_PLAIN → v2.0.1 升格启发式（emoji 短行）→ CH_PROGRESS → `_on_progress` 占位分支建卡 | 适配器实现官方 `send_or_update_status` 契约：status 通报 = advisory——活跃卡并入面板、无卡原生文本气泡（用户立即可见）、**永不建卡/永不升格**；刻意偏离官方「按 status_key 编辑气泡」：面板即本平台的原地状态面 |
+| P2 | 面板未识别通报行裸 markdown 兜底：字体与结构化行不一致 + emoji 原样保留 | `_render_status_children` 只结构化工具行/思考行，emoji 开头且解析不出工具结构的行（限流/警告/后台通报）落到 `{"tag":"markdown"}` 兜底 | 新增通报行样式：`split_notice_lead` 剥 emoji 头 → `_build_notice_row` 渲染 div + official `standard_icon` + notation 灰字（与面板其余行同字体体系）；emoji→官方图标映射表（⏱/⏳/⏰→`time_outlined`、⚠/🚨→`warning_outlined`、💾→`storage_outlined`、🔄→`refresh_outlined`、ℹ/💡→`info_outlined`、未知→`info_outlined`）；非 emoji 未知行维持 markdown 兜底 |
+| P2 | 默认工具图标 `tool_02` 不在官方 enumerations-for-icons 清单内 | V1(1.8.1) 移植遗留；V1 时代未对照官方清单 | `DEFAULT_TOOL_ICON` → `code_outlined`（官方清单 2026-10 版实测在列）；测试新增官方 token 冻结集，断言面板引用的全部 19 个图标 token ∈ 官方清单（回归防线） |
+
+**审计方法**: 用户反馈文字与 gateway20.log 逐字比对（i18n 文案 `_gateway_provider_error_reply` 定位）→ hermes 源码链路求证（`_TELEGRAM_NOISY_STATUS_RE` 静默语义 / `send_or_update_status` 官方契约与调用点 / `_mark_notify_metadata` 键名）→ 官方 enumerations-for-icons 全量抓取（215KB / 1141 token）存档核对 → 本地 15 用例回归（渲染层纯函数 + 适配器桩语义层）→ 全量 523/523。
+
+**已知限制**:
+- 限流重试过程进度（「⏱️ Rate limited. Waiting Xs (attempt N/3)...」）被网关 `_TELEGRAM_NOISY_STATUS_RE` 官方静默（设计：retry chatter 不进聊天），V2 层无钩子可达——重试窗口内面板无新增行属预期；fallback 链配置后的「⚠️ Model fallback...」通报可见
+- 未知 emoji（映射表外）以 `info_outlined` 兜底渲染（官方清单内通用图标）；国旗等多码位 emoji 行维持裸 markdown 兜底
+- 升格启发式（v2.0.1）对非 status 通道的裸进度文本仍生效；cron/standalone 场景下 progress 样式文本仍会建卡（v2.0.8 通知清单已拦截已知通知族，其余文本无可靠判据，诚实保留）
+
+---
+
 ## v2.0.9 (2026-10-12)
 
 **五轮全面审计修复：P0/P1/P2 全量落地（用户确认 2026-10-12，先审计后修复流程首次执行）。**

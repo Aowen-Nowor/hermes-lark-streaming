@@ -288,6 +288,38 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             return await super().send(chat_id, content, reply_to=reply_to, metadata=_strip_internal(metadata))
         return result
 
+    async def send_or_update_status(
+        self, chat_id: str, status_key: str, content: str, metadata: dict[str, Any] | None = None,
+    ) -> Any:
+        """网关 status 通道（lifecycle/provider-error 状态通报）语义层（v2.0.10）.
+
+        官方契约：适配器实现 ``send_or_update_status`` 时状态走此入口而非
+        ``send()``，且 metadata 仅带 thread 信息、**无 notify/expect_edits/
+        _interim_send 标记**。v2.0.10 之前无实现 → 兑底 plain send() →
+        v2.0.1 升格启发式把「⏱️ The AI model service is rate-limiting…」
+        终态错误通报当进度行 → 无活跃卡时建占位卡（spinner 永不定稿，
+        2026-10-12 "卡住了"事故根因）。
+
+        本平台语义：状态通报 = advisory——
+        - 活跃卡片期：并入面板（composer._on_interim 同路径，emoji 通报行
+          由渲染层挂官方图标）；
+        - 无卡片：原生文本气泡（用户立即可见，绝不建卡）；
+        - 永不建卡 / 永不升格。
+        刻意偏离官方「按 status_key 原地编辑气泡」契约：面板本身就是本平台
+        的原地状态面，再编辑一份气泡会双份呈现。
+        """
+        from .composer.classify import CH_INTERIM, ClassifyResult
+
+        try:
+            cls = ClassifyResult(CH_INTERIM, kind="advisory", raw_content=content or "", meta={})
+            result = await self._composer.handle_send(chat_id, content, None, metadata, cls)
+        except Exception:  # 降级红线：任何失败走原生
+            _logger.warning("feishu-streaming: status advisory failed — native fallback", exc_info=True)
+            result = None
+        if result is None:
+            return await super().send(chat_id, content, metadata=_strip_internal(metadata))
+        return result
+
     async def edit_message(
         self, chat_id: str, message_id: str, content: str, *, finalize: bool = False,
     ) -> Any:
