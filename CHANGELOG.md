@@ -18,6 +18,7 @@
 - 复合帧拆分是启发式：正文以「markdown 分隔线 + emoji 工具行」结尾的极端形态可能误拆进面板——官方在下一个真实 delta 到达时清空工具行 overlay（stream_consumer.py:290-291）且帧为全量快照，自愈窗口一个 delta；finalize 帧纯正文（got_done 时 `is_interim=False` 不复合）无此风险
 - `supports_native_streaming` probe 无 per-chat 维度（官方签名仅 chat_type/metadata）；建卡失败回落为帧级（无 state 下一帧重试）+ 回合级（False 禁 native 回落 edit/send）
 - native 激活后 CH_STREAM（expect_edits 分类）在正常流程中闲置，仅作为回落路径保留；进度气泡 accumulate 快照仍经 CH_PROGRESS 进面板（💬 中继/工具行 [回落时]）
+- **部署环境（hermes v0.21.x PM 运行时）**：PM 会把进程 site-packages 切到它选代的代次 venv（`~/.hermes/installs/<id>/environments/<gen>/venv`，pm/environments.py::activate_dependencies），插件依赖（PyYAML/lark-oapi）必须装进该环境——manifest `python_dependencies` 官方契约仅校验提示不自动安装；PM 代次重建（hermes update）后需重装（本次部署排障实录：v2.0.12 时代同环境插件加载正常、此后 PM 状态差异触发切换，插件报 `ModuleNotFoundError: yaml`——详见 README 快速开始的环境说明）
 
 ---
 

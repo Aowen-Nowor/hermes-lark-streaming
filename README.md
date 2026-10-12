@@ -70,9 +70,16 @@ FrameComposer（per-chat 串行状态机 · CardTurnState）
 # 1. 复制到 hermes 插件目录
 cp -r hermes-lark-streaming ~/.hermes/plugins/
 
-# 2. 依赖（lark-oapi >= 1.6.4）
-pip install 'lark-oapi>=1.6.4'
+# 2. 依赖（lark-oapi >= 1.6.4 + PyYAML）
+pip install 'lark-oapi>=1.6.4' PyYAML
 ```
+
+> **依赖装进 hermes 的激活解释器环境**：hermes v0.21.x 的 PM 运行时会把它选代的
+> 依赖环境设为进程的 site-packages（`~/.hermes/installs/<id>/environments/<gen>/venv`，
+> 见 `pm/environments.py::activate_dependencies`），插件依赖必须装进**该环境**才能被
+> 插件 import（manifest `python_dependencies` 官方契约是仅校验提示、不自动安装）。
+> 判别方法：gateway 日志若插件报 `ModuleNotFoundError` 而 `pip list` 可见，即为环境
+> 错位——对 `$HOME/.hermes/installs/*/environments/*/venv/bin/python` 执行上述 pip。
 
 > Python 版本与 hermes 官方对齐：**3.14**（`requires-python = ">=3.11,<3.15"`）。
 
