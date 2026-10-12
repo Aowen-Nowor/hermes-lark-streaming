@@ -458,6 +458,11 @@ def register(ctx: Any) -> None:
             f"Original error:\n{exc}"
         ) from exc
     _prewarm_config()
+    # v2.0.9 P2-9 可观测性：网关默认日志级别 WARNING 会吞掉插件 INFO 生命周期
+    # 日志（card created / finalized / sequence 自愈预警——生产排障的关键证据链，
+    # gateway19 审计实证缺口）。插件 logger 树显式提到 INFO：自有命名空间不受
+    # 网关全局级别影响，第三方日志零污染。
+    logging.getLogger("hermes_lark_streaming").setLevel(logging.INFO)
 
     ctx.register_platform(
         name=PLATFORM_NAME,

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..cardkit.progline import split_progress_segments, strip_dedup_suffix
+from ..cardkit.seq import call_with_seq_recovery
 from .classify import (
     _EMOJI_RE,
     _THINKING_PREFIX,
@@ -111,10 +112,27 @@ class FrameComposer:
             return 600
 
     def _gc(self) -> None:
+        """v2.0.9 P0-2 重写：旧实现的运算符优先级使条件实际为
+        ``(finalized and idle>60) or (created_at>ttl)`` —— 活跃回合建卡满
+        TTL 即被弹出（长回合断卡：answer edit 落到内置适配器打卡片消息必败、
+        进度帧新建第二张卡、旧卡跑马灯永挂；gateway19 生产事故同族）。
+
+        新语义（空闲回收，主流程修复）：
+        - 已定稿：60s 冷却后回收（保留 ``_by_message`` 反查窗口）
+        - 未定稿（活跃回合/占位）：仅 ``last_activity`` 空闲超 TTL 才回收
+          —— 活跃回合每帧都刷新 last_activity，长回合永不误杀；空闲超 TTL
+          的状态只能是已中断的孤儿回合（回收同 TTL 语义，非新增兕底）。
+        """
         ttl = self._ttl_sec()
         now = time.monotonic()
-        stale = [cid for cid, st in self._states.items()
-                 if st.finalized and now - st.last_activity > 60 or now - st.created_at > ttl]
+        stale: list[str] = []
+        for cid, st in self._states.items():
+            idle = now - st.last_activity
+            if st.finalized:
+                if idle > 60:
+                    stale.append(cid)
+            elif idle > ttl:
+                stale.append(cid)
         for cid in stale:
             st = self._states.pop(cid, None)
             if st and st.card_message_id:
@@ -159,11 +177,20 @@ class FrameComposer:
             return None
 
     # ── reasoning 流回灌（v2.0.7，插件 stream-hook 守护线程 → 事件循环）───
-    def submit_progress_from_thread(self, chat_id: str, raw_line: str) -> bool:
+    def submit_progress_from_thread(
+        self, chat_id: str, raw_line: str, *, final: bool = False,
+    ) -> bool:
         """线程安全地把一行进度文本（如 reasoning_feed 的 💬 行）投递进面板.
 
         仅活跃卡片期消费：未建卡（思考先于 answer 首帧）由 handle_send 的
         暂存分支处理；已定稿/已降级则丢弃（终态卡片不再变化）。返回是否受理。
+
+        v2.0.9 P1-3：``final=True`` 标记回合流结束的一次性尾 flush
+        （reasoning_feed.on_stream_end）。入队守卫与执行时复查双保险——
+        agent 层 on_stream_end 先于网关 finalize edit，入队时回合未终态、
+        执行时可能已终态（竞态窗）；不复查会在已封卡回合后建带跑马灯
+        幽灵卡。final flush 仅在活跃卡片存在时进面板，其余一律丢弃
+        （回合无卡时思考无处归属，暂存会错误并入下一回合面板）。
         """
         loop = self._loop
         if loop is None or loop.is_closed():
@@ -171,14 +198,16 @@ class FrameComposer:
         st = self._states.get(chat_id)
         if st is not None and (st.finalized or st.degraded):
             return False
+        if final and st is None:
+            return False
         try:
-            loop.call_soon_threadsafe(self._spawn_progress, chat_id, raw_line)
+            loop.call_soon_threadsafe(self._spawn_progress, chat_id, raw_line, final)
             return True
         except RuntimeError:
             return False
 
-    def _spawn_progress(self, chat_id: str, raw_line: str) -> None:
-        asyncio.ensure_future(self._feed_progress(chat_id, raw_line))
+    def _spawn_progress(self, chat_id: str, raw_line: str, final: bool = False) -> None:
+        asyncio.ensure_future(self._feed_progress(chat_id, raw_line, final=final))
 
     # ── 工具耗时回灌（v2.0.8，post_tool_call 官方钩子线程 → 事件循环）─────
     def submit_tool_duration_from_thread(self, chat_id: str, tool_name: str, duration_ms: float) -> bool:
@@ -195,6 +224,10 @@ class FrameComposer:
             return False
         st = self._states.get(chat_id)
         if st is not None and (st.finalized or st.degraded):
+            return False
+        if st is None:
+            # v2.0.9：无活跃状态（含占位）不受理——耗时行只能挂在已存在的
+            # 卡片行上；行未到达时由 pending 队列承接（active_state 建卡后认领）。
             return False
         try:
             loop.call_soon_threadsafe(
@@ -214,17 +247,23 @@ class FrameComposer:
             from ..cardkit.elements import _format_duration_label
 
             label = _format_duration_label(duration_ms)
+            # v2.0.9 P2-8：只认「尾数第一个同工具行」（调用序配对的最近近似）。
+            # 旧实现向前反查任意未挂行：更早调用的钩子丢失时，本钩子的耗时
+            # 会误挂到旧行。现在：最近同工具行已挂 → 本钩子属更新的调用
+            # （其行未到达）→ pending 队列；更早未挂行保持缺失（钩子丢失，
+            # 诚实不伪造）。残余窗口：丢钩子的下一调用行未插入且更旧行存在
+            # （写入 CHANGELOG 已知限制）。
             for i in range(len(st.status_lines) - 1, -1, -1):
                 line = st.status_lines[i]
+                kind, tool, _c = parse_progress_line(line)
+                if kind != "tool" or tool != tool_name:
+                    continue
                 key = strip_dedup_suffix(line)
                 if key in st.tool_durations:
-                    continue
-                kind, tool, _c = parse_progress_line(line)
-                if kind == "tool" and tool == tool_name:
-                    st.tool_durations[key] = label
-                    await self._patch_status(st)
-                    return
-            # 行未到达（钩子先于文本帧 drain）：入队等该工具下一行认领
+                    break  # 最近同工具行已挂 → 属更新调用，行未到 → pending
+                st.tool_durations[key] = label
+                await self._patch_status(st)
+                return
             queue = st.pending_tool_durations.setdefault(tool_name, [])
             if len(queue) < 4:
                 queue.append(label)
@@ -248,8 +287,44 @@ class FrameComposer:
                 if not queue:
                     st.pending_tool_durations.pop(tool, None)
 
-    async def _feed_progress(self, chat_id: str, raw_line: str) -> None:
+    def _migrate_tool_durations(
+        self, st: CardTurnState, old: list[str], merged: list[str],
+    ) -> None:
+        """pending→preview 原地取代时迁移耗时标签（v2.0.9 P2-8）.
+
+        ``tool_durations`` 的 key 是行文本：pending 行（``...``）挂上耗时后，
+        同一调用的 preview 行原地取代它 → key 失联，用户看到该工具无耗时。
+        同位置、同工具、旧行 pending → 新行非 pending 时迁移标签（key 对齐
+        渲染层的 ``strip_dedup_suffix(行)`` 查找）。迁移失败静默保留旧 key
+        （孤儿 key 渲染层查不到，无害）。
+        """
+        if not st.tool_durations:
+            return
+        for i in range(min(len(old), len(merged))):
+            if old[i] == merged[i]:
+                continue
+            old_key = strip_dedup_suffix(old[i])
+            label = st.tool_durations.get(old_key)
+            if not label or not old_key.endswith("..."):
+                continue  # 只处理 pending 行的取代
+            new_key = strip_dedup_suffix(merged[i])
+            if new_key in st.tool_durations:
+                continue
+            _k_old, tool_old, _c = parse_progress_line(old_key)
+            _k_new, tool_new, _c2 = parse_progress_line(new_key)
+            if tool_old and tool_old == tool_new:
+                st.tool_durations[new_key] = st.tool_durations.pop(old_key)
+
+    async def _feed_progress(self, chat_id: str, raw_line: str, *, final: bool = False) -> None:
         cls = ClassifyResult(CH_PROGRESS, kind="thinking", raw_content=raw_line)
+        if final:
+            # v2.0.9 P1-3：执行时复查（入队→执行之间回合可能已终态）。
+            # 终态/无卡一律丢弃：不占位、不建卡（幽灵卡防线），面板已封不补发。
+            st = self._states.get(chat_id)
+            if st is None or st.finalized or st.degraded:
+                _logger.debug(
+                    "composer: final reasoning flush dropped (turn closed) chat=%s", chat_id)
+                return
         try:
             await self.handle_send(chat_id, raw_line, None, None, cls)
         except Exception:  # 回灌失败不影响主流程（BLE 未启用，noqa 触发 RUF100）
@@ -328,14 +403,21 @@ class FrameComposer:
         st.degraded = False
         st.status_lines = pending
         st.line_times = [time.monotonic()] * len(pending)
+        # v2.0.9 P2-8 伴生：耗时表必须随回合重置——残留 key 是上一回合的
+        # 行文本，同命令重跑时新行会错误继承旧耗时（跨回合数据污染）。
+        st.tool_durations.clear()
+        st.pending_tool_durations.clear()
         st.pending_status.clear()
         self._states[chat_id] = st
         self._by_message[st.card_message_id] = chat_id
         st.answer_text = content or ""
         st.seq += 1
         if st.answer_text:
-            await client.cardkit_stream_element(
-                card_id, _answer_element_id(), st.answer_text, sequence=st.seq,
+            await call_with_seq_recovery(
+                st,
+                lambda seq: client.cardkit_stream_element(
+                    card_id, _answer_element_id(), st.answer_text, sequence=seq),
+                what="create:answer-seed",
             )
         _logger.info(
             "composer: card created chat=%s card=%s msg=%s status_lines=%d",
@@ -354,8 +436,11 @@ class FrameComposer:
             raise RuntimeError("card client unavailable")
         st.seq += 1
         st.last_activity = time.monotonic()
-        await client.cardkit_stream_element(
-            st.card_id, _answer_element_id(), st.answer_text, sequence=st.seq,
+        await call_with_seq_recovery(
+            st,
+            lambda seq: client.cardkit_stream_element(
+                st.card_id, _answer_element_id(), st.answer_text, sequence=seq),
+            what="stream:answer",
         )
 
     async def _on_progress(self, chat_id: str, cls: ClassifyResult) -> SendResult | None:
@@ -369,6 +454,9 @@ class FrameComposer:
             if placeholder.turn_started_at is None:
                 placeholder.turn_started_at = time.monotonic()
             placeholder.pending_status.append(raw)
+            # v2.0.9 P0-2 伴生：占位状态同样按 last_activity 空闲回收——
+            # 建卡失败期的持续帧必须续命，否则 TTL 后暂存被 GC 误清。
+            placeholder.last_activity = time.monotonic()
             # v2.0.4（s70 回流）：立即建占位卡（还原 V1 体验：卡片先现，工具/思考
             # 实时进面板，不再裸奔成独立气泡）。pending 已并入首卡面板；答案元素
             # 留空待流式。仍不回传 message_id：防网关把返回 id 当作进度气泡
@@ -399,6 +487,7 @@ class FrameComposer:
         if merged is None:
             # 无新增/无变化：不触发 cardkit_update（API 经济性；V2.0.0 同语义）
             return SendResult(success=True)
+        self._migrate_tool_durations(st, st.status_lines, merged)
         new_times = _reconcile_line_times(st.status_lines, st.line_times, merged)
         self._attach_pending_durations(st, st.status_lines, merged)
         st.status_lines = merged[-12:]
@@ -447,7 +536,11 @@ class FrameComposer:
         )
         st.seq += 1
         st.last_activity = time.monotonic()
-        await client.cardkit_update(st.card_id, card, sequence=st.seq)
+        await call_with_seq_recovery(
+            st,
+            lambda seq: client.cardkit_update(st.card_id, card, sequence=seq),
+            what="update:status",
+        )
 
     async def _finalize(self, st: CardTurnState, content: str) -> SendResult:
         from .finalize import finalize_card
@@ -455,6 +548,11 @@ class FrameComposer:
         client = self._get_client()
         if client is None:
             raise RuntimeError("card client unavailable")
+        # v2.0.9 P1-4：幂等守卫先行——网关重试/重复 finalize 事件会重复插
+        # 页脚（三步定稿非事务性）。已定稿直接短路返回成功。
+        if st.finalized:
+            return SendResult(success=True, message_id=st.card_message_id)
+        st.finalized = True
         if content:
             st.answer_text = content
         st.last_activity = time.monotonic()
@@ -463,7 +561,6 @@ class FrameComposer:
             footer_fields=self._footer_fields(),
             footer_show_label=self._footer_show_label(),
         )
-        st.finalized = True
         _logger.info(
             "composer: card finalized chat=%s card=%s answer_len=%d status_lines=%d",
             st.chat_id, st.card_id, len(st.answer_text or ""), len(st.status_lines),

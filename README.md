@@ -4,7 +4,7 @@
 
 继承 hermes 内置飞书平台的全部能力，在其出站通道上叠加实时流式卡片：回答以打字机效果写入卡片、工具进度与思考过程实时渲染进状态面板、澄清问题变为可点击的交互卡片。**全程零 monkey-patch** —— 不修改、不包装、不拦截 hermes 的任何内部实现。
 
-- 版本：v2.0.0
+- 版本：v2.0.9
 - 平台名：`feishu-streaming`
 - 协议：hermes platform 插件（`plugin.yaml` `kind: platform`）
 - 兼容：hermes-agent ≥ 0.21 · Python ≥ 3.11 · lark-oapi ≥ 1.6.4

@@ -17,7 +17,6 @@ from hermes_lark_streaming.cardkit import (
     _render_footer_field,
     build_preservative_seal_actions,
     build_streaming_card_v2,
-    build_unified_panel,
 )
 from hermes_lark_streaming.cardkit.md import (
     _downgrade_tables,
@@ -28,8 +27,6 @@ from hermes_lark_streaming.cardkit.md import (
 )
 
 import pytest
-
-from hermes_lark_streaming.state.linear import ReasoningRound
 
 # --- Markdown 优化 ---
 
@@ -852,267 +849,90 @@ class TestSummaryI18nContent:
         assert "en_us" in summary["i18n_content"]
 
 
-class TestBuildUnifiedPanelTrimming:
-    """Tests for element limit trimming in build_unified_panel."""
-
-    def _make_rounds(self, n: int) -> list:
-        """Create n reasoning rounds."""
-        from hermes_lark_streaming.state.linear import ReasoningRound
-        rounds = [ReasoningRound(index=i + 1, text=f"Reasoning {i + 1}") for i in range(n)]
-        for r in rounds:
-            r.elapsed_ms = 100
-        return rounds
-
-    def _make_steps(self, n: int) -> list[dict]:
-        """Create n tool steps."""
-        return [
-            {"name": f"tool_{i}", "status": "success", "title": f"Tool {i}",
-             "detail": f"Detail {i}", "result_block": {"content": f"Result {i}", "language": "text"}}
-            for i in range(n)
-        ]
-
-    def test_trim_reasoning_rounds(self):
-        """Excess reasoning rounds are trimmed with collapse hint."""
-        rounds = self._make_rounds(30)
-        steps = self._make_steps(5)
-        panel = build_unified_panel(
-            reasoning_rounds=rounds,
-            tool_steps=steps,
-            show_reasoning=True,
-            max_reasoning_rounds=20,
-            max_tool_steps=20,
-        )
-        # Panel title should show original count (30 rounds)
-        title_content = panel["header"]["title"]["content"]
-        assert "30" in title_content
-        # Collapse hint should be first child
-        children = panel["elements"]
-        first = children[0]
-        assert first["tag"] == "markdown"
-        assert "10 轮早期推理" in first["content"]
-        assert "已折叠" in first["content"]
-
-    def test_trim_tool_steps(self):
-        """Excess tool steps are trimmed with collapse hint."""
-        rounds = self._make_rounds(5)
-        steps = self._make_steps(30)
-        panel = build_unified_panel(
-            reasoning_rounds=rounds,
-            tool_steps=steps,
-            show_reasoning=True,
-            max_reasoning_rounds=20,
-            max_tool_steps=20,
-        )
-        # Panel title should show original count (30 tools)
-        title_content = panel["header"]["title"]["content"]
-        assert "30" in title_content
-        # Collapse hint should mention trimmed tools
-        children = panel["elements"]
-        first = children[0]
-        assert first["tag"] == "markdown"
-        assert "10 步早期操作" in first["content"]
-        assert "已折叠" in first["content"]
-
-    def test_trim_both(self):
-        """Both reasoning and tools are trimmed when both exceed limits."""
-        rounds = self._make_rounds(30)
-        steps = self._make_steps(30)
-        panel = build_unified_panel(
-            reasoning_rounds=rounds,
-            tool_steps=steps,
-            show_reasoning=True,
-            max_reasoning_rounds=20,
-            max_tool_steps=20,
-        )
-        children = panel["elements"]
-        first = children[0]
-        assert "10 轮早期推理" in first["content"]
-        assert "10 步早期操作" in first["content"]
-
-    def test_no_trim_when_within_limit(self):
-        """No trimming when counts are within limits."""
-        rounds = self._make_rounds(10)
-        steps = self._make_steps(10)
-        panel = build_unified_panel(
-            reasoning_rounds=rounds,
-            tool_steps=steps,
-            show_reasoning=True,
-            max_reasoning_rounds=20,
-            max_tool_steps=20,
-        )
-        children = panel["elements"]
-        # No collapse hint should be present
-        for child in children:
-            if child.get("tag") == "markdown" and "已折叠" in child.get("content", ""):
-                pytest.fail("Unexpected collapse hint when within limits")
-
-    def test_panel_events_filtered_after_trim(self):
-        """panel_events are correctly reindexed after trimming."""
-        rounds = self._make_rounds(25)
-        steps = self._make_steps(25)
-        panel_events = [(f"reasoning", i) for i in range(25)] + [(f"tool", i) for i in range(25)]
-        panel = build_unified_panel(
-            reasoning_rounds=rounds,
-            tool_steps=steps,
-            show_reasoning=True,
-            panel_events=panel_events,
-            max_reasoning_rounds=20,
-            max_tool_steps=20,
-        )
-        # Should have a collapse hint and remaining items
-        assert panel["elements"][0]["tag"] == "markdown"
-        assert "已折叠" in panel["elements"][0]["content"]
-
-    def test_custom_limits(self):
-        """Custom max values work correctly."""
-        rounds = self._make_rounds(10)
-        steps = self._make_steps(10)
-        panel = build_unified_panel(
-            reasoning_rounds=rounds,
-            tool_steps=steps,
-            show_reasoning=True,
-            max_reasoning_rounds=5,
-            max_tool_steps=5,
-        )
-        children = panel["elements"]
-        first = children[0]
-        assert "5 轮早期推理" in first["content"]
-        assert "5 步早期操作" in first["content"]
-
-    def test_safety_net_trims_worst_case(self):
-        """Card-level safety net kicks in when total elements exceed 195.
-
-        With 20 reasoning rounds + 20 tool steps (each with max elements),
-        the total card element count can exceed 200. The card-level safety
-        net in _enforce_card_element_limit trims panel children until
-        the total is at or below 195.
-        """
-        # 20 rounds + 20 steps, each with max elements (detail + result for tools)
-        from hermes_lark_streaming.cardkit.elements import build_unified_panel as _build_panel
-        rounds = self._make_rounds(20)
-        steps = self._make_steps(20)
-        panel = _build_panel(
-            reasoning_rounds=rounds,
-            tool_steps=steps,
-            show_reasoning=True,
-            max_reasoning_rounds=20,
-            max_tool_steps=20,
-        )
-        card = {
-            "schema": "2.0",
-            "body": {"elements": [panel, {"tag": "markdown", "content": "Test answer"}]},
-        }
-        result = _enforce_card_element_limit(card)
-        total_count = _count_tag_objects(result)
-        # Should be at or below 195 (200 - 5 margin)
-        assert total_count <= 195, f"Total element count {total_count} exceeds safety threshold 195"
-        # Should have a collapse hint in panel children (safety net trimmed items)
-        panel = None
-        for elem in result.get("body", {}).get("elements", []):
-            if elem.get("element_id") == "agent_process_panel":
-                panel = elem
-                break
-        assert panel is not None
-        first_child = panel["elements"][0]
-        assert "已折叠" in first_child.get("content", "")
-
-
 class TestEnforceCardElementLimit:
-    """Tests for the card-level element limit safety net."""
+    """卡片级 200 元素上限安全网（v2.0.9 P2-5 接线 build_streaming_card_v2）.
 
-    def _make_rounds(self, n: int) -> list:
-        """Create n reasoning rounds."""
-        from hermes_lark_streaming.state.linear import ReasoningRound
-        rounds = [ReasoningRound(index=i + 1, text=f"Reasoning {i + 1}") for i in range(n)]
-        for r in rounds:
-            r.elapsed_ms = 100
-        return rounds
+    V2 构造路径：``build_streaming_card_v2(status_lines=[...])`` 塞入大量
+    工具行（每行渲染 2 元素：官方图标标题 + 缩进命令摘要），超阈值时安全网
+    裁剪面板最旧子项并插入「⚡ 还有 N 项已折叠」提示；answer/页脚/spinner
+    永不裁剪。
+    """
 
-    def _make_steps(self, n: int) -> list[dict]:
-        """Create n tool steps."""
-        return [
-            {"name": f"tool_{i}", "status": "success", "title": f"Tool {i}",
-             "detail": f"Detail {i}", "result_block": {"content": f"Result {i}", "language": "text"}}
-            for i in range(n)
-        ]
+    _TOOL_LINE = "🖥️ terminal：uname -r && sleep 1 && echo done-{i}-padding-padding"
 
-    def test_no_trim_when_under_limit(self):
-        """Card under 195 elements is not trimmed."""
-        from hermes_lark_streaming.cardkit.elements import build_unified_panel as _build_panel
-        panel = _build_panel(
-            reasoning_rounds=self._make_rounds(5),
-            tool_steps=self._make_steps(5),
-            show_reasoning=True,
-        )
-        card = {
-            "schema": "2.0",
-            "body": {"elements": [panel, {"tag": "markdown", "content": "Short answer"}]},
-        }
-        result = _enforce_card_element_limit(card)
-        total = _count_tag_objects(result)
-        assert total <= 195
-        # No collapse hint should exist
-        panel = None
-        for elem in result.get("body", {}).get("elements", []):
+    def _make_status_lines(self, n: int) -> list[str]:
+        """n 条真实格式工具行（每行渲染 2 个元素 → 2n tag objects）."""
+        return [self._TOOL_LINE.format(i=i) for i in range(n)]
+
+    def _panel_of(self, card: dict) -> dict | None:
+        for elem in card.get("body", {}).get("elements", []):
             if elem.get("element_id") == "agent_process_panel":
-                panel = elem
-                break
-        if panel:
-            for child in panel.get("elements", []):
-                if "已折叠" in child.get("content", ""):
-                    pytest.fail("Unexpected collapse hint when under limit")
+                return elem
+        return None
 
-    def test_trim_preserves_answer_and_footer(self):
-        """Answer text and footer are never trimmed — only panel children."""
-        from hermes_lark_streaming.cardkit.elements import build_unified_panel as _build_panel
-        panel = _build_panel(
-            reasoning_rounds=self._make_rounds(25),
-            tool_steps=self._make_steps(25),
-            show_reasoning=True,
-            max_reasoning_rounds=25,
-            max_tool_steps=25,
+    def test_v2_card_under_limit_not_trimmed(self):
+        """正常状态量（12 行）远低于阈值——不裁剪、无折叠提示."""
+        card = build_streaming_card_v2(
+            status_lines=self._make_status_lines(12),
+            answer_text="short answer",
+            panel_title="agent loop · 12 个工具",
         )
+        assert _count_tag_objects(card) <= 195
+        panel = self._panel_of(card)
+        assert panel is not None
+        for child in panel.get("elements", []):
+            assert "已折叠" not in child.get("content", "")
+
+    def test_v2_card_over_limit_trimmed_with_hint(self):
+        """超限卡片被安全网裁剪：总元素 ≤195 + 折叠提示在面板首部."""
+        card = build_streaming_card_v2(status_lines=self._make_status_lines(300))
+        assert _count_tag_objects(card) <= 195, (
+            f"build_streaming_card_v2 output {_count_tag_objects(card)} exceeds 195 "
+            "— element limit safety net not wired (P2-5)"
+        )
+        panel = self._panel_of(card)
+        assert panel is not None
+        first = panel["elements"][0]
+        assert "已折叠" in first.get("content", "")
+
+    def test_trim_preserves_answer_and_spinner(self):
+        """answer 元素与 loading spinner 永不裁剪 — 只裁面板子项."""
+        card = build_streaming_card_v2(
+            status_lines=self._make_status_lines(300),
+            answer_text="THE ANSWER MUST SURVIVE",
+        )
+        body_elements = card.get("body", {}).get("elements", [])
+        answer_found = any(
+            elem.get("element_id") == "answer_content"
+            and "THE ANSWER MUST SURVIVE" in str(elem)
+            for elem in body_elements
+        )
+        assert answer_found, "answer element was trimmed — safety net must not trim answer"
+        spinner_found = any(
+            elem.get("element_id") == "loading_icon" for elem in body_elements
+        )
+        assert spinner_found, "loading spinner was trimmed"
+
+    def test_enforce_card_element_limit_directly(self):
+        """_enforce_card_element_limit 对手工构造的超限卡直接裁剪."""
+        from hermes_lark_streaming.cardkit.cards import _render_status_children
+
+        # 直接渲染 120 条工具行（≈240 元素）组装成超限 panel（绕过 build
+        # 内部的安全网，隔离验证 _enforce 本身的裁剪行为）
+        panel = {
+            "tag": "collapsible_panel",
+            "element_id": "agent_process_panel",
+            "elements": _render_status_children(self._make_status_lines(120)),
+            "header": {"title": {"content": "agent loop"}},
+        }
         card = {
             "schema": "2.0",
             "body": {"elements": [
                 panel,
-                {"tag": "markdown", "content": "This answer must not be trimmed"},
+                {"tag": "markdown", "content": "Test answer"},
                 {"tag": "hr"},
                 {"tag": "markdown", "content": "footer"},
             ]},
-        }
-        result = _enforce_card_element_limit(card)
-        total = _count_tag_objects(result)
-        assert total <= 195
-        # Answer must still be present
-        body_elements = result.get("body", {}).get("elements", [])
-        answer_found = any(
-            "This answer must not be trimmed" in elem.get("content", "")
-            for elem in body_elements
-            if elem.get("tag") == "markdown"
-        )
-        assert answer_found, "Answer text was trimmed — safety net should only trim panel children"
-        # Footer must still be present
-        footer_found = any(elem.get("tag") == "hr" for elem in body_elements)
-        assert footer_found, "Footer was trimmed — safety net should only trim panel children"
-
-    def test_enforce_card_element_limit_directly(self):
-        """_enforce_card_element_limit trims a card dict directly."""
-        # Build a card that would exceed 195 elements
-        from hermes_lark_streaming.cardkit.elements import build_unified_panel as _build_panel
-        from hermes_lark_streaming.cardkit.i18n import _LOCALES
-
-        panel = _build_panel(
-            reasoning_rounds=self._make_rounds(25),
-            tool_steps=self._make_steps(25),
-            show_reasoning=True,
-            max_reasoning_rounds=25,
-            max_tool_steps=25,
-        )
-        elements = [panel, {"tag": "markdown", "content": "Test answer"}, {"tag": "hr"}, {"tag": "markdown", "content": "footer"}]
-        card = {
-            "schema": "2.0",
-            "body": {"elements": elements},
         }
         pre_count = _count_tag_objects(card)
         result = _enforce_card_element_limit(card)

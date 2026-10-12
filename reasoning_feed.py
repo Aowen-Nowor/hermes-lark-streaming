@@ -129,7 +129,12 @@ def on_stream_delta(**payload: Any) -> None:
 
 
 def on_stream_end(**payload: Any) -> None:
-    """响应流结束 → 该轮思考缓冲立即完整落盘并清空（下一轮开新行）."""
+    """响应流结束 → 该轮思考缓冲立即完整落盘并清空（下一轮开新行）.
+
+    v2.0.9 P1-3：尾 flush 标记 ``final=True`` —— agent 层 on_stream_end 先于
+    网关 finalize edit（竞态窗已实验证实），composer 对 final flush 做
+    **执行时**终态复查：终态/无卡一律丢弃，不占位不建卡（幽灵卡防线）。
+    """
     try:
         chat = _current_chat_id()
         if not chat:
@@ -139,18 +144,19 @@ def on_stream_end(**payload: Any) -> None:
         if buf is None:
             return
         with buf["lock"]:
-            _flush_locked(chat, buf, now)
+            _flush_locked(chat, buf, now, final=True)
             buf["text"] = ""
             buf["sent"] = ""
     except Exception:  # 观察者永不影响主流程
         _logger.debug("reasoning feed: on_stream_end failed", exc_info=True)
 
 
-def _flush_locked(chat: str, buf: dict[str, Any], now: float) -> None:
+def _flush_locked(chat: str, buf: dict[str, Any], now: float, *, final: bool = False) -> None:
     """把**累积全文**（非增量）作为一行 💬 推给所有绑定 composer。持锁调用.
 
     增长文本 → composer 合并器原地替换上一条思考行；文本冻结（达上限）后
-    重发同文本 → 合并器幂等跳过，不产生 cardkit_update。"""
+    重发同文本 → 合并器幂等跳过，不产生 cardkit_update。``final=True``
+    （on_stream_end 尾 flush）透传给 composer 做执行时终态复查（P1-3）。"""
     text = (buf.get("text") or "").strip()
     if not text or text == buf.get("sent"):
         return
@@ -158,14 +164,21 @@ def _flush_locked(chat: str, buf: dict[str, Any], now: float) -> None:
     delivered = False
     for composer in _composers():
         try:
-            if composer.submit_progress_from_thread(chat, raw):
+            if composer.submit_progress_from_thread(chat, raw, final=final):
                 delivered = True
+        except TypeError:
+            # 兼容旧 composer 签名（无 final 参数）——降级为普通提交
+            try:
+                if composer.submit_progress_from_thread(chat, raw):
+                    delivered = True
+            except Exception:
+                _logger.debug("reasoning feed: submit failed chat=%s", chat, exc_info=True)
         except Exception:  # 观察者永不影响主流程
             _logger.debug("reasoning feed: submit failed chat=%s", chat, exc_info=True)
     if delivered:
         buf["sent"] = text
         buf["last_flush"] = now
-    _logger.debug("reasoning feed: flush chat=%s len=%d delivered=%s", chat, len(text), delivered)
+    _logger.debug("reasoning feed: flush chat=%s len=%d delivered=%s final=%s", chat, len(text), delivered, final)
 
 
 def reset_for_tests() -> None:

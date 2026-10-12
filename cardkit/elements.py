@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .i18n import _LOCALES, _T, _i18n, _t
 from .md import (
@@ -75,9 +75,6 @@ def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
     cleaned = _IMG_MD_PATTERN.sub(_replace, text)
     cleaned = _RE_MULTI_NEWLINE.sub("\n\n", cleaned).strip()
     return cleaned, images
-
-if TYPE_CHECKING:
-    from ..state.linear import ReasoningRound
 
 STREAMING_ELEMENT_ID = "streaming_content"
 ANSWER_ELEMENT_ID = "answer_content"

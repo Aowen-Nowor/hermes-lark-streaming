@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .elements import (
     _LOADING_ELEMENT_ID,
@@ -30,9 +30,6 @@ from .progline import (
     strip_dedup_suffix,
 )
 from .tool_icons import resolve_tool_icon, tool_display_title
-
-if TYPE_CHECKING:
-    from ..state.linear import ReasoningRound
 
 __all__ = [
     '_enforce_card_element_limit',
@@ -342,4 +339,7 @@ def build_streaming_card_v2(
         },
         "body": {"elements": elements},
     }
-    return card
+    # v2.0.9 P2-5：200 元素上限安全网接线（此前函数定义+导出但从未调用）。
+    # 正常状态 ≤12 行 ≈ 30 元素，远低于阈值；裁剪仅在异常膨胀时生效
+    # （裁最旧面板子项 + 「⚡ 还有 N 项已折叠」提示），answer/页脚不裁。
+    return _enforce_card_element_limit(card)

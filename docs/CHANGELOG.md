@@ -1,5 +1,38 @@
 # Changelog
 
+## v2.0.9 (2026-10-12)
+
+**五轮全面审计修复：P0/P1/P2 全量落地（用户确认 2026-10-12，先审计后修复流程首次执行）。**
+
+审计证据链：gateway19.log 生产事故（23:09:50 整回合降级纯文本）+ hermes 源码考古 +
+真飞书 sequence 实验（卡 om_x100b63f0d183a880b1f89b86413d0d1：重放/回退 seq 必现
+300317、seq+1 立即自愈、跳号允许）+ 代码静态审查。全部修复经主流程方案（不新增兜底）。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| P0 | 300317 sequence 冲突 → 整回合降级纯文本（gateway19 生产事故） | `client._retry_transient` 对网络读超时的重试用**同一 sequence** 重发；首次请求实际已达服务端时重发必撞 300317（`_is_transient_error` 判非瞬态直接上抛 → composer `_degrade`） | **新增 `cardkit/seq.py`**：`call_with_seq_recovery` 捕获 300317 → 本地 seq 对齐服务端（+1）→ 重发同内容（全量语义幂等）。engine 全部带 seq 调用（answer 流×2/状态更新/建卡 seed）+ finalize 三步（answer 终值/页脚插入/关流式）统一接线；上限 3 次逐次 +1，超出仍上抛交降级红线。主流程自愈，非兜底 |
+| P0 | 长回合（>10 分钟）断卡：答案编辑失败 + 第二张卡 + 旧卡跑马灯永挂 | `_gc` 条目 `st.finalized and idle>60 or created_at>ttl` 运算符优先级实际为 `(finalized and idle>60) or (created_at>ttl)`——活跃回合建卡满 TTL（默认 600s）即被弹出；后续 answer edit 落到内置适配器 `im.v1.message.update` 打卡片消息必败、进度帧新建第二张卡 | `_gc` 重写为**空闲回收**：已定稿 60s 冷却回收；未定稿仅 `last_activity` 空闲超 TTL 才回收（活跃回合每帧续命，长回合永不误杀；空闲超 TTL 的只能是已中断孤儿回合）。占位状态暂存帧同步续命 |
+| P1 | 幽灵卡：回合封卡后冒出带跑马灯新卡 | agent 层 `on_stream_end` 先于网关 finalize edit（竞态窗实验证实）；reasoning 尾 flush 入队时守卫通过、执行时无复查 → `_on_progress` 占位分支对已终态状态重建卡片（复用重置 finalized） | `reasoning_feed.on_stream_end` 尾 flush 标记 `final=True` 透传；composer `_feed_progress` **执行时**复查：终态/无卡一律丢弃（不占位不建卡）；流中 flush 语义不变 |
+| P1 | 双 finalize 重复插页脚 | `handle_edit(finalize=True)` 无 `st.finalized` 幂等守卫；网关重试/重复事件重复执行三步定稿 | `_finalize` 开头幂等短路（已定稿直接返回成功）+ `finalized` 先行置位；异常路径由 `_degrade` 置终态，行为一致 |
+| P2 | 200 元素上限无安全网 | `_enforce_card_element_limit` 定义+导出但从未调用（当前 ~30 元素安全，未来膨胀无防线） | 接线 `build_streaming_card_v2` 返回路径：超阈值裁面板最旧子项 + 「⚡ 还有 N 项已折叠」提示；answer/页脚/spinner 永不裁 |
+| P2 | 工具耗时误挂/失联 | ① 钩子尾反查任意未挂行：钩子丢失时耗时误挂到更早调用；② pending 行挂上耗时后 preview 取代 → key 失联标签丢失；③ 建卡复用状态未重置 `tool_durations` → 同命令重跑继承旧耗时 | ① 只认尾数第一个同工具行（已挂→pending 等新行认领）；② `_migrate_tool_durations`：同位置同工具 pending→preview 取代时迁移标签；③ `_create_card` 重置 `tool_durations`/`pending_tool_durations` |
+| P2 | 生命周期日志不可见（审计 R2 可观测性缺口） | 网关默认日志级别 WARNING 吞掉插件 INFO（card created/finalized 无迹可查，生产排障缺证据链） | `register()` 内联 `logging.getLogger("hermes_lark_streaming").setLevel(INFO)`——插件命名空间不受网关全局级别影响，第三方日志零污染；300317 自愈用 WARNING 恒可见 |
+| P2 | V1 遗留代码/文档过时 | `state/`（5 文件）`flush/`（2 文件）运行时零引用，338 遗留测试占套件近半；`docs/` 遗留 TASK_*.md×5/TEST_PLATFORM.md/DESIGN.md/API.md；README 徽章停 v2.0.0 | 删除 `state/`、`flush/` + 5 个纯遗留测试文件 + `test_cardkit.py` 遗留用例改写为 V2 语义（`ReasoningRound` TYPE_CHECKING 死导入清除）；删除 7 个过时文档；README 徽章 → v2.0.9 |
+
+**审计方法**: 5 轮只读审计（R1 本地/Gitee/服务器三方一致性 → R2 服务器日志取证 → R3 代码静态审查 → R4 hermes 源码对齐 + 真飞书 sequence 实验 → R5 汇总分级），全部结论「机制 + 证据」双实锤后才动手；修复全程遵守主流程原则（300317 是协议语义自愈、GC 是回收语义修正、幽灵卡是时序语义补全，均非 try/except 式兜底）；真飞书 E2E 实验先于修复定案。
+
+**已知限制**:
+- 工具耗时配对残余窗口：某调用钩子丢失且下一调用的行尚未插入快照时，耗时缺失（诚实不伪造）；跨回合不继承
+- 钩子重复触发（hermes 层异常）会把耗时标签送 pending 认领到下一个同工具行（概率极低，与旧实现相同）
+- 新回合建卡前的 reasoning delta 暂存丢失窗口（v2.0.7 既有边界，1.5s 节流后下一次 flush 自愈进面板）
+- 用户 10 秒内连发消息时，上一回合终态残留下首个 progress 帧可能被 final-flush 防线误丢（answer 首帧仍正常建卡）
+- elements.py 内 V1 渲染函数（build_unified_panel/build_panel_header/build_panel_children）已零运行时引用，保留至下一轮专项清理（本轮边界：只删审计点名的 state/flush）
+- 429003（SenseNova 账户级限流）与模型上游截断（no finish_reason）为外部约束，V2 层不可修
+
+套件 508/508（存量 712 − 338 遗留 + 新增 21 + test_cardkit 改写 6）；ruff 全仓 209→159（净减 50 来自遗留删除），新代码零新增告警。
+
+---
+
 ## v2.0.8 (2026-10-11)
 
 **流式面板质量四连修：多行思考吸附 / 答案复读过滤 / 单工具耗时 / 非对话通知永不建卡。**
@@ -16,6 +49,15 @@ improvement review 新起一个卡片，跑马灯一直在」。逐项根因与�
 | ④ 💾 通知新卡 + 跑马灯不止 | 后台通知（`_make_bg_review_callbacks` → `_send_status_text`，metadata 仅 `_interim_send`；`non_conversational` 标记仅 Discord 生效）带 💾 emoji → 命中进度启发式 → 卡片定稿后仍触发 `_on_progress` 建新卡（streaming_mode + spinner，永无 finalize） | `classify` 官方非对话通知清单（对齐内置 Discord 适配器 `_DISCORD_NONCONVERSATIONAL_*` 正则子集：💾 Self-improvement review / ⏳ Working / Hermes update / Gateway restart）→ CH_INTERIM：活跃卡并入面板（V1 `defer_background_review` 语义）/ 无卡走原生文本；`_upgrade_plain_to_progress` 增加 metadata 守卫（notify/non_conversational/通知文本永不升格） |
 
 套件 712/712（新增 32 用例）；ruff 新代码零新增告警。
+
+**审计方法**: 服务器 gateway18.log 真实回合取证 + hermes 源码逐行定位（`turn_response_intake.py::_relay_thinking` / `model_tools.py` 钩子 / `gateway/run.py:476` Discord-only 标记）+ V1(1.8.1) worktree 逐项对照（`on_thinking`/`defer_background_review`/`_format_duration_label`/`_REASONING_DISPLAY_LIMIT`）。
+
+**已知限制**:
+- 模型上游截断（"Response truncated — server ended the stream without finish_reason"，sensenova 端点侧现象）V2 层不可修
+- 429003 账户级限流为外部约束
+- v2.0.9 审计发现本版存在三处缺陷（300317 无自愈 / GC 优先级 / 幽灵卡竞态），已在下一版修复
+
+---
 
 ## v2.0.7 (2026-10-11)
 
