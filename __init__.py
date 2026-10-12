@@ -22,7 +22,7 @@ else:
     __version__ = "unknown"
 
 try:
-    from .adapter import FeishuStreamingAdapter, register
+    from .plugin.adapter import FeishuStreamingAdapter, register
 except Exception as _adapter_err:  # noqa: BLE001 — hermes 不在环境：包导入不炸，register 调用时 fail-fast
     _adapter_import_error = _adapter_err
 

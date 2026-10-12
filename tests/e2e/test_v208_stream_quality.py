@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from hermes_lark_streaming import tool_timing
 from hermes_lark_streaming.cardkit.cards import _render_status_children
 from hermes_lark_streaming.cardkit.progline import (
     parse_progress_line,
@@ -41,6 +40,7 @@ from hermes_lark_streaming.composer.engine import (
     _merge_progress_lines,
     _reconcile_line_times,
 )
+from hermes_lark_streaming.plugin import tool_timing
 
 MULTI_LINE_THINK = (
     "My previous response was cut off mid-stream while listing news. "
@@ -171,7 +171,8 @@ class TestMultiLineThinking:
         # 1 个轮次标题 + 1 个正文 detail（不打碎成多行 raw markdown）
         assert len(els) == 2
         detail = els[1]
-        assert detail["text"]["tag"] == "plain_text"
+        assert detail["text"]["tag"] == "lark_md"  # v2.0.12：思考正文 markdown 渲染
+        assert "<font color='grey'>" in detail["text"]["content"]
         assert "乌克兰外交部" in detail["text"]["content"]
         assert "美国：田纳西" in detail["text"]["content"]
 
@@ -414,7 +415,7 @@ class TestNoticeRouting:
         assert st.status_lines == ["💾 Self-improvement review: User profile updated"]
 
     def test_upgrade_plain_skips_notice_and_notify(self, composer):
-        from hermes_lark_streaming.adapter import _upgrade_plain_to_progress
+        from hermes_lark_streaming.plugin.adapter import _upgrade_plain_to_progress
 
         assert _upgrade_plain_to_progress(
             composer, "oc_x", "💾 Self-improvement review: User profile updated") is None
@@ -474,7 +475,7 @@ class TestToolTimingModule:
         assert ctx.names == ["post_tool_call"]
 
     def test_max_line_chars_raised(self):
-        from hermes_lark_streaming import reasoning_feed
+        from hermes_lark_streaming.plugin import reasoning_feed
 
         assert reasoning_feed._MAX_LINE_CHARS == 2000
 
@@ -515,4 +516,4 @@ class TestEngineMultiLineThinking:
         # 渲染：轮次标题 + 单一正文元素
         els = _panel_children(comp, chat)
         assert len(els) == 2
-        assert els[1]["text"]["tag"] == "plain_text"
+        assert els[1]["text"]["tag"] == "lark_md"  # v2.0.12：思考正文 markdown 渲染

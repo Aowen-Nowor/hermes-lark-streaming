@@ -146,8 +146,8 @@ class TestRenderStatusChildren:
         assert title_el["icon"]["token"] == "robot-add_outlined"
         assert "第 1 轮" in _texts([title_el])[0]
         assert "green" in _texts([title_el])[0]  # 定稿轮绿色（V1 finalized 语义）
-        assert _texts([detail_el])[0] == "正在检查内核"
-        assert detail_el["text"]["text_color"] == "grey"
+        assert _texts([detail_el])[0] == "<font color='grey'>正在检查内核</font>"
+        assert detail_el["text"]["tag"] == "lark_md"  # v2.0.12：思考正文 markdown 渲染
         assert detail_el["margin"].endswith("22px")  # V1 同款缩进
 
     def test_consecutive_thinking_single_round(self):

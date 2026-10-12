@@ -127,7 +127,7 @@ def level3(hermes_root: str) -> None:
     import hermes_lark_streaming as pkg
 
     check("包导入 + 版本", pkg.__version__ == "2.0.0", pkg.__version__)
-    from hermes_lark_streaming import adapter as A
+    from hermes_lark_streaming.plugin import adapter as A
 
     # 惰性导入：register 前基类为占位，显式触发真实导入
     A._get_builtin()
@@ -159,7 +159,7 @@ def level3(hermes_root: str) -> None:
 
     check("FrameComposer 导入", FrameComposer is not None)
     # clarify / aowen / config / plugin 模块导入
-    from hermes_lark_streaming import clarify  # noqa: F401
+    from hermes_lark_streaming.plugin import clarify  # noqa: F401
 
     check("clarify 模块导入", True)
     from hermes_lark_streaming.aowen import (  # noqa: F401
@@ -181,7 +181,7 @@ def level3(hermes_root: str) -> None:
     import plugins.platforms.feishu.adapter as _builtin_mod  # type: ignore
 
     check("内置 send 未被 patch",
-          _builtin_mod.FeishuAdapter.send.__module__ != "hermes_lark_streaming.adapter")
+          _builtin_mod.FeishuAdapter.send.__module__ != "hermes_lark_streaming.plugin.adapter")
 
 
 def main() -> int:

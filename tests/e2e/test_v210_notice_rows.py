@@ -41,8 +41,8 @@ from .test_v208_stream_quality import _FakeClient, _seed_active, _settle
 @pytest.fixture()
 def composer():
     """v2.0.10 本地副本（fixture 不随模块导入注册；结构同 v208）."""
-    from hermes_lark_streaming import tool_timing
     from hermes_lark_streaming.cardkit.cards import build_streaming_card_v2
+    from hermes_lark_streaming.plugin import tool_timing
 
     client = _FakeClient()
     comp = FrameComposer(
@@ -183,7 +183,7 @@ class TestOfficialTokens:
 class TestStatusLane:
     def _stub(self, comp, monkeypatch):
         """免 __init__ 的适配器桩：注入 composer，并把占位基类 send 换成记录器."""
-        import hermes_lark_streaming.adapter as adp
+        import hermes_lark_streaming.plugin.adapter as adp
 
         native: list[tuple] = []
 

@@ -110,7 +110,7 @@ def _any_card_client() -> Any:
 # ── CardKit 客户端构建 ──────────────────────────────────────────────────────
 def _client_config_for(adapter: Any) -> Any:
     """从内置适配器实例提取凭证，构造 FeishuClientConfig."""
-    from .feishu.client import FeishuClientConfig
+    from ..feishu.client import FeishuClientConfig
 
     domain_name = str(getattr(adapter, "_domain_name", "") or os.environ.get("FEISHU_DOMAIN", "feishu")).lower()
     if domain_name == "lark":
@@ -149,7 +149,7 @@ class _CardFactory:
         status_durations: dict[str, str] | None = None,
         status_times: list[float] | None = None,
     ) -> dict[str, Any]:
-        from .cardkit.cards import build_streaming_card_v2
+        from ..cardkit.cards import build_streaming_card_v2
 
         params = self._params()
         return build_streaming_card_v2(
@@ -160,7 +160,7 @@ class _CardFactory:
     def final(self, **_: Any) -> dict[str, Any]:
         # V2 终态不重建卡片（answer 元素由 stream_element 落终值）。
         # 保留工厂位：V2.1 折叠状态区 / footer 时在此扩展。
-        from .cardkit.cards import build_streaming_card_v2
+        from ..cardkit.cards import build_streaming_card_v2
 
         params = self._params()
         params["include_loading_hint"] = False
@@ -192,7 +192,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         self._card_config = self._make_config()
         self._card_factory = _CardFactory(self._card_config)
         self._card_client: Any = None
-        from .composer.engine import FrameComposer
+        from ..composer.engine import FrameComposer
 
         self._composer = FrameComposer(
             get_client=self._get_card_client,
@@ -219,7 +219,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
     # ── 初始化辅助 ──────────────────────────────────────────────────────
     def _make_config(self) -> Any:
         try:
-            from .config import Config
+            from ..config import Config
 
             return Config()
         except Exception:
@@ -249,7 +249,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             if not getattr(self, "_app_id", "") or not getattr(self, "_app_secret", ""):
                 return None
             try:
-                from .feishu.client import FeishuClient
+                from ..feishu.client import FeishuClient
 
                 self._card_client = FeishuClient(_client_config_for(self))
             except Exception:
@@ -261,7 +261,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
     async def send(
         self, chat_id: str, content: str, reply_to: str | None = None, metadata: dict[str, Any] | None = None,
     ) -> Any:
-        from .composer.classify import CH_PLAIN, classify_send
+        from ..composer.classify import CH_PLAIN, classify_send
 
         try:
             cls = classify_send(content, metadata)
@@ -308,7 +308,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         刻意偏离官方「按 status_key 原地编辑气泡」契约：面板本身就是本平台
         的原地状态面，再编辑一份气泡会双份呈现。
         """
-        from .composer.classify import CH_INTERIM, ClassifyResult
+        from ..composer.classify import CH_INTERIM, ClassifyResult
 
         try:
             cls = ClassifyResult(CH_INTERIM, kind="advisory", raw_content=content or "", meta={})
@@ -323,7 +323,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
     async def edit_message(
         self, chat_id: str, message_id: str, content: str, *, finalize: bool = False,
     ) -> Any:
-        from .composer.classify import classify_edit
+        from ..composer.classify import classify_edit
 
         try:
             if self._composer.state_by_message(message_id) is not None:
@@ -419,7 +419,7 @@ def _upgrade_plain_to_progress(
     永不抛异常（内部全吞，失败维持原分类）。
     """
     try:
-        from .composer.classify import (
+        from ..composer.classify import (
             CH_PROGRESS,
             ClassifyResult,
             _is_notice_text,
@@ -526,7 +526,7 @@ def register(ctx: Any) -> None:
 
     # /aowen 指令：官方 hook API 注册（非补丁）
     try:
-        from .aowen import handle_pre_gateway_dispatch
+        from ..aowen import handle_pre_gateway_dispatch
 
         ctx.register_hook("pre_gateway_dispatch", handle_pre_gateway_dispatch)
         _logger.info("feishu-streaming: /aowen commands registered (help, status, monitor)")
@@ -556,7 +556,7 @@ def register(ctx: Any) -> None:
 def _prewarm_config() -> None:
     """注册期配置注入与 lark-oapi 门槛检查（自 V1 plugin/ 移植语义）."""
     try:
-        from .plugin import check_lark_oapi_floor, ensure_streaming_config
+        from . import check_lark_oapi_floor, ensure_streaming_config
 
         check_lark_oapi_floor()
         ensure_streaming_config()

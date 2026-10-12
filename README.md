@@ -4,11 +4,11 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.11-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.12-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.21-grey)](https://github.com/NousResearch/hermes-agent)
-[![python](https://img.shields.io/badge/python-3.11%2B-informational)](#快速开始)
-[![tests](https://img.shields.io/badge/tests-530%20passed-brightgreen)](#测试与-e2e)
+[![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
+[![tests](https://img.shields.io/badge/tests-542%20passed-brightgreen)](#测试与-e2e)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
 *回答打字机流式呈现 · 工具与思考实时进面板 · 澄清问题变成可点击卡片 · 全程零 monkey-patch*
@@ -31,7 +31,7 @@ hermes 内置飞书平台的**增强版**：适配器完整继承内置 `FeishuA
 
 **流式卡片（核心）**
 - 回答以打字机效果写入 CardKit 卡片（实体级 `stream_element` 流式更新）
-- 工具进度与思考过程实时渲染进卡片状态面板：`agent loop · N 轮 · M 个工具 · 耗时` 动态标题、思考按轮分组（`第 N 轮 · X.Xs`）、单工具耗时（`Terminal (2.3 s)`）、官方图标体系
+- 工具进度与思考过程实时渲染进卡片状态面板：`agent loop · N 轮 · M 个工具 · 耗时` 动态标题、思考按轮分组（`第 N 轮 · X.Xs`）、思考正文 markdown 渲染（灰色小字号，`**加粗**`/`*斜体*`/`` `代码` `` 生效）、单工具耗时（`Terminal (2.3 s)`）、官方图标体系
 - 两步优雅定稿：终值落盘 + `close_streaming`，页脚呈现耗时 / 模型 / 上下文统计
 
 **交互卡片**
@@ -72,6 +72,8 @@ cp -r hermes-lark-streaming ~/.hermes/plugins/
 # 2. 依赖（lark-oapi >= 1.6.4）
 pip install 'lark-oapi>=1.6.4'
 ```
+
+> Python 版本与 hermes 官方对齐：**3.14**（`requires-python = ">=3.11,<3.15"`）。
 
 在 `config.yaml` 中启用平台（与内置 `feishu` 二选一）：
 
@@ -124,35 +126,40 @@ plugins:
 ```text
 hermes-lark-streaming/
 ├── plugin.yaml               # 插件清单（kind: platform · 版本单一来源）
-├── __init__.py               # 包入口（register 导出 + __version__）
-├── __main__.py               # python -m 诊断入口
-├── adapter.py                # FeishuStreamingAdapter（出站语义层重写）
-├── clarify.py                # 澄清卡片闭环（三态反馈 + fail-closed 授权）
-├── reasoning_feed.py         # 思考隐藏流 → 面板思考行（官方观察者钩子）
-├── tool_timing.py            # post_tool_call 钩子 → 单工具耗时
+├── __init__.py               # 包入口（register 导出 + __version__）——根目录唯一运行时 .py 之一
+├── __main__.py               # python -m 诊断入口——根目录唯一运行时 .py 之二
+├── plugin/                   # hermes 集成层（对 hermes 的适配与钩子）
+│   ├── adapter.py            #   FeishuStreamingAdapter（出站语义层重写）
+│   ├── clarify.py            #   澄清卡片闭环（三态反馈 + fail-closed 授权）
+│   ├── reasoning_feed.py     #   思考隐藏流 → 面板思考行（官方观察者钩子）
+│   ├── tool_timing.py        #   post_tool_call 钩子 → 单工具耗时
+│   └── __init__.py           #   注册期辅助（lark-oapi 门槛 / 配置注入）
 ├── cardkit/                  # CardKit v2 卡片层（构建/元素/seq 自愈/官方图标）
 ├── composer/                 # 帧重组引擎（分类 + per-chat 状态机 + 定稿）
 ├── feishu/                   # FeishuClient（CardKit REST + 瞬态重试）
 ├── config/                   # 配置读取（config.yaml → Config）
-├── plugin/                   # 注册期辅助（lark-oapi 门槛 / 配置注入）
 ├── aowen/                    # /aowen 指令
-├── tests/                    # 530 用例（单元 + e2e mock 全链路）
+├── tests/                    # 542 用例（单元 + e2e mock 全链路）
 ├── scripts/                  # e2e_v2 真飞书验收 / smoke_v2 冒烟 / release 工具
 ├── docs/                     # API.md
 ├── assets/screenshots/       # 实景截图
 ├── CHANGELOG.md              # 版本历史（类型|问题|原因|修复 表格）
-└── pyproject.toml · setup.py · LICENSE
+└── pyproject.toml · LICENSE · README.md
 ```
 
-> **为什么运行时代码平铺在根目录？** hermes 目录插件加载器把插件目录本身作为
-> Python 包导入（`spec_from_file_location`，`__path__` 指向插件目录），所有运行时
-> 子包必须是根的直接子级 —— 与 hermes 官方内置插件同构。测试与脚本通过
+> **为什么根目录只有两个 .py？** hermes 目录插件加载器把插件目录本身作为
+> Python 包导入（`spec_from_file_location`，`__path__` 指向插件目录），之后
+> 所有相对导入走标准 import 机制——加载器唯一契约是根 `__init__.py` 暴露
+> `register`，子包布局对加载器不可见。因此运行时模块全部收进 `plugin/`（hermes
+> 集成层）与引擎子包，根目录只保留两个入口脚本与文档/配置。测试与脚本通过
 > `tests/conftest.py` 的同款引导把仓库根注册为 `hermes_lark_streaming` 包。
+
+**Python 版本**：与 hermes 官方完全对齐——`requires-python = ">=3.11,<3.15"`（官方唯一受支持运行时为 **3.14**，3.11 下限是官方更新器契约，见 hermes-agent `pyproject.toml`）。
 
 ## 测试与 E2E
 
 ```bash
-# 单元 + e2e mock 全链路（530 用例）
+# 单元 + e2e mock 全链路（542 用例）
 python -m pytest tests/
 
 # 冒烟（无飞书凭证）

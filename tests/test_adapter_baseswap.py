@@ -58,7 +58,7 @@ _pkg.__path__ = [__REPO_ROOT__]
 sys.modules["hermes_lark_streaming"] = _pkg
 _spec.loader.exec_module(_pkg)
 
-import hermes_lark_streaming.adapter as A
+import hermes_lark_streaming.plugin.adapter as A
 
 # 1) 导入期绑定：类基座必须已是真实基类（生产主路径）
 assert A.FeishuStreamingAdapter.__bases__ == (RealStubBase,), (

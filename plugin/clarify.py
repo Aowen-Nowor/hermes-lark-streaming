@@ -79,7 +79,7 @@ def _submitted_card_response(selected_text: str, q: str, cid: str) -> Any:
     P2CardActionTriggerResponse, CallBackCard = _load_response_classes()
     if P2CardActionTriggerResponse is None or CallBackCard is None:
         return _empty_response()
-    from .cardkit import build_clarify_submitted_card
+    from ..cardkit import build_clarify_submitted_card
 
     card_data = build_clarify_submitted_card(question=q, selected=selected_text, clarify_id=cid)
     response = P2CardActionTriggerResponse()
@@ -101,7 +101,7 @@ async def send_clarify_card(
     metadata: dict[str, Any] | None = None,
 ) -> Any | None:
     """以交互卡片发送澄清问题。失败返回 None（调用方降级为官方文本路径）。"""
-    from .cardkit import build_clarify_card, normalize_clarify_choices
+    from ..cardkit import build_clarify_card, normalize_clarify_choices
 
     prune_expired()
     normalized = normalize_clarify_choices(choices) if choices else None
@@ -210,7 +210,7 @@ async def _schedule_confirm_card(*, client_getter: Callable[[], Any], cid: str) 
         _logger.warning("clarify: cannot confirm, card client unavailable cid=%s", cid[:12])
         return
     try:
-        from .cardkit import build_clarify_confirmed_card
+        from ..cardkit import build_clarify_confirmed_card
 
         card_data = build_clarify_confirmed_card(question=question, selected=selected)
         await client.update_card(card_msg_id, card_data)

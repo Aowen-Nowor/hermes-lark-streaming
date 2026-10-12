@@ -12,7 +12,6 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from hermes_lark_streaming.cardkit import (
     build_clarify_card,
     build_clarify_confirmed_card,
@@ -24,7 +23,6 @@ from hermes_lark_streaming.cardkit.special import (
     _CLARIFY_MAX_CHOICE_LEN,
     _normalize_choice,
 )
-
 
 # ── build_clarify_card (Pending state) ──
 
@@ -325,24 +323,27 @@ class TestClarifyCardRegistry:
     """Test the _clarify_choices, _clarify_questions, _clarify_answers, _clarify_card_info module-level dicts."""
 
     def test_choices_registry_exists(self) -> None:
-        from hermes_lark_streaming.clarify import _clarify_choices
+        from hermes_lark_streaming.plugin.clarify import _clarify_choices
         assert isinstance(_clarify_choices, dict)
 
     def test_questions_registry_exists(self) -> None:
-        from hermes_lark_streaming.clarify import _clarify_questions
+        from hermes_lark_streaming.plugin.clarify import _clarify_questions
         assert isinstance(_clarify_questions, dict)
 
     def test_selections_registry_exists(self) -> None:
-        from hermes_lark_streaming.clarify import _clarify_selections
+        from hermes_lark_streaming.plugin.clarify import _clarify_selections
         assert isinstance(_clarify_selections, dict)
 
     def test_card_msg_ids_registry_exists(self) -> None:
-        from hermes_lark_streaming.clarify import _clarify_card_msg_ids
+        from hermes_lark_streaming.plugin.clarify import _clarify_card_msg_ids
         assert isinstance(_clarify_card_msg_ids, dict)
 
     def test_choices_cleanup_after_resolve(self) -> None:
         """After resolving a clarify, the choices should be cleaned up."""
-        from hermes_lark_streaming.clarify import _clarify_choices, _clarify_questions
+        from hermes_lark_streaming.plugin.clarify import (
+            _clarify_choices,
+            _clarify_questions,
+        )
 
         _clarify_choices["cleanup_test"] = ["A", "B"]
         _clarify_questions["cleanup_test"] = "Q"

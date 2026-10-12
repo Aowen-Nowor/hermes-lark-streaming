@@ -97,8 +97,8 @@ class E2ETestRunner:
     # ── 生命周期 ────────────────────────────────────────────────────────
     async def setup(self) -> None:
         """构造 _CardFactory + FrameComposer（与 adapter.__init__ 同款接线）."""
-        from hermes_lark_streaming.adapter import _CardFactory
         from hermes_lark_streaming.composer.engine import FrameComposer
+        from hermes_lark_streaming.plugin.adapter import _CardFactory
 
         try:
             from hermes_lark_streaming.config.reader import Config

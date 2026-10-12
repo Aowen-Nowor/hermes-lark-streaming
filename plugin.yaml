@@ -1,7 +1,7 @@
 name: feishu-streaming-platform
 label: Feishu / Lark (Streaming Cards)
 kind: platform
-version: "2.0.11"
+version: "2.0.12"
 description: >
   Feishu / Lark CardKit v2.0 streaming-card platform for Hermes Agent —
   a drop-in, zero-monkey-patch replacement for the built-in Feishu platform.

@@ -30,6 +30,7 @@ __all__ = [
     '_build_tool_step_title',
     '_build_reasoning_round_title',
     '_build_tool_step_detail',
+    '_build_reasoning_body_detail',
     '_build_tool_step_output',
     '_tool_status_info',
     '_format_code_block',
@@ -518,6 +519,39 @@ def _build_tool_step_detail(step: dict) -> dict | None:
             "tag": "plain_text",
             "content": detail,
             "text_color": "grey",
+            "text_size": "notation",
+        },
+    }
+
+def _build_reasoning_body_detail(body: str) -> dict | None:
+    """思考正文 div — lark_md 渲染（v2.0.12 用户反馈：``**bold**`` 原样显示星号）.
+
+    与命令摘要（``_build_tool_step_detail``，plain_text）刻意分流：思考文本是
+    模型生成的 markdown 语义文本，bold/italic/inline code 应当渲染而非原样
+    显示。样式沿用 V1/V2 面板视觉（22px 缩进 + notation 字号 + 灰色）：
+
+    - 灰色用 ``<font color='grey'>`` 内容级包裹而非 ``text_color`` 属性 ——
+      卡片 2.0 文本元素 ``text_color`` 仅 plain_text 支持（第三方组件文档 +
+      s116 真飞书探针 create/update 均 code=0 但无法确认属性生效），而
+      ``lark_md`` + ``text_size`` + ``<font>`` 组合是轮次/工具标题行
+      （``_build_reasoning_round_title``/``_build_tool_step_title``）的生产
+      已验证原语，grey 与 plain_text text_color 同属官方色板枚举；
+    - **逐行包裹**：``<font>`` 是行内元素，跨空行的多行包裹行为无契约，
+      逐行包裹把灰色变成行内确定性行为；空行与已含 ``<font>`` 的行不包裹。
+    """
+    detail = (body or "").strip()
+    if not detail:
+        return None
+    wrapped = "\n".join(
+        ln if ("<font" in ln or not ln.strip()) else f"<font color='grey'>{ln}</font>"
+        for ln in detail.split("\n")
+    )
+    return {
+        "tag": "div",
+        "margin": "0px 0px 0px 22px",
+        "text": {
+            "tag": "lark_md",
+            "content": wrapped,
             "text_size": "notation",
         },
     }

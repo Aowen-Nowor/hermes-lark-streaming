@@ -316,8 +316,8 @@ def build_help_card() -> dict[str, Any]:
 def build_status_card() -> dict[str, Any]:
     """Build status card — 3 metrics, patch status, collapsible config."""
     try:
-        from .. import adapter as _adapter_mod
         from ..config import Config
+        from ..plugin import adapter as _adapter_mod
 
         cfg = Config()
 
@@ -707,7 +707,7 @@ def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
     """Send card fire-and-forget via the active adapter's CardKit client."""
     import asyncio
 
-    from .. import adapter as _adapter_mod
+    from ..plugin import adapter as _adapter_mod
 
     client = _adapter_mod._any_card_client()
     if client is None:

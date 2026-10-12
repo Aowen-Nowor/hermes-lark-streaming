@@ -11,6 +11,7 @@ from .elements import (
     STREAMING_ELEMENT_ID,
     UNIFIED_PANEL_ELEMENT_ID,
     _build_footer_elements,
+    _build_reasoning_body_detail,
     _build_reasoning_round_title,
     _build_tool_step_detail,
     _build_tool_step_title,
@@ -118,6 +119,11 @@ def _render_status_children(
       到下一工具行到达；line_times 缺失时省略不伪造）
     - 思考正文整段渲染（多行吸附由 progline.split_progress_segments 保证），
       超过 2000 字截断（V1 _REASONING_DISPLAY_LIMIT 同款）
+
+    v2.0.12（用户验收：思考正文 markdown 未渲染）：
+    - 思考正文 plain_text → lark_md（_build_reasoning_body_detail：逐行
+      <font color='grey'> 包裹保持灰色缩进视觉，markdown 语义生效）；
+      命令摘要保持 plain_text（命令是代码非 markdown 语义）
     """
     children: list[dict[str, Any]] = []
     round_no = 0
@@ -137,8 +143,9 @@ def _render_status_children(
                 )
             prev_thinking = True
             body = clean or text[len(_THINKING_PREFIX):].strip() or text
-            detail = _build_tool_step_detail(
-                {"detail": _truncate_reasoning_body(body)})
+            # v2.0.12：思考正文走 lark_md 渲染（**bold** 等 markdown 语义生效），
+            # 命令摘要仍走 plain_text（命令非 markdown 语义，见 _render 注释）。
+            detail = _build_reasoning_body_detail(_truncate_reasoning_body(body))
             if detail is not None:
                 children.append(detail)
             continue

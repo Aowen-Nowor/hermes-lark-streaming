@@ -193,9 +193,9 @@ def _cmd_verify() -> int:
 def _cmd_cleanup() -> int:
     """Remove plugin-injected config entries from config.yaml."""
     try:
-        from hermes_lark_streaming.plugin import _cleanup_config
+        from hermes_lark_streaming.plugin import cleanup_streaming_config
 
-        _cleanup_config()
+        cleanup_streaming_config()
         print("Cleanup complete. Next steps:")
         print("  1. hermes plugins uninstall hermes-lark-streaming")
         print("  2. hermes gateway restart")
@@ -283,7 +283,7 @@ def _cmd_doctor() -> int:
     print()
     print("[5/6] Architecture: native platform plugin (zero monkey-patch)")
     try:
-        from hermes_lark_streaming.adapter import get_active_adapters
+        from hermes_lark_streaming.plugin.adapter import get_active_adapters
         adapters = get_active_adapters()
         print(f"      Active adapter instances: {len(adapters)}")
     except ModuleNotFoundError as e:

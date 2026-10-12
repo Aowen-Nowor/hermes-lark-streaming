@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.0.12 (2026-10-12)
+
+**面板思考正文 markdown 渲染 + 仓库根目录布局契约化 + Python 版本对齐 hermes 官方（用户 2026-10-12 三连反馈）。**
+
+背景：①折叠面板思考正文自 V1 起走命令摘要同款 `plain_text` 灰字渲染——对命令正确，对模型生成的 markdown 语义文本错误，`**Planning tool use**` 原样显示星号；②pyproject 声明 `requires-python = ">=3.11"` 与 hermes 官方漂移（官方 pyproject.toml:10-15 明示 `">=3.11,<3.15"` 且注释原文 *"we \*only\* support 3.14"*，服务器 gateway 实际运行 Python 3.14）；③仓库根目录仍平铺 5 个 .py（adapter / clarify / reasoning_feed / tool_timing / setup），与「根目录只应保留入口与文档配置」的整洁标准不符。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| P2 | 折叠面板思考正文 markdown 未渲染：`**bold**` / `*italic*` / `` `code` `` 原样显示 | 思考正文自 V1 起与命令摘要共用 `_build_tool_step_detail`（plain_text 灰字）；命令是代码非 markdown，思考文本是模型 markdown 语义输出——同一渲染函数服务两种语义是根因 | 新增 `_build_reasoning_body_detail`：思考正文改 **lark_md** 渲染（markdown 语义生效），视觉不变（22px 缩进 + notation 字号 + 灰色逐行 `<font color='grey'>` 包裹——卡片 2.0 文本元素 `text_color` 仅 plain_text 支持，`lark_md` + `text_size` + `<font>` 是轮次/工具标题行生产已验证原语，逐行包裹规避多行 `<font>` 跨空行无契约问题）；命令摘要保持 plain_text；s116 真飞书探针 5 变体（lark_md+text_color / lark_md+font-grey / markdown+text_color / markdown / plain_text 现状对照）create + PUT 全过，比对卡 om_x100b63fd18545884c37387393b82173 |
+| P2 | Python 版本声明与 hermes 官方漂移 | v1.x 时代对齐后 hermes 官方收紧未跟：官方唯一受支持运行时为 3.14（wheels 仅保证 3.14），`>=3.11` 元数据下限是官方更新器契约（旧安装升级步骤） | pyproject `requires-python = ">=3.11,<3.15"` 精确镜像官方并注释理由；README 徽章 python-3.11+ → **python-3.14** |
+| P2 | 根目录平铺 5 个 .py，层级不整洁（用户：「根目录下除了 `__init__.py`、`__main__.py` 就不应该有其他 py 脚本」） | v2.0.11 曾以「运行时平铺 = 官方内置插件同构」为结论保留——经官方加载器源码重新核对，该结论过度保守：平台插件装载器 `_load_directory_module`（hermes_cli/plugins_loader.py:698）仅做 `spec_from_file_location` + `__path__=[插件目录]`，之后全部相对导入走标准 import 机制（cardkit/ 等子包同机制早已生产验证），加载器唯一契约是根 `__init__` 暴露 `register`；`plugins/plugin_loader.py` 的根级 `*.py` 兄弟预注册仅服务 cron_providers/context_engine/memory 发现包，与平台插件无关 | `adapter.py` / `clarify.py` / `reasoning_feed.py` / `tool_timing.py` `git mv` 收进 `plugin/`（hermes 集成层，跨包子包导入 `from ..xxx`）；`setup.py` 删除（动态版本改 `[tool.setuptools.dynamic] version = {attr = "hermes_lark_streaming.__version__"}`，plugin.yaml 仍是版本单一来源，pip wheel 实构建验证 2.0.12 解析成功）；根目录仅余 `__init__.py` + `__main__.py` + 文档/配置；布局契约冻结为回归测试（根仅两入口 .py）；顺带修复 `__main__ cleanup` 子命令导入不存在的 `_cleanup_config`（实为 `cleanup_streaming_config`）的死命令 bug |
+
+**审计方法**: 官方加载器源码逐行核对（hermes_cli/plugins_loader.py vs plugins/plugin_loader.py 双装载器辨析）→ V1（DEV 2e90f9fe）渲染考古（思考正文自 V1 即 plain_text，属既定视觉而非回归）→ 真飞书 s116 五变体探针 → hermes 官方 pyproject 原文引用（hermes-agent @ 本地审计克隆）→ 全量 542/542（v2.0.12 新增布局契约 + md 渲染 11 用例）→ ruff 143（基线 148，净减 5，新代码零新增）→ pip wheel 动态版本实构建。
+
+**已知限制**:
+- lark_md 是 markdown 组件的子集：列表/表格/围栏等扩展语法在思考正文中仍按字面显示（思考段的围栏内容本就经 progline 分流到独立 markdown 兜底行渲染，不受影响）
+- 思考正文行内既有 `<font>` 的行不再包裹灰色（避免嵌套干扰），该行保持原色
+- pip 构建的动态版本经 attr 导入解析：`__init__` 解析 plugin.yaml 不依赖第三方库，构建环境缺 yaml/hermes 时 adapter 导入失败被捕获、版本解析不受影响
+
+---
+
 ## v2.0.11 (2026-10-12)
 
 **一轮对话生成多张卡片（孤儿卡）——per-chat 帧串行化（用户飞书验收反馈：「一个问题生成了多张卡片」）。**

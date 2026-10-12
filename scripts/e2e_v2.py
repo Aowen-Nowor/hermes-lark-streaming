@@ -57,7 +57,6 @@ if "hermes_lark_streaming" not in sys.modules:
     sys.modules["hermes_lark_streaming"] = _mod
     _spec.loader.exec_module(_mod)
 
-from hermes_lark_streaming.adapter import _CardFactory
 from hermes_lark_streaming.composer.classify import (
     classify_edit,
     classify_send,
@@ -65,6 +64,7 @@ from hermes_lark_streaming.composer.classify import (
 from hermes_lark_streaming.composer.engine import FrameComposer
 from hermes_lark_streaming.config.reader import Config
 from hermes_lark_streaming.feishu.client import FeishuClient, FeishuClientConfig
+from hermes_lark_streaming.plugin.adapter import _CardFactory
 
 STREAM_INTERVAL_SEC = 0.4   # 单卡 stream_element 限频保护（10 次/秒）
 SCENARIO_GAP_SEC = 2.0      # 场景间隔（create/close 计入 1000 次/分）

@@ -232,7 +232,7 @@ class TestClassifyRealFormats:
 
     def test_bare_send_upgrade_terminal_block(self):
         # 真实会话：进度气泡是裸 send（无 _interim_send）→ 依赖升格规则
-        from hermes_lark_streaming.adapter import _upgrade_plain_to_progress
+        from hermes_lark_streaming.plugin.adapter import _upgrade_plain_to_progress
 
         composer = object()  # 升格函数不再要求活跃卡片，占位即可
         cls = _upgrade_plain_to_progress(composer, "chat-x", REAL_TERMINAL_BLOCK)

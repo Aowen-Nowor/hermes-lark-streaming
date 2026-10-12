@@ -18,9 +18,9 @@ import threading
 import time
 
 import pytest
-from hermes_lark_streaming import reasoning_feed
 from hermes_lark_streaming.cardkit.cards import _render_status_children
 from hermes_lark_streaming.composer.engine import FrameComposer, _panel_title
+from hermes_lark_streaming.plugin import reasoning_feed
 
 THINK_A = "正在检查系统状态，先收集内核与运行时长…"
 THINK_B = "工具跑完了，正在汇总结果…"
@@ -83,7 +83,7 @@ def chat_ctx(monkeypatch):
         monkeypatch.setattr(sc, "get_session_env", fake_get_session_env)
     except Exception:  # noqa: BLE001 — 无 hermes 环境直接 patch feed 内部
         monkeypatch.setattr(
-            "hermes_lark_streaming.reasoning_feed._current_chat_id", lambda: chat, raising=True
+            "hermes_lark_streaming.plugin.reasoning_feed._current_chat_id", lambda: chat, raising=True
         )
     return chat
 
@@ -131,7 +131,7 @@ class TestFiltering:
 
     def test_no_chat_context_drops(self, composer, monkeypatch):
         monkeypatch.setattr(
-            "hermes_lark_streaming.reasoning_feed._current_chat_id", lambda: "", raising=True
+            "hermes_lark_streaming.plugin.reasoning_feed._current_chat_id", lambda: "", raising=True
         )
         _feed(THINK_A)
         assert reasoning_feed._BUFS == {}

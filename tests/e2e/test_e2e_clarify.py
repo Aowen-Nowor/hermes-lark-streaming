@@ -153,7 +153,7 @@ class TestClarifySendPath:
         clarify_mod._cleanup(clarify_id)
 
     async def test_send_clarify_card_direct_send(self, runner):
-        from hermes_lark_streaming import clarify as clarify_mod
+        from hermes_lark_streaming.plugin import clarify as clarify_mod
 
         cid = "e2e_clarify_direct_001"
         try:
@@ -180,7 +180,7 @@ class TestClarifySendPath:
 
     async def test_send_clarify_card_reply_branch(self, runner):
         """metadata 带 reply_to → 走 reply_card 分支（回复锚点消息）."""
-        from hermes_lark_streaming import clarify as clarify_mod
+        from hermes_lark_streaming.plugin import clarify as clarify_mod
 
         cid = "e2e_clarify_reply_001"
         try:
@@ -202,7 +202,7 @@ class TestClarifySendPath:
 
     async def test_send_clarify_card_normalizes_dict_repr_choices(self, runner):
         """生产 bug 场景走完整发送路径：dict-repr choices 归一化后入卡."""
-        from hermes_lark_streaming import clarify as clarify_mod
+        from hermes_lark_streaming.plugin import clarify as clarify_mod
 
         cid = "e2e_clarify_normalize_001"
         try:
@@ -230,7 +230,7 @@ class TestClarifySendPath:
 
     async def test_send_clarify_card_without_choices(self, runner):
         """自由输入型澄清（choices=None）→ 卡片仅含问题 + 输入框."""
-        from hermes_lark_streaming import clarify as clarify_mod
+        from hermes_lark_streaming.plugin import clarify as clarify_mod
 
         cid = "e2e_clarify_input_001"
         try:

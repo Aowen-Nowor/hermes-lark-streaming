@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_lark_streaming.adapter import _upgrade_plain_to_progress
+from hermes_lark_streaming.plugin.adapter import _upgrade_plain_to_progress
 from hermes_lark_streaming.composer.classify import CH_PLAIN, CH_PROGRESS, classify_send
 
 
