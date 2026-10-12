@@ -11,6 +11,7 @@ close_streaming / 澄清卡），在真实聊天里可视化验证：
     interim  — 建卡前 interim 暂存 / 建卡后 interim 状态行
     full     — 仿真实 turn 全时序（progress → 建卡 → 面板 → 流式 → 定稿）
     burst    — 并发帧 burst → 单卡片（v2.0.11 per-chat 串行化真飞书验证）
+    native   — 官方 native 帧序列 → 单卡全回合（v2.0.13 send_stream_frame 语义）
     clarify  — 澄清交互卡片（select 分支，真实可点）
     plain    — 原生路径（无标记 send → 原生文本，非卡片）
 
@@ -315,6 +316,59 @@ async def scenario_burst(composer: FrameComposer, client: FeishuClient, chat_id:
         check("burst 卡定稿", bool(r and r.success))
 
 
+async def scenario_native(composer: FrameComposer, client: FeishuClient, chat_id: str) -> None:
+    """v2.0.13：native streaming 帧序列 —— 单卡全回合的真飞书验证.
+
+    模拟官方 native consumer 的真实调用序列（与 gateway/
+    stream_consumer_transport.py 帧原语逐帧对齐，且全部经
+    composer.handle_stream_frame —— adapter.send_stream_frame 的直接委托体）：
+    seed("") → 内容快照 → interim 复合帧（答案+分隔符+工具行）→ 工具后续快照
+    → finalize。官方 native 语义下工具边界不封卡（transport:389 吞
+    segment-break finalize）→ 全程恰好 1 张卡；复合帧工具行拆进状态面板，
+    正文不被工具行污染。
+    """
+    print("== 场景 native：官方 native 帧序列 → 单卡全回合（v2.0.13）==")
+    chat = chat_id  # native 序列用同一 chat
+    # ① 种子帧：官方 _start_transports/_native_push 首帧 text=""
+    ok = await composer.handle_stream_frame(chat, "", finalize=False)
+    check("① 种子帧建卡骨架", ok is True)
+    st = composer.active_state(chat)
+    card_id_1 = st.card_id if st else ""
+    check("② 种子帧后无 answer 内容", bool(st and st.answer_text == ""))
+    await asyncio.sleep(STREAM_INTERVAL_SEC)
+    # ② 内容快照（cumulative：全量而非追加）
+    ok = await composer.handle_stream_frame(chat, "native 场景答案开始。", finalize=False)
+    check("③ 内容快照写入", ok is True and composer.active_state(chat).answer_text == "native 场景答案开始。")
+    await asyncio.sleep(STREAM_INTERVAL_SEC)
+    # ③ interim 复合帧（官方 _compose_frame_content 形态）
+    ok = await composer.handle_stream_frame(
+        chat, f"native 场景答案开始。\n\n---\n🔍 Searching the web", finalize=False)
+    st = composer.active_state(chat)
+    check("④ 复合帧：正文不被工具行污染",
+          ok is True and st is not None and st.answer_text == "native 场景答案开始。")
+    check("⑤ 复合帧：工具行进面板",
+          bool(st and st.status_lines == ["🔍 Searching..."]),
+          f"lines={list(st.status_lines) if st else None}")
+    await asyncio.sleep(STREAM_INTERVAL_SEC)
+    # ④ 工具后续快照（真实 delta 已清 overlay，纯正文）
+    ok = await composer.handle_stream_frame(
+        chat, "native 场景答案开始。检索完成，单卡全回合。", finalize=False)
+    st = composer.active_state(chat)
+    check("⑥ 工具边界后仍同卡（单卡全回合）",
+          ok is True and st is not None and st.card_id == card_id_1)
+    check("⑦ 正文快照已更新", bool(st and st.answer_text.endswith("单卡全回合。")))
+    msg_id = st.card_message_id if st else ""
+    if msg_id:
+        artifacts.append(f"native 卡片消息: {msg_id}")
+    await asyncio.sleep(STREAM_INTERVAL_SEC)
+    # ⑤ 终帧（got_done → finalize=True）
+    ok = await composer.handle_stream_frame(
+        chat, "native 场景答案开始。检索完成，单卡全回合。\n\n— feishu-streaming v2.0.13 native-scenario E2E", finalize=True)
+    st2 = composer._states.get(chat)
+    check("⑧ 终帧定稿", ok is True and st2 is not None and st2.finalized)
+    check("⑨ 全程单卡（card_id 不变）", bool(st2 and st2.card_id == card_id_1))
+
+
 async def scenario_clarify(composer: FrameComposer, client: FeishuClient, chat_id: str) -> None:
     print("== 场景 clarify：澄清交互卡片 ==")
     from hermes_lark_streaming.cardkit import (
@@ -348,7 +402,7 @@ async def scenario_plain(client: FeishuClient, chat_id: str) -> None:
 
 
 # ── 主流程 ──────────────────────────────────────────────────────────────────
-SCENARIOS = ("connect", "answer", "progress", "interim", "full", "burst", "clarify", "plain")
+SCENARIOS = ("connect", "answer", "progress", "interim", "full", "burst", "native", "clarify", "plain")
 
 
 async def run(selected: list[str]) -> int:
@@ -374,6 +428,8 @@ async def run(selected: list[str]) -> int:
                 await scenario_full(composer, client, chat_id)
             elif name == "burst":
                 await scenario_burst(composer, client, chat_id)
+            elif name == "native":
+                await scenario_native(composer, client, chat_id)
             elif name == "clarify":
                 await scenario_clarify(composer, client, chat_id)
             elif name == "plain":
