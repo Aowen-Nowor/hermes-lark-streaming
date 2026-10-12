@@ -347,7 +347,7 @@ async def scenario_native(composer: FrameComposer, client: FeishuClient, chat_id
     check("④ 复合帧：正文不被工具行污染",
           ok is True and st is not None and st.answer_text == "native 场景答案开始。")
     check("⑤ 复合帧：工具行进面板",
-          bool(st and st.status_lines == ["🔍 Searching..."]),
+          bool(st and st.status_lines == ["🔍 Searching the web"]),
           f"lines={list(st.status_lines) if st else None}")
     await asyncio.sleep(STREAM_INTERVAL_SEC)
     # ④ 工具后续快照（真实 delta 已清 overlay，纯正文）
