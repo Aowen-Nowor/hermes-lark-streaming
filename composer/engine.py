@@ -34,6 +34,7 @@ from .classify import (
     CH_PROGRESS,
     CH_STREAM,
     ClassifyResult,
+    _is_progress_text,
     parse_progress_line,
 )
 
@@ -372,7 +373,96 @@ class FrameComposer:
                 self._degrade(chat_id, "edit", exc)
                 return None
 
-    # ── 通道实现 ────────────────────────────────────────────────────────
+    # ── native streaming 帧通道（v2.0.13，Task 18 P1-B）──────────────────────
+    async def handle_stream_frame(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        finalize: bool = False,
+        turn_id: str | None = None,
+    ) -> bool:
+        """hermes native streaming 帧（adapter.send_stream_frame 委托入口）.
+
+        官方契约（gateway/stream_consumer_transport.py）：
+        - 首帧 ``text=""``（种子帧）＝ typing 指示；随后每帧是**全量快照**
+          （cumulative，``_native_push`` push 累积文本）——与 CH_STREAM 的分段
+          追加语义不同，直接赋值 ``answer_text``；
+        - ``finalize=True`` 仅回合终态：native 路径吞掉 segment-break finalize
+          （transport:389 ``finalize = finalize and is_turn_final``）且 native
+          ＝ cumulative transport（``_end_segment`` 直接 return）→ 工具边界
+          不再封卡，单卡全回合（多卡片同族缺陷的通道级根治）；
+        - interim tick 帧为复合形态 ``"{answer}\n\n---\n{工具进度行}"``
+          （stream_consumer.py::_compose_frame_content，官方在真实 delta 到达
+          时清空 overlay :290-291）——工具行拆出并入面板（保持本平台状态面板
+          特色，不进正文），正文快照照常；
+        - 失败（含任何异常）→ 返回 False → 官方 consumer 禁用 native 并回落
+          edit/send 现有链路（降级红线：帧永不丢）。
+
+        返回 True＝帧已消费；False＝本帧未消费，调用方回落。
+        """
+        self._loop = asyncio.get_running_loop()
+        async with self._chat_lock(chat_id):
+            self._gc()
+            try:
+                answer, progress = _split_native_composite(text)
+                if progress:
+                    st_now = self.active_state(chat_id)
+                    if st_now is not None:
+                        await self._absorb_status_lines(st_now, progress)
+                    else:
+                        # 卡未建（进度行早于任何答案帧）：暂存，建卡时并入首卡
+                        # 面板（与 _on_progress 占位同语义，但不提前建卡——种子/
+                        # 答案帧随即到达，建卡由答案帧驱动）。
+                        placeholder = self._states.setdefault(
+                            chat_id, CardTurnState(chat_id=chat_id))
+                        if placeholder.turn_started_at is None:
+                            placeholder.turn_started_at = time.monotonic()
+                        placeholder.pending_status.extend(progress)
+                        placeholder.last_activity = time.monotonic()
+                if finalize:
+                    st = self.active_state(chat_id)
+                    if st is None:
+                        # 终帧无活跃卡（上轮已封/状态被清理）：建卡再封——
+                        # 快照即终值，内容永不丢红线。
+                        await self._create_card(chat_id, answer)
+                        st = self._states.get(chat_id)
+                        if st is None:  # pragma: no cover — create 失败已抛异常
+                            return False
+                    await self._finalize(st, answer)
+                    return True
+                st = self.active_state(chat_id)
+                if st is None:
+                    # 种子帧/首内容帧：建卡（暂存行并入首卡面板；answer 空则
+                    # 只建骨架不写 answer 元素——_create_card 内已处理）。
+                    await self._create_card(chat_id, answer)
+                else:
+                    st.answer_text = answer
+                    await self._stream_answer(st)
+                return True
+            except Exception as exc:  # noqa: BLE001 — 降级红线：native 帧失败回落
+                self._degrade(chat_id, "stream_frame", exc)
+                return False
+
+    async def _absorb_status_lines(self, st: CardTurnState, lines: list[str]) -> None:
+        """进度行合并进活跃面板（幂等/原地取代/思考累积，v2.0.5 合并器）.
+
+        v2.0.13 从 ``_on_progress`` 有卡分支抽出共用：native 复合帧的工具行
+        与网关进度气泡行走同一套合并/耗时认领/行时戳逻辑。
+        """
+        fresh = [ln for ln in lines if not _is_answer_duplicate(ln, st.answer_text)]
+        if not fresh:
+            return
+        merged = _merge_progress_lines(st.status_lines, fresh)
+        if merged is None:
+            return
+        self._migrate_tool_durations(st, st.status_lines, merged)
+        new_times = _reconcile_line_times(st.status_lines, st.line_times, merged)
+        self._attach_pending_durations(st, st.status_lines, merged)
+        st.status_lines = merged[-12:]
+        st.line_times = new_times[-12:]
+        await self._patch_status(st)
+
     async def _on_stream(self, chat_id: str, content: str) -> SendResult | None:
         st = self.active_state(chat_id)
         if st is None:
@@ -499,22 +589,11 @@ class FrameComposer:
         # v2.0.6：accumulate 快照按逻辑段拆分（围栏代码块与工具头一体），
         # 直拆 splitlines 会把真实 terminal 块拆成破碎的 ``` 行（E2E ≠ 正式对话根因）。
         lines = split_progress_segments(raw) or ([raw] if raw else [])
-        # v2.0.8：过滤「最终答案复读」——网关 _relay_thinking 把每次响应的可见
-        # 正文前 500 字都中继成 💬 行（最终答案也不例外）。答案已在 answer 区域
-        # 完整呈现；V1 从不把 final answer 展示进面板（走 stream 通道），对齐。
-        lines = [ln for ln in lines if not _is_answer_duplicate(ln, st.answer_text)]
-        if not lines:
-            return SendResult(success=True)
-        merged = _merge_progress_lines(st.status_lines, lines)
-        if merged is None:
+        before = len(st.status_lines)
+        await self._absorb_status_lines(st, lines)
+        if len(st.status_lines) == before:
             # 无新增/无变化：不触发 cardkit_update（API 经济性；V2.0.0 同语义）
             return SendResult(success=True)
-        self._migrate_tool_durations(st, st.status_lines, merged)
-        new_times = _reconcile_line_times(st.status_lines, st.line_times, merged)
-        self._attach_pending_durations(st, st.status_lines, merged)
-        st.status_lines = merged[-12:]
-        st.line_times = new_times[-12:]
-        await self._patch_status(st)
         # 同上：不回传 message_id，网关进度气泡循环会继续 _send_progress_text
         # （全量快照）而非 edit —— 面板更新由本引擎的 cardkit_update 驱动。
         return SendResult(success=True)
@@ -629,6 +708,50 @@ def _answer_element_id() -> str:
     from ..cardkit.elements import ANSWER_ELEMENT_ID
 
     return ANSWER_ELEMENT_ID
+
+
+# hermes native 复合帧分隔符（stream_consumer.py:_compose_frame_content:253
+# ``"\n\n---\n".join((accumulated, progress))``；任一段为空时 join 结果不含分隔符）。
+_NATIVE_COMPOSITE_SEP = "\n\n---\n"
+
+
+def _split_native_composite(text: str) -> tuple[str, list[str]]:
+    """拆 hermes native 复合帧：``{answer}`` + 分隔符 + ``{工具进度行}``.
+
+    官方复合格式（stream_consumer.py:_compose_frame_content:251-255）：
+    interim tick（工具运行中）帧体为 ``answer + "\n\n---\n" + progress``；
+    progress 是 ``"\n".join(_tool_progress_lines)``（项可为多行围栏块）。
+
+    拆分策略（保守优先，误拆自愈）：
+    - 无分隔符：整帧是纯正文；但 ``answer`` 为空的 interim 帧只有 progress
+      （join 的空段过滤）——整帧命中进度启发式时视为进度行（emoji 开头/💬/
+      围栏块 ≤600，极早期 delta 的误判由下一快照帧自愈）。
+    - 有分隔符：只拆**最后一个**分隔符（正文自身可含 markdown 分隔线），
+      拆出部分经 ``split_progress_segments``（围栏块保持一体）后**逐段全部**
+      命中进度启发式才拆，否则整体视为正文。误拆由下一快照帧覆盖自愈
+      （官方 :290-291 真实 delta 到达即清空 overlay）。
+
+    永不抛异常；返回 ``(answer_text, progress_lines)``。
+    """
+    try:
+        text = (text or "").strip()
+        if not text:
+            return "", []
+        idx = text.rfind(_NATIVE_COMPOSITE_SEP)
+        if idx < 0:
+            if _is_progress_text(text):
+                return "", split_progress_segments(text) or [text]
+            return text, []
+        head = text[:idx].strip()
+        tail = text[idx + len(_NATIVE_COMPOSITE_SEP):].strip()
+        if not head or not tail:
+            return text, []
+        segments = split_progress_segments(tail) or ([tail] if tail else [])
+        if segments and all(_is_progress_text(seg) for seg in segments):
+            return head, segments
+        return text, []
+    except Exception:  # noqa: BLE001 — 拆分纯装饰，失败整体按正文
+        return (text or "", [])
 
 
 def _turn_elapsed_ms(st: CardTurnState) -> float:

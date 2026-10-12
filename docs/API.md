@@ -51,6 +51,7 @@ gateway:
 |---|---|---|---|
 | `panel_expanded` | bool | `false` | 状态面板默认展开 |
 | `streaming_panel_expanded` | bool | `false` | 流式期状态面板展开 |
+| `native_streaming` | bool | `true` | native streaming 通道（v2.0.13）：适配器声明官方 `SUPPORTS_NATIVE_STREAMING`，答案流走 `send_stream_frame` 原生帧（工具边界不封卡，单卡全回合）；`false` 回 edit-based 流 |
 | `print_strategy` | str | `"delay"` | 打字机策略（透传 CardKit streaming_config） |
 | `print_step` | int | `4` | 打字机步长 |
 | `flush_interval_ms` | int | `200` | 兼容保留（V2 节流由 hermes 通道自带） |

@@ -135,6 +135,34 @@ async def finalize_card(
             "composer: footer seal failed (non-fatal) card=%s", str(state.card_id)[:12],
             exc_info=True,
         )
+    # v2.0.13（Task 18 P1-A）：空面板壳清除——整轮无工具/思考行（status_lines=0）
+    # 时删除 collapsible_panel 元素。纯 answer 回合（Task 18 取证 16:54:57 卡：
+    # created status_lines=0 → finalized status_lines=0）卡上遗留 "agent loop"
+    # 空面板头（cards.py 无条件渲染面板骨架——流式期作「卡片先现」视觉锚，终态
+    # 后无内容即成空壳）。有面板行的卡片承载过程记录，保留。装饰性步骤：失败
+    # 仅 debug（面板残留无害，绝不影响已送达的答案，不上抛阻断定稿）。
+    if not (getattr(state, "status_lines", None) or []):
+        try:
+            from ..cardkit.elements import UNIFIED_PANEL_ELEMENT_ID
+
+            state.seq += 1
+            await call_with_seq_recovery(
+                state,
+                lambda seq: client.cardkit_batch_update(
+                    state.card_id,
+                    [{
+                        "action": "delete_elements",
+                        "params": {"element_ids": [UNIFIED_PANEL_ELEMENT_ID]},
+                    }],
+                    sequence=seq,
+                ),
+                what="finalize:panel-del",
+            )
+        except Exception:
+            _logger.debug(
+                "composer: empty panel delete skipped card=%s", str(state.card_id)[:12],
+                exc_info=True,
+            )
     state.seq += 1
     await call_with_seq_recovery(
         state,

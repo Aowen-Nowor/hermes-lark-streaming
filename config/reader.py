@@ -226,6 +226,19 @@ class Config:
         return _to_bool(footer.get("show_label", False))
 
     @property
+    def native_streaming(self) -> bool:
+        """v2.0.13：hermes native streaming 通道开关（默认 True）.
+
+        True → 适配器声明 ``SUPPORTS_NATIVE_STREAMING``，答案流帧走官方
+        native 帧通道（send_stream_frame）：segment-break finalize 被官方
+        consumer 吞掉（gateway/stream_consumer_transport.py:389），工具边界
+        不再封卡 → 单卡全回合（Task 18 报告 P1-B）。
+        False → 整平台回到 edit-based 流（v2.0.12 行为）；部署灰度/一键回退。
+        """
+        sec = self._plugin_sec()
+        return _to_bool(sec.get("native_streaming", True), default=True)
+
+    @property
     def gateway_cards(self) -> bool:
         """默认 True. TTL 缓存读取."""
         cached = self._reload_cached()

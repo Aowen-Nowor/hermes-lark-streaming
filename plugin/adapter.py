@@ -173,6 +173,18 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
 
     PLATFORM_LABEL = "Feishu / Lark (Streaming Cards)"
 
+    # v2.0.13（Task 18 P1-B）：声明 hermes native streaming 能力（官方探测点
+    # gateway/stream_consumer_transport.py:_resolve_native_streaming:151-164
+    # 检查类常量 + supports_native_streaming probe）。开启后答案流帧走
+    # send_stream_frame（native 帧通道）：segment-break finalize 被官方吞掉
+    # （transport:389 ``finalize = finalize and is_turn_final``）且 native =
+    # cumulative transport（stream_consumer.py:906 ``_end_segment`` 直接
+    # return）→ 工具边界不再封卡，单卡全回合（多卡片同族缺陷的通道级根治；
+    # 事实先例：Task 18 取证 16:54 轮次——call#1 前奏被工具边界 seal 成独立卡）。
+    # 失败语义：任何帧 False/异常 → 官方禁用 native 回落 edit/send 现有链路
+    # （transport:399-426），降级红线官方契约保证。
+    SUPPORTS_NATIVE_STREAMING = True
+
     def __init__(self, config: Any) -> None:
         super().__init__(config)
         # v2.0.4（原服务器 v2.0.2 热补丁回流仓库）：平台身份对齐注册名。内置基类
@@ -287,6 +299,69 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         if result is None:
             return await super().send(chat_id, content, reply_to=reply_to, metadata=_strip_internal(metadata))
         return result
+
+    def supports_native_streaming(
+        self, chat_type: str | None = None, metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """官方 native 探测点（每回合 _start_transports 调用，v2.0.13）.
+
+        官方调用签名（stream_consumer_transport.py:161）
+        ``probe(chat_type=..., metadata=...)``；TypeError 时降参重试由官方处理。
+
+        灰度开关：插件配置 ``feishu_streaming.native_streaming``（默认 True）。
+        False → 整平台回到 edit-based 流（v2.0.12 行为）。CardKit 凭证缺失
+        一并返回 False（建卡必败，不值得开 native——官方种子帧失败同样回落，
+        这里提前返回省一次无谓的 seed 尝试）。永不抛异常。
+        """
+        try:
+            if self._card_config is not None and not bool(
+                getattr(self._card_config, "native_streaming", True)
+            ):
+                return False
+        except Exception:  # 配置读取失败按默认开启（装饰性判断，仅 debug 留痕）
+            _logger.debug("feishu-streaming: native probe config read failed", exc_info=True)
+        try:
+            return self._get_card_client() is not None
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def send_stream_frame(
+        self,
+        text: str,
+        *,
+        finalize: bool = False,
+        chat_id: str | None = None,
+        reply_to: str | None = None,
+        **kwargs: Any,
+    ) -> bool:
+        """hermes native streaming 帧（官方契约范例
+        plugins/platforms/wecom/streaming.py:261）— v2.0.13.
+
+        官方调用形态（stream_consumer_transport.py:50-52, 66-70）：
+        - 种子帧：``send_stream_frame("", chat_id=..., reply_to=..., turn_id=...)``
+        - 内容/终帧：``send_stream_frame(text, finalize=..., chat_id=..., ... )``
+
+        帧语义全部由 FrameComposer.handle_stream_frame 承接（种子建卡 /
+        快照更新 / 复合帧工具行拆分进面板 / finalize 幂等封卡）。返回 False
+        （含任何异常）＝本帧未消费，官方 consumer 自动回落 edit/send 现有
+        链路（帧永不丢）。永不抛异常（官方 _try_frame 虽吞异常，这里自吞
+        保日志在插件命名空间内）。
+        """
+        chat = (chat_id or "").strip()
+        if not chat:
+            return False
+        try:
+            return await self._composer.handle_stream_frame(
+                chat, text or "", finalize=finalize,
+                turn_id=str(kwargs.get("turn_id") or "") or None,
+            )
+        except Exception:  # 降级红线：native 帧失败回落（BLE 未启用，noqa 触发 RUF100）
+            _logger.warning(
+                "feishu-streaming: send_stream_frame failed — native disabled, "
+                "consumer falls back to edit/send",
+                exc_info=True,
+            )
+            return False
 
     async def send_or_update_status(
         self, chat_id: str, status_key: str, content: str, metadata: dict[str, Any] | None = None,

@@ -372,8 +372,11 @@ class TestFinalizeIdempotent:
         first = await comp._finalize(st, "answer")
         second = await comp._finalize(st, "answer")
         assert first.success and second.success
-        footer_adds = client.batch_update_calls  # add+del spinner = ≤2 次调用
-        assert len(footer_adds) == 2  # 一次 finalize：add_elements + delete_elements
+        footer_adds = client.batch_update_calls  # add+del spinner + del 空面板 = 3 次调用
+        # v2.0.13 P1-A：seed 的 status_lines 为空 → finalize 新增「删除空面板」
+        # batch_update（footer-add + spinner-del + panel-del = 3）；双 finalize
+        # 幂等守卫使第二次 finalize 零额外调用（本断言核心不变）。
+        assert len(footer_adds) == 3
         assert st.finalized
 
     async def test_finalize_via_handle_edit_idempotent(self):
@@ -392,7 +395,10 @@ class TestFinalizeIdempotent:
         cls = ClassifyResult(CH_FINAL, raw_content="x")
         await comp.handle_edit(chat, st.card_message_id, "answer", True, cls)
         await comp.handle_edit(chat, st.card_message_id, "answer", True, cls)
-        assert len(client.batch_update_calls) == 2
+        # v2.0.13 P1-A：seed 状态 status_lines 为空 → 首次 finalize 含空面板
+        # 删除（footer-add + spinner-del + panel-del = 3）；第二次 finalize 幂等
+        # 短路零调用（守卫核心不变）。
+        assert len(client.batch_update_calls) == 3
 
 
 # ---------------------------------------------------------------------------

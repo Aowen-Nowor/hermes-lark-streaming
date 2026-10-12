@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.0.13 (2026-10-12)
+
+**答案流迁移 hermes native streaming 通道（P1-B）+ 空面板壳清除（P1-A）——Task 18 取证报告两项修复落地（用户拍板「两个都做了吧」）。**
+
+背景：Task 18 取证（2026-10-12 16:54 飞书实测轮次日志 + hermes v0.21.6 官方源码逐行核对）定案——「同一段话一次进正文一次进折叠面板」非插件路由缺陷：edit-based 平台上模型在工具调用前的可见前奏正文被官方 segment-break finalize seal 成独立卡（stream_consumer.py:842-844 `finalize=tick.got_done or tick.got_segment_break`，官方注释自认 *"it closes a preamble, not the answer"*——为 DingTalk AI Cards 显式关闭设计）；同族文本在后续轮经 💬 思考中继进面板行。两次渲染各符合通道语义，形态不一致；429 fallback 续跑放大观感。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| P1 | 同一段话一次进正文（工具边界被 seal 成独立卡 + 空面板 + 已完成页脚）一次进折叠面板——跨轮归属不稳定 | edit-based 通道：官方 segment-break finalize 在「模型前奏 + 工具调用」组合下把前奏封成第一卡（native 路径不存在此问题：`finalize = finalize and is_turn_final` 吞掉 segment-break，但 hermes 无任何平台开启 native，feishu 走默认 edit 路径） | **native streaming 迁移（P1-B）**：适配器声明 `SUPPORTS_NATIVE_STREAMING`（类常量）+ `supports_native_streaming` probe + `send_stream_frame`（官方契约范例 plugins/platforms/wecom/streaming.py:261；探测点 stream_consumer_transport.py:151-164）。native 帧通道上官方吞掉 segment-break finalize（transport:389）且 native = cumulative transport（stream_consumer.py:906 `_end_segment` 直接 return）→ 工具边界不再封卡，**单卡全回合**。composer 新增 `handle_stream_frame`：种子帧（`text=""`）建卡骨架 / 全量快照更新（cumulative，非分段追加）/ finalize 幂等封卡；降级红线官方契约保证——任何帧 False/异常 → consumer 禁 native 回落 edit/send 现有链路（transport:399-426），帧永不丢。灰度开关 `feishu_streaming.native_streaming`（默认 true；false 一键回到 v2.0.12 edit-based 行为） |
+| P1 | 纯 answer 回合卡上遗留 "agent loop" 空面板壳（折叠头无内容） | cards.py `include_unified_panel` 无条件渲染 collapsible_panel 骨架——流式期作「卡片先现」视觉锚，整轮无工具/思考行时终态后成空壳（Task 18 取证 16:54:57 卡 `created status_lines=0` → `finalized status_lines=0`） | **finalize 空面板删除（P1-A）**：`finalize_card` 在 status_lines 为空时追加第四步 `batch_update delete_elements [UNIFIED_PANEL_ELEMENT_ID]`（装饰性步骤：失败仅 debug 留痕，绝不阻断定稿；有过程记录的面板原样保留）。流式期面板骨架不变（「卡片先现」体验保留） |
+| 伴生 | native 激活后网关工具 preview 行改走流内复合帧（run_turn_runner.py:310 `_progress_emit` native 分支 → `sc.on_tool_progress`），不再作为进度气泡到达适配器——面板失去网关工具行数据源 | 官方 native 语义：工具行复合进答案流帧（`_compose_frame_content` = `"{answer}\n\n---\n{progress}"`，stream_consumer.py:251-255；真实 delta 到达时清空 overlay :290-291） | `handle_stream_frame` 内置复合帧拆分器 `_split_native_composite`：拆最后一个官方分隔符，拆出段经 `split_progress_segments`（围栏块保一体）逐段全部命中进度启发式才拆，工具行并入面板——V1 风格图标/耗时/思考轮次渲染不变，保持本平台状态面板特色；正文自含 markdown 分隔线不误拆，误拆由下一快照帧自愈。💬 思考中继（run_turn_runner.py:152）与 status 通报通道不受 native 影响，reasoning_feed / tool_timing 官方钩子照常 |
+
+**审计方法**: hermes 官方源码逐行核对（stream_consumer_transport.py 帧原语 :46-70 / native 探测 :151-164 / `_native_push` :373-426；stream_consumer.py `_push_update` :824-844 / `_end_segment` :529-543 / `_finalize_turn` :857-874 / `_compose_frame_content` :246-255；run_turn_runner.py 进度改道 :310-327；WeCom native 实现范例 streaming.py:261-340）→ 插件 engine/adapter/finalize/cards/classify/client 重读后实现 → 全量 570/570（v2.0.13 新增 28 用例：复合帧拆分 10 / handle_stream_frame 11 / 适配器 native 面 7 / P1-A 空面板 2；既有 2 处幂等守卫断言按 P1-A 新语义更新：finalize batch_update 调用数 2→3）→ ruff 基线相等（144=144，新代码零新增）。
+
+**已知限制**:
+- 复合帧拆分是启发式：正文以「markdown 分隔线 + emoji 工具行」结尾的极端形态可能误拆进面板——官方在下一个真实 delta 到达时清空工具行 overlay（stream_consumer.py:290-291）且帧为全量快照，自愈窗口一个 delta；finalize 帧纯正文（got_done 时 `is_interim=False` 不复合）无此风险
+- `supports_native_streaming` probe 无 per-chat 维度（官方签名仅 chat_type/metadata）；建卡失败回落为帧级（无 state 下一帧重试）+ 回合级（False 禁 native 回落 edit/send）
+- native 激活后 CH_STREAM（expect_edits 分类）在正常流程中闲置，仅作为回落路径保留；进度气泡 accumulate 快照仍经 CH_PROGRESS 进面板（💬 中继/工具行 [回落时]）
+
+---
+
 ## v2.0.12 (2026-10-12)
 
 **面板思考正文 markdown 渲染 + 仓库根目录布局契约化 + Python 版本对齐 hermes 官方（用户 2026-10-12 三连反馈）。**
