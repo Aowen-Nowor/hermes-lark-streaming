@@ -13,7 +13,17 @@ authors = [
     {name = "Aowen-Nowor"},
 ]
 dependencies = [
-    "lark-oapi>=1.4.24",  # v1.7.0: 1.4.0 has NO async cardkit API (acreate/aupdate/abatch_update/asettings) — plugin cannot run; 1.4.24+ verified to ship the full async set incl. card_element.acontent
+    # v1.8.0 (P1-1): floor raised 1.4.24 → 1.6.4. Two independent hard floors:
+    # ① 1.4.0 has NO async cardkit API at all (acreate/aupdate/abatch_update/
+    #    asettings missing) — 1.4.24+ ships the full async set incl.
+    #    card_element.acontent (v1.7.0 finding, wheel-by-wheel verified).
+    # ② hermes-agent >= 0.19 passes ``extra_ua_tags`` to lark.Client — the
+    #    kwarg exists only since lark-oapi 1.6.4 (4-version wheel diff; 1.5.1
+    #    lacks it). Mixed installs (new hermes + old SDK) broke the feishu WS
+    #    connect for 22 minutes in production on 2026-07-21. hermes itself
+    #    pins lark-oapi==1.6.8 (feishu extra); this floor + the startup check
+    #    (plugin/__init__.py _check_lark_oapi_floor) cover hand-managed envs.
+    "lark-oapi>=1.6.4",
     "PyYAML>=6.0",
 ]
 

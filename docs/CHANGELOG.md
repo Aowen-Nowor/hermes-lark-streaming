@@ -1,4 +1,22 @@
-## v1.8.1 (2026-09-15)
+## v2.0.0 (2026-10-13)
+
+**fork 合并版** — 合并上游 v1.8.0 → v1.8.4 全部修复，并保留 fork 独有改动。
+
+| 来源 | 内容 |
+|------|------|
+| fork 独有 | 标题层级修复 — 取消 Markdown 标题降级，H1–H6 原样透传（见 v1.8.1-fork） |
+| fork 独有 | `interim_to_answer` 配置项 — 工具调用过渡文字默认不写入卡片正文（见 v1.8.0-fork） |
+| 上游 v1.8.4 | hermes v0.21.6 集成哨兵误报修复（纯测试/文档，零运行时改动） |
+| 上游 v1.8.3 | GitHub Issues 专项：网关启动死锁（P0）+ WebUI TypeError + footer usage + 续卡竞态 + 平台隔离 + 异常封卡 + 非 om_ 投递 |
+| 上游 v1.8.2 | hermes v0.21.1 集成哨兵适配（纯测试/文档） |
+| 上游 v1.8.1 | 外部反馈专项：话题并发误杀 + 续卡竞态泄漏 + agent 异常封卡 + 非飞书渠道隔离 + /bg 锚点 |
+| 上游 v1.8.0 | 生产日志审计：lark-oapi 门槛 + WS 渠道健康 + cron 日志 + Phase 2 状态再同步等 10 项 |
+
+> **版本号说明**：本 fork 自 **v2.0.0** 起采用独立编号。此前 fork 的 v1.8.0 / v1.8.1 与上游同号但内容不同，为免混淆已在下方以 `-fork` 后缀标注。
+
+---
+
+## v1.8.1-fork (2026-09-15)
 
 卡片标题层级修复 — 取消 Markdown 标题降级，H1–H6 原样透传。
 
@@ -11,7 +29,7 @@
 
 ---
 
-## v1.8.0 (2026-08-16)
+## v1.8.0-fork (2026-08-16)
 
 工具调用过渡文字不再污染卡片正文 — interim 文本（工具调用前的过渡叙述，如"我先查一下…"）默认不写入答案正文，卡片只显示最终答案。
 
@@ -19,6 +37,120 @@
 |------|-----------|------|-----------|
 | ✨ Feature | 新增 `interim_to_answer` 配置项（默认 `false`） | Hermes 的 `interim_assistant_callback`（工具调用前过渡文字）与 `stream_delta_callback`（最终答案）是两条独立通道。旧逻辑把 interim 文本的 answer 部分也追加进卡片正文，导致用户在工具调用间隙看到"我先查一下…"等过渡文字混入最终答案 | `_linear_on_thinking` 中 answer 分支受 `interim_to_answer` 控制：`false`（默认）时跳过，卡片正文纯最终答案；`true` 时恢复旧行为。reasoning 部分仍由 `show_reasoning` 独立控制，不受影响 (`controller/linear_mixin.py`, `config/reader.py`) |
 | 🧪 Test | 新增 4 个 `TestLinearOnThinkingInterimToAnswer` 单元测试 | 旧测试 `test_dedup_with_mixed_reasoning_and_answer` 依赖旧行为（interim answer 写入正文），新默认值下会失败 | 新增测试覆盖：默认 false 跳过、true 接受、false 时 reasoning 仍处理、true 时保留增量追加去重。旧测试显式开启 `interim_to_answer=True` 保留原意图。870 passed，5 个失败为环境预存问题（真实配置覆盖 + venv 缺 setuptools），与本次改动无关（git stash 验证） |
+
+---
+
+---
+
+## v1.8.4 (2026-10-09)
+
+hermes v0.21.6 集成哨兵误报修复版 — 纯测试与文档，零运行时代码改动，CI workflow 按约定不动。hermes v0.21.6 发布次日（2026-10-08），每日集成测试报告 30 用例 9 failed（均为 GatewayRunner/AIAgent 方法存在性哨兵）。经 5 轮审计 + 本地双环境 100% 复现确认：**插件运行时代码与 hermes v0.21.6 完全兼容，9 个失败全部是假警报**。根因是两层叠加：①hermes v0.21.6 的 pyproject 将全部 45 个依赖标记 `python_version >= '3.14'`（官方仅支持 3.14，.python-version=3.14），而 CI workflow 钉死 Python 3.11 → `pip install -e .`（best-effort + `|| true`）实际装入 0 个依赖 → hermes 在 CI 里 import 全灭（本地复现首个缺失模块为 ruamel），30 用例全部落到 AST 兜底层；②hermes v0.21.x Mixin 化把被补丁方法搬出了原单体文件（v1.8.2 修过同型问题的第三批残留）——`_handle_message`→`gateway/run_inbound.py`（GatewayInboundMixin）、`_handle_message_with_agent`/`_run_agent`/`_run_background_task`→`gateway/run_turn.py`（GatewayTurnMixin）、`AIAgent.run_conversation`→`agent/turn_facade.py`（TurnFacadeMixin），AST 兜底只扫 `gateway/run.py`/`run_agent.py` 单文件类体，必然失明 → 8 用例误报"方法不存在"；③`test_run_conversation_still_callable` 的第二个 import 无异常保护 → `ModuleNotFoundError`（dotenv）把用例炸成 error，成为第 9 个失败。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🧪 Test | **集成哨兵 9 用例在 hermes v0.21.6 上集体误报**（30 用例 9 failed，失败名单与 cron 卡片逐字吻合）：GatewayRunner 三方法 / AIAgent.run_conversation 的存在性检查 + required/optional 类方法参数化用例 + run_conversation callable 检查 | 三层叠加：CI（Python 3.11）装不上 hermes v0.21.6 的 3.14-only 依赖致 import 层全灭；v0.21.x Mixin 化后 AST 单文件类体扫描面失明；`test_run_conversation_still_callable` 第二 import 无保护 | AST 兜底补三组 Mixin 候选并新增 `_ast_any_class_has_method` 并集扫描助手：`_GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES`（gateway.run→run_inbound→run_turn）、`_AIAGENT_METHOD_MODULE_CANDIDATES`（run_agent→agent.turn_facade）、`_CLASS_METHOD_AST_MODULE_CANDIDATES` 映射（required/optional 参数化用例共用）；候选文件旧版缺失自动跳过（纯增量，与 v1.8.2 候选并集模式同源）；`test_run_conversation_still_callable` 补 import 保护 + 沿用 `_RUN_CONVERSATION_METHOD_CANDIDATES` 的 AST 兜底。本地双环境验证：模拟 CI 环境（仅插件依赖 + v0.21.6 源码）修复前 9 failed → 修复后 28 passed + 2 skipped；全依赖环境前后均为 28 passed + 2 skipped（import 层语义零变化）；v0.21.1 双环境同计数（向后兼容）(`tests/integration/test_hermes_compat.py`) |
+| 🧪 Test | **optional 哨兵 `GatewayRunner._run_background_task` 在 v0.21.x 上误报 skip**：该方法 v0.21.x 起定义在 `gateway/run_turn.py`（GatewayTurnMixin），旧 AST 扫描按"指定类名 + 单文件"找 `GatewayRunner` 类体必然落空，被 optional 语义降级为 skip（功能实际健在） | optional 检查的 AST 段未随 Mixin 布局迁移 | optional 用例的候选路径表接入 `_CLASS_METHOD_AST_MODULE_CANDIDATES`，AST 段对 Mixin 候选改用 any-class 并集语义；v0.21.1/v0.21.6 双版本上从 skip 恢复为 passed（background 卡片功能哨兵恢复生效）(`tests/integration/test_hermes_compat.py`) |
+| 📝 Docs | 验证基线升 **hermes-agent v0.21.6**（AGENT_GUIDE 概览表 + 版本 FAQ），FAQ 补充"hermes v0.21.6 起依赖仅支持 Python 3.14 运行时安装"的部署提示 | 基线停留在 v0.21.1 (tag v2026.9.7) | 本轮审计证据：v0.21.6 全依赖环境 10+ 个 patch 目标 hasattr 全过、`_run_agent` 签名与 v0.21.1 逐参数一致、persist_* 参数仍在 run_conversation 双生产面、`cron.scheduler._deliver_result`/`platform_registry.create_adapter`/`run_turn_runner._wire_turn_agent_callbacks` 等全部在位；976 单元测试全过 (`docs/AGENT_GUIDE.md`) |
+
+**审计方法**: 5 轮递进审计（只求证不猜测，全程未动 CI workflow）。①仓库一致性：Gitee DEV c04485b 与 github_sync 零差异，hermes-agent 检出 v0.21.6/v2026.9.7 双 tag；②测试解剖：9 个失败用例逐个定位到"import 优先 + AST 兜底"双层结构，确认 AST 层 `_ast_class_has_method` 只扫单文件类体；③hermes 源码比对：Mixin 组合架构（GatewayRunner×18 / AIAgent×14 Mixin）、方法迁移行号级定位（run_inbound.py:1285 / run_turn.py:2144+2928+2376 / turn_facade.py:22）、`_run_agent` 签名逐参数比对（与 v0.21.1 泛化签名一致）；④本地 100% 复现：干净 venv（仅 pytest/pytest-asyncio/PyYAML/lark-oapi，对齐 CI 实际依赖面）+ v0.21.6 源码 → 9 failed 名单与 cron 卡片逐字一致；装齐 hermes 依赖后同版本 → 28 passed + 2 skipped（30/30），反证运行时兼容；⑤环境根因实证：v0.21.6 pyproject 45/45 依赖带 `python_version >= '3.14'` 标记（v0.21.1 为 0/34 无标记）、hermes 官方 `.python-version=3.14`、插件自身依赖 PyPI 实查（PyYAML 6.0.3 有 cp314 轮子、lark-oapi 纯 Python）。修复后回归：模拟 CI / 全依赖 × v0.21.1 / v0.21.6 四种组合全部 28 passed + 2 skipped，单元 976 全过，改动文件 ruff 全绿。
+
+**已知限制**:
+- CI workflow（`hermes-integration-test.yml`）按约定**不做任何改动**：①Python 仍钉 3.11，装不上 hermes v0.21.6+ 的 3.14-only 依赖 → CI 集成测试长期运行在 AST 源码级验证层（import 层等价性已在本地全依赖环境验证，两种模式同计数）；②workflow 内联通知脚本的 junitxml 解析存在 Element 真值 bug（`tc.find("failure") or tc.find("error")` —— ET 元素真值取决于子元素数量而非文本，本地复现时 Python 明确给出 DeprecationWarning），失败详情在飞书卡片恒为空，两者修复均需改 workflow，留待 workflow 解冻后一并处理
+- AST 并集扫描是"源码结构存在性"验证：能证明方法定义于候选文件中的某个类，不证明运行时行为——运行时行为由 976 单元 + 真飞书 E2E 覆盖
+- 若未来 hermes 再把方法搬出候选清单覆盖的文件，哨兵会再次报警——候选清单按 v1.8.2 既有模式增量维护即可
+- `.hermes-last-release` 已被 v0.21.6 失败轮更新（workflow 对 success/failure 都记录），CI 不动的前提下下次 cron 将等 hermes 新版本发布才再测；本版修复合入 github_sync 后可用 workflow_dispatch 手动触发即时验证
+- 审计期间发现 hermes v0.21.6 的 `agent/conversation_loop.py` 导入链新增 ruamel 依赖（v0.21.1 无）——属上游自身演进，对插件运行时无影响（插件跟随 hermes 宿主环境运行），仅影响依赖残缺环境下哨兵的 import 层
+
+---
+
+## v1.8.3 (2026-10-08)
+
+GitHub Issues 专项修复版 — 处理仓库全部未关闭 issues（#10/#12/#13/#14/#15/#18/#19/#21），只修 bug、不做新需求：逐项对照插件 v1.8.2 代码与 hermes-agent 源码验证"是否仍成立、根因在哪"后才动手，**6 项确认修复（P0×1 / P1×5）+ 1 项连带缺陷**；#13（字号配置）、#19（驱逐降级）为新需求/改进项按约定不纳入本轮，#10 为表扬帖无需处理，#14 经源码核对确认已由 v1.8.1 修复并补回归测试。本轮还复核并采纳了外部 PR #20 的死锁修复思路（两个独立生产报告互相印证），实现按本项目结构重写并补全其未覆盖的 `_wrap_run_conversation`/`_wrap_cron_deliver` 防重复哨兵。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P0) | **网关启动死锁**（issue #18-1，PR #20 佐证）：装插件后网关启动卡死无输出，被看门狗 300s 强杀。根因：hermes 把每个插件的 import+register 放在独立 "plugin-load:" 工作线程执行（`hermes_cli/plugins_loader.py::run_with_load_deadline`），而插件 `HermesCompat._resolve_modules` 在该线程上**同步 import** gateway 内部模块（gateway.run / run_agent / agent.conversation_loop / feishu 适配器 / cron.scheduler 共 6 处）+ `patching/__init__` 的 RelayAdapter / platform_registry 直接 import（2 处）——主线程此时可能正持有同一模块的导入锁执行模块体，工作线程阻塞等锁、主线程等待工作线程完成加载，形成循环等待 | 插件在"可能持有任意模块导入锁"的加载线程上做阻塞式 import | 全部 8 处启动期导入改为 **sys.modules 只读解析**（模块不在缓存就返回 None，绝不 import——与 hermes 官方 `_platform_name` 同源的"读现状"哲学）；配套新增**全目标延迟补丁轮询器**（2s 间隔、60s 预算、同样只读 sys.modules）：启动期未命中的补丁目标（GatewayRunner / conversation_loop / cron / FeishuAdapter / AIAgent / create_adapter 钩子）由后台线程在主线程完成导入后补齐并打日志，60s 未齐则 ERROR 指引 /aowen doctor (`patching/hermes_adapter.py`, `patching/__init__.py`) |
+| 🐛 Bug Fix (P1) | **hermes-webui 发任何消息必报 TypeError**（issue #21）：`TurnFacadeMixin.run_conversation() got an unexpected keyword argument 'conversation_history_revision'`，飞书链路正常、仅 WebUI 全挂 | 直补丁包装器 `_patched_run_conversation` 带 `**kwargs` 却没有 `@functools.wraps`——webui 的前向兼容参数门（`inspect.signature` 判定"参数表有 VAR_KEYWORD 即支持任意参数"）看到的是包装器签名而非真实签名，未知参数被透传给无 `**kwargs` 的真实方法必炸（已核对 hermes 源码：facade 与 loop 两处 run_conversation 均无 VAR_KEYWORD、无该参数） | 补 `@functools.wraps(_orig_method)`：`inspect.signature` 顺 `__wrapped__` 解析到真实参数表，webui 参数门自动正确过滤；回归测试断言补丁后签名不含 VAR_KEYWORD (`patching/__init__.py`) |
+| 🐛 Bug Fix (P1) | **footer 的 tokens/context 字段缺失**（issue #12）：页脚只剩 status·elapsed·model，tokens/context/cost/api_calls 全空。v1.8.1 已修 cost/cache/reasoning（读 agent 会话属性），本轮补齐剩余：①`context` 字段依赖 `context_max`，而**任何版本的 hermes 都不在 result dict 里返回 `context_length`**（只存在于 `agent.context_compressor.context_length`，finalize_turn 源码证实）→ context 字段从未渲染过；②旧版 hermes（如报告者的 v0.19.0）result 里连 `input_tokens`/`output_tokens` 会话计数键都没有 | 用量提取只读 result dict，而 result 从来不是 token 数据的完整来源 | 新增统一提取器 `_session_usage_from(ctx, result)`：**agent 会话计数器为主源**（`session_input_tokens`/`session_output_tokens` 等，hermes `record_response_usage` 对所有 provider 维护）、result dict 为次源（当前 hermes 会把同值复制进 result，两源一致；旧版 hermes 由 agent 属性兜出真实值），零值跳过不互相覆盖；context used/max 同构（compressor 的 `last_prompt_tokens`/`context_length`）；三处 on_message_completed 调用点（child / main / background）统一切换，消除 ~30 行重复提取代码 (`patching/gateway.py`) |
+| 🐛 Bug Fix (P1) | **续卡无法封闭竞态**（issue #15）：长任务触发续写重激活后，旧卡异步封卡先完成 → `_cleanup(old)` **无条件**删除刚注册的 continuation 路由 → hermes 随后的 on_completed(old) 重定向落空、命中旧卡幂等分支 → 续卡永停流式态，后台审查输出还会持续写进这张卡。v1.8.1 只修了 TTL 回收路径的同型问题，封卡路径（常态路径，封卡含多次网络往返、必然晚于路由注册完成）漏修 | `_cleanup` 对"以本消息为 key 的路由"的删除不感知续写目标会话的存活状态 | 删除前置检查：路由目标（continuation 会话）仍非终态时保留路由（日志说明"on_completed(old) 将消费"），交由 on_completed 的一次性消费语义（`_pop_continuation_id`）闭环；目标已终态/不存在时照常清理；v1.8.1 已有的目标侧反向清理（stale-key）与 TTL 延迟回收保持不变，路由生命周期三方对齐 (`controller/core.py`) |
+| 🐛 Bug Fix (P1) | **平台判定脆弱 + 中断路径漏过滤**（issue #18-2 残余）：①v1.8.1 的平台过滤用 `getattr(getattr(platform,"value",None),"value","")`——hermes 官方 `_platform_name()`（gateway/platforms/base.py）证实 `source.platform` 可以是纯字符串，该形态下旧模式返回 ""：非飞书消息穿透建会话（99992354 刷屏）、字符串平台形态的飞书消息反而被漏掉；②`_wrap_run_agent` 的递归中断路径 fire INTERRUPTED+START 钩子**完全无平台过滤**——非飞书渠道的消息打断 agent 运行时照样创建飞书卡会话 | 平台检查逻辑分散在 4 个 wrapper 且模式脆弱；中断路径是 v1.8.1 修复的遗漏点 | 抽出统一助手 `_is_feishu_platform(source)`（`getattr(platform,"value",platform)` 双形态兼容 + feishu/lark 白名单，与 hermes 官方 `_platform_name` 同款）；`_wrap_handle_message`（/aowen 提示卡）、`_wrap_handle_message_with_agent`（入口整体早退，非飞书零开销原生放行）、`_wrap_run_agent`（中断路径不再 fire 钩子）、`_wrap_run_background_task` 四处统一 (`patching/gateway.py`) |
+| 🐛 Bug Fix (P1) | **未捕获异常致卡片永转圈 + 会话泄漏**（issue #18-4）：agent 层抛出未捕获异常（模型超时/连接中断等穿透 hermes 捕获层的场景）时，`_wrap_handle_message_with_agent` 的 except 只清理上下文后 re-raise，不封卡——卡片停在"正在加载上下文..."转圈，会话非终态被 `_prune_stale_sessions` 永久跳过（防误杀活跃会话的保护反向变成泄漏保护伞） | 异常路径是会话生命周期的"第四终态入口"，此前完全未覆盖 | except 路径补封卡：检测到活跃非终态会话时调用 on_message_completed 补发错误面板（`agent error: <异常类型>: <摘要截断 160 字符>`）并关闭流式，会话正常转入终态供 TTL 回收；CancelledError 语义化为用户中断（aborted=True，"Task cancelled"）；封卡后原异常照常 re-raise（hermes 侧行为不变）；COMPLETING/终态会话不重复封（幂等）(`patching/gateway.py`) |
+| 🐛 Bug Fix (P1) | **非 om_ 投递目标必败 API + 文本静默丢失**（issue #18-3 残余）：v1.8.1 P2 已修 /bg 锚点传递（当前 hermes 恒传 om_ 锚），残余场景（更旧 hermes 不传锚、或未来新增合成 id 入口）下仍会对合成 id（`bg_*`）调 reply API 必报 99992354；且 `_send_text_fallback` 的裸 `except: pass` 把文本失败静默吞掉——用户什么都收不到 | reply API 契约要求 om_ 消息 id，代码对"目标 id 形态"无校验；失败静默无日志 | ①`feishu/client.py` 补 `send_card_by_id_to_chat`（CardKit 实体按 card_id 直发会话）与 `send_text_to_chat`（纯文本直发）两个对偶方法；②建卡与文本回退处按 `om_` 前缀校验目标：合法 → reply（主路径行为不变），非 om_ 且有 chat_id → 直发会话（同一投递语义、正确的 API），两者皆无 → WARNING 指纹（不再静默）；文本回退的裸吞异常改为 WARNING+exc_info (`feishu/client.py`, `controller/linear_mixin.py`, `controller/core.py`) |
+| 🔧 Fix | **AIAgent 直补丁错过启动窗口后永不重试**（审计连带发现）：`patching/__init__.py` L416 "Deferred direct patch: retry ..." 注释之后**没有任何重试代码**；而 hermes 对 run_agent 是懒加载（首条消息才 import，gateway/run.py:964）——冷启动时插件注册先于 run_agent 加载，直补丁永远丢失（好在 conversation_loop 模块补丁通常先命中，此为纵深防御层失效） | 注释写了重试但实现从未存在 | 全目标延迟补丁轮询器覆盖 `need_agent`：AIAgent 类在 sys.modules 出现后由轮询器补装直补丁（含 `_hls_direct_patched` 幂等哨兵）；同时为 `_wrap_run_conversation`/`_wrap_cron_deliver` 增加 `_hls_wrapped` 哨兵防轮询器重复包装（PR #20 未覆盖这两个 wrapper 的防重复）(`patching/__init__.py`, `patching/gateway.py`) |
+| 🧪 Test | 新增 36 个 v1.8.3 回归测试 `test_v183_fixes.py` | 防回归 | 非阻塞解析 5 项（sys.modules 解析 GatewayRunner/FeishuAdapter、缺失时 None 且**断言绝不 import**（monkeypatch import_module 为引爆器）、conversation_loop 策略 3 无导入）、轮询器 2 项（sys.modules 注入后自动补丁 GatewayRunner / 全命中时不启动）、签名保真 2 项（wraps 后 signature 无 VAR_KEYWORD 且不含 webui 前向参数、参数仍正常转发）、用量提取 4 项（agent 主源/result 次源/无 agent 纯 result/全空零安全）、续卡竞态 5 项（活跃保留/终态清理/目标消失清理/完整竞态时序 on_completed 重定向封卡/目标侧反向清理保留）、平台助手 7 项（Enum/字符串/大小写/缺失/None/非飞书）、中断路径门禁 1 项、异常封卡 5 项（错误面板/取消语义化/COMPLETING 不重封/异常照常 re-raise/非飞书跳过）、非 om_ 投递 4 项（om 走 reply/bg 走直发/文本回退双向校验）；另 1 个 v1.1.0 夹具锚点 id 按真实 om_ 格式更新 |
+| 🧪 Test | #14 回归确认：话题隔离键已在 v1.8.1 修复（`thread_id or chat_id`），与 hermes `build_session_key` 源码逐场景核对（群聊 per-user、话题含 thread_id、引用回复不含 anchor）一致 | issue 针对的是 v1.6.0 | v1.8.1 已有 7 项隔离测试继续覆盖；对照确认后 issue #14 可关闭 |
+
+**审计方法**: Issues 专项审计（3 轮：①全量 issue 提取与分类——8 个 issue 逐个判型：4 个纯 bug（#15/#18×4/#21/#12）、1 个已修复待确认（#14）、2 个新需求/改进（#13/#19）、1 个表扬（#10），全部"先验证根因、后动手"；②源码级验证——每个 bug 均在插件 v1.8.2 代码定位到具体行并与 hermes-agent 源码交叉核对：死锁根因读 hermes 插件加载器（`run_with_load_deadline` 的 plugin-load 工作线程 + 10s deadline）、平台字符串形态读官方 `_platform_name()`、`context_length` 不在 result 读 finalize_turn 全字段清单、webui 参数门行为按 issue 报告的源码定位复现推导、PR #20 diff 全文审读后决定采纳其非阻塞+轮询器骨架（两个独立生产报告 + 看门狗日志互相印证）并补全其未覆盖面（`_hls_wrapped` 哨兵、AIAgent 重试缺口）；③验证闭环——976 单元 + 22 真飞书 E2E 全绿（含 15 项全流程 + 7 项 clarify），集成测试 30 用例在本轮前后计数完全一致（9 failed 为本地 hermes 缓存 v2026.9.24 较 v1.8.2 适配基线 v2026.9.7 更新所致的哨兵地址漂移，与本次修改无关，对照 stash 验证）。
+
+**已知限制**:
+- 延迟补丁轮询器预算 60s：若 hermes 在启动后 60s 内仍未导入某目标模块（如 run_agent 且无任何消息触发），对应补丁本进程内不会生效（日志 ERROR 留指纹，/aowen doctor 可见；下条消息触达后重启即恢复）——轮询器只读 sys.modules 绝不主动 import 是防死锁的硬约束，代价是无法加速懒加载
+- PR #20 提到的 Docker lazy-packages sys.path 注入（HERMES_LAZY_INSTALL_TARGET）**未采纳**：该环境变量在当前 hermes 源码（v2026.9.24）中不存在，无法核实其机制；lark_oapi 缺失时插件加载器会记录明确错误（hermes fail-closed），可观测性已覆盖
+- #19（网关内存驱逐后卡片静默失败）按约定不在本轮范围：上报者自标 Feature/Improvement 且建议的"降级路径"本质是兜底逻辑，与项目"主流程解决"原则冲突，留待与上游 hermes 会话驱逐语义对齐后评估
+- #13（卡片字号设备差异配置）为新需求，留待后续功能版本
+- footer tokens 语义为**会话累计**（hermes session 计数器），非单回合增量——与 v1.8.2 在新版 hermes 上的既有行为一致，未改变口径
+
+---
+
+## v1.8.2 (2026-09-08)
+
+hermes v0.21.1 (tag v2026.9.7) 升级冲击适配版 — 纯测试与文档，零运行时代码改动。hermes v2026.9.7 进行了大规模文件分解（2 万行级大文件拆成十几个模块），触发本插件 2 个集成哨兵报警（30 用例中 2 failed / 25 passed / 3 skipped）。经三方独立审计（hermes hook/session 机制审计、adapter patch 点审计、测试与文档影响面审计）+ 行为级验证（插件经 hermes 真实加载入口装上真 v0.21.1 源码，41 项检查全过）确认：**生产 patch 面 100% 兼容，报警全部源于哨兵检测地址过时**（盯着的 hermes 内部符号搬家了，名字还在新地址用着）。本版将 2 个哨兵的检测面迁移到 hermes 新布局，CI 恢复全绿。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🧪 Test | **集成哨兵 `test_run_conversation_has_persist_user_timestamp_param` 报警**（原名 `test_run_agent_has_persist_user_timestamp_param`）：hermes v0.21.1 将 `GatewayRunner._run_agent` 泛化为 `(self, message, context_prompt, history, source, session_id, **turn_kwargs)`，persist_* 参数移入 **turn_kwargs 透传，不再显式出现在 `_run_agent` 签名中——哨兵在旧地址找参数必然失明 | 哨兵检测点与插件生产检测点脱节 | 检测面迁移到插件生产代码真实用 `inspect.signature` 探测的两个位置（`AIAgent.run_conversation` + `agent.conversation_loop.run_conversation`，v0.17.0~v0.21.1 全程显式声明）；import 层 + AST 三候选 fallback（run_agent→AIAgent / agent.turn_facade→TurnFacadeMixin / agent.conversation_loop 模块级），候选文件旧版缺失自动跳过 (`tests/integration/test_hermes_compat.py`) |
+| 🧪 Test | **集成哨兵 `test_aiagent_callback_attributes` 报警**：hermes v0.21.1 把 5 个 AIAgent 回调属性的赋值点从 run_agent.py / agent/conversation_loop.py 迁到 `gateway/run_turn_runner.py`（`_wire_turn_agent_callbacks`）和 `agent/agent_init.py`，旧 2 文件扫描面上 `ast.Attribute` 节点数归零 | AST 扫描面未随 hermes 赋值点迁移 | 两层验证重构：Tier 1（import 层）断言 `AIAgent.__init__` 构造签名含 4 个回调构造参——这才是"agent 实例携带回调属性"的真实契约（v0.17.0~v0.21.1 一致）；Tier 2（AST 层）按候选列表 `[run_agent, agent.conversation_loop, gateway.run_turn_runner, agent.agent_init]` 取并集，维持"全空才 fail"语义（v0.21.1 并集 4/5、v0.21.0 并集 5/5，候选缺失自动跳过，纯增量）(`tests/integration/test_hermes_compat.py`) |
+| 🧪 Test | **`persist_user_message` 参数验证从 skip 恢复为硬验证**：v0.21.1 泛化 `_run_agent` 后该参数在 `_run_agent` 签名中消失（旧测试条件 skip），但在 run_conversation 双生产面仍显式声明 | 旧检测点（_run_agent）过时 | 与 persist_user_timestamp 同步迁移检测面；v0.21.1 上从 skip 恢复为 passed——两版本测试计数对称（v0.21.0 / v0.21.1 均 28 passed + 2 skipped，剩余 2 skip 为 v0.20.5+ 反应方法私有化的预期跳过）(`tests/integration/test_hermes_compat.py`) |
+| 📝 Docs | 验证基线升 **hermes-agent v0.21.1（tag v2026.9.7）**：AGENT_GUIDE 概览表与版本 FAQ 两处基线表述、`test_v181_fixes.py` docstring 补 v0.21.1 复验结论 | 基线停留在 v0.21.0 | 双版本全量验证：v0.21.0 与 v0.21.1 上 940 单元 + 22 e2e + 30 集成用例全部通过（v1.8.1 修复全部版本无关）；行为级验证 41 项检查全过（真实加载路径 / 17 个 patch 点安装盘点 / invoke_hook 真实分发链 / 11 条关键调用链按 v0.21.1 真实调用形状走通 / v0.21.1 回调赋值模式包装与 late-arrival reasoning 路径）(`docs/AGENT_GUIDE.md`, `tests/test_v181_fixes.py`) |
+
+**审计方法**: 三方独立审计 + 行为级验证。①hook/session/cron 机制审计：VALID_HOOKS 集合两版本零变化（37 hook）、`pre_gateway_dispatch` 分发链逐行比对、session key 话题隔离语义逐行对齐、cron `_deliver_result` 经 scheduler.py 底部 re-export 存活；②adapter patch 点审计：FeishuAdapter 8 个 setattr 目标、RelayAdapter 2 个、HermesCompat 8 条导入路径在新版全部命中且签名零变化（含 v0.21.1 新增 `for_failure` / `finalize` / `_quick_key`+`run_generation` kwarg 全部被插件包装器 `**kwargs` 吸收）；③测试文档影响面审计：940 单元 + 22 e2e 与 hermes 版本零耦合（全假件），版本敏感面 100% 收敛在集成哨兵文件；④行为级验证：插件经 hermes 真实插件加载入口（PluginManager + PluginManifest + PluginContext + `register(ctx)`）装上真 v0.21.1 源码，17 个 patch 目标全部落位，真实 `invoke_hook` 分发链调通插件 handler，11 条关键调用链按 v0.21.1 真实调用形状全部过插件层进入真 hermes 代码（其中 FeishuAdapter.send/edit_message 完整跑通返回真实 SendResult），v0.21.1 回调赋值模式下 5 个回调包装 + 触发链 + late-arrival reasoning 全部验证通过。
+
+**运维注**: 本修复完全在测试代码与文档层，CI 工作流零改动（GitHub Actions 的 GITHUB_TOKEN 无法推送 `.github/workflows/` 变更，本修复不触碰该限制）。若需在 GitHub 侧重跑对 v2026.9.7 的集成验证：集成工作流按"hermes 新 release 才跑"去重，上次失败运行已把 last-release 缓存写为 v2026.9.7——需在 GitHub 仓库 Settings → Actions → Caches 删除 `hermes-last-release-*` 缓存后手动 Run workflow，即可对 v2026.9.7 重跑并收到绿色飞书卡片。
+
+
+## v1.8.1 (2026-09-07)
+
+外部反馈专项审计落地版 — 对全部外部用户反馈逐项核实（3-5 轮，先验证后动手：每项均对照 v1.8.0 代码与 hermes-agent v0.21.0 源码确认真实成立才纳入修复，不成立的项本项目不处理也不记录）。本轮落地 5 项确认问题（P1×4 / P2×1），其中 3 项为多渠道/长任务场景下从未被生产流量暴露的结构性缺陷。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P1) | **话题并发误杀**：飞书话题群/群内话题中，同一 chat 的不同话题在 hermes 侧是独立会话（session key 含 thread_id），但并发打断检查只比较 chat_id——话题 B 的新消息会把话题 A 还在流式输出的卡片误封 | 并发 seal 隔离键缺 thread_id 维度 | 隔离键改为 `(thread_id or chat_id)`：`CardSession` 新增 `thread_id` 字段，START/INTERRUPTED 钩子链与续写重激活全部传递/继承该键；话题内（同 thread）新消息打断旧卡、普通群聊/私聊（无 thread）退回 chat 维度——与 hermes 会话语义逐场景对齐，现有行为零回归 (`state/session.py`, `controller/core.py`, `patching/hooks.py`, `patching/gateway.py`) |
+| 🐛 Bug Fix (P1) | **续卡竞态泄漏**：长任务流式卡被服务端关闭触发重激活（old→cont 路由注册）后，若任务继续运行超过会话 TTL（600s），任意新消息触发的过期回收会无条件销毁该路由——hermes 后续的 on_answer/on_completed(old) 重定向落空，续写新卡永远停在流式态，且非终态会话只告警不清理（泄漏） | `_cleanup` 无条件 pop continuation 路由，与"续写目标会话还活着"的真实状态脱钩 | TTL 回收前置检查：续写目标仍非终态时延迟回收本会话——路由生命周期与续写会话严格同步（目标封卡终态 → 其自身回收时反向清理路由 → 下轮回收本会话）；`_continuation_map` 增加 200 条上界（与 interrupt map 同构）兜底"目标永不到达终态"的极端泄漏 (`controller/core.py`) |
+| 🐛 Bug Fix (P1) | **agent 异常后卡片永转圈 + 会话泄漏**：hermes 把 agent 层异常捕获后转成错误**字符串**返回（run.py except 分支，不走 completed/aborted 回调），插件的 COMPLETE 包装器只认 result dict——对字符串 result 取 `.get` 抛 AttributeError 被吞，外层又因会话存在而抑制文本回复：流式卡永远停在加载动画、非终态会话永不回收 | COMPLETE hook 未覆盖 except 分支的字符串返回值形态 | 字符串 result 分支：以错误字符串作为 `error_message` 封卡（卡片转错误态展示、会话正常终态回收）；封卡成功置 `card_sent`，由既有抑制机制接管（错误文本已上卡，不重复发纯文本）；递归中断场景同步恢复父上下文 (`patching/gateway.py`) |
+| 🐛 Bug Fix (P1) | **非飞书渠道消息误建卡会话**：多渠道部署（QQ/Telegram 等与飞书同装）时，任何渠道的消息都会触发飞书流式卡会话创建——对非 om_ 消息 id 调用回复建卡必然失败，会话停在 CREATION_FAILED（终态、无泄漏，但每次刷错误日志） | START 钩子注入点无平台过滤 | 源头堵：START 钩子仅对 feishu/lark 平台调用；非飞书消息不建会话，下游各回调包装器因查不到会话自然放行纯文本——各渠道行为互不干扰 (`patching/gateway.py`) |
+| 🐛 Bug Fix (P2) | **/bg 后台任务从未出过流式卡**：hermes /bg 处理器把用户消息的回复锚（om_ id）作为 `event_message_id` 传入，包装器签名未显式接收、被 `**kwargs` 吞掉——START 钩子只拿合成 task_id（`bg_时间戳_十六进制`）建卡，对非消息 id 回复必然失败。v1.4.0 引入 /bg 卡片支持以来从未成功过；生产未发现是因为生产从未使用 /bg | 包装器未尊重 hermes 传入的锚点参数 | 包装器显式接收 `event_message_id` 并作为卡片回复锚（/bg 流式卡回复到用户的命令消息上）；话题隔离键同步传递；锚点原样透传 hermes 自身投递逻辑（话题路由不受影响）；旧版 hermes 不传该参数时保持旧行为（无回归）(`patching/gateway.py`) |
+| 🧪 Test | 新增 21 个 v1.8.1 回归测试 `test_v181_fixes.py` | 防回归 | 覆盖：话题隔离 7 项（跨话题不打断/同话题打断/无话题回退 chat/父 chat 不扰话题/记录 thread_id/interrupt 继承/重激活继承）、续卡竞态 4 项（活跃延迟回收/终态正常回收/两轮闭环/上界）、错误字符串封卡 3 项（封卡+error 展示/无 ctx 透传/dict 路径回归保护）、平台守卫 3 项（feishu 传递 thread_id/telegram 跳过/qq 跳过）、/bg 锚点 4 项（锚点传递/透传 hermes/旧版兼容/非飞书透传）；另 4 个 v1.3.0 hook 转发断言按新签名契约更新（thread_id=None 显式化） |
+
+**审计方法**: 外部反馈专项审计（3-5 轮，全部"先验证、后实施"：报告内容逐项对照 v1.8.0 真实代码核实，不因出处存疑跳过、也不未经证实采纳）。①话题隔离键由 hermes session key 构造源码证实（群聊场景 thread_id 进 key、话题=独立会话）与飞书入站 thread_id 解析链（`message.thread_id or root_id`，adapter 源码 3368）证实，另核对了引用消息虚假 thread_id 的既有修正（on_feishu_normalize）；②续卡竞态沿 v1.4.0 重激活机制的完整生命周期推演（注册 → old 封卡终态 → TTL 回收 → 回调重定向落空 → 续卡孤儿），闭环由 v1.4.0 已有的 stale-key 反向清理承接；③错误字符串返回路径读 hermes `_run_agent` except 分支源码（run.py 22805-22919）确认返回值形态，插件侧 COMPLETE 包装器对 str result 的失败由代码路径推演证实；④平台守卫与 /bg 锚点均直接对照 hermes 调用方源码（`_handle_message_with_agent` 调用链 / `_handle_background_command → _run_background_task` 的 event_message_id 传参）；⑤修复后全量测试见下（940 单元 + 22 e2e mock + 28 集成）。
+
+**已知限制**:
+- 话题隔离依赖入站 thread_id：引用回复的虚假 thread_id 已由 on_feishu_normalize 先行修正；hermes 适配层未来改动 thread_id 语义时话题隔离会退化为旧的 chat 维度（无功能破坏）
+- /bg 卡片回复锚依赖传入 event_message_id 的 hermes 版本；更旧版本保持无锚行为（卡创建失败路径，与 v1.8.1 之前一致）
+- agent 异常封卡覆盖"错误字符串返回"路径；agent 进程级崩溃（无任何返回值）仍依赖既有 TTL 告警机制
+
+
+## v1.8.0 (2026-09-04)
+
+生产日志审计落地版 — 基于 v1.7.0 两个月的生产行为（8FiX7X 日志 3-5 轮审计）+ hermes-agent v0.21.0（tag v2026.8.31）源码交叉验证。本轮共修复 10 项确认问题（P1×2 / P2×3 / P3×5），全部经用户确认范围后实施。审计结论：v1.7.0 生产表现优秀（0 ERROR / 0 失败 / 0 孤儿卡片 / clarify 6/6 全成），风险全部在插件边界之外（依赖矩阵、SDK 静默重连、宿主机网络）——本版补齐这些盲区的可观测性与防护。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P1) | **lark-oapi 版本门槛过低（>=1.4.24）**：hermes-agent ≥ 0.19 会给 `lark.Client.builder()` 传 `extra_ua_tags`——该参数 1.6.4 才引入（4 版本 wheel 源码比对证实，1.5.1 无）。混合安装（hermes 升级、lark-oapi 留旧）时飞书 WS 连接每次重试抛错——**2026-07-21 生产 22 分 39 秒中断根因**（10:09 升级 hermes → 10:11 起连不上 → 10:31 最后失败 → 10:34 手工修复）。hermes 自身 pin lark-oapi==1.6.8（feistu extra），但插件声明兜不住手工管理依赖的环境 | pyproject 门槛停留在 1.4.24（只覆盖异步 cardkit API 面，漏了 extra_ua_tags 参数面） | ①pyproject 门槛升 `>=1.6.4`（含双重依据注释）；②`plugin/__init__.py register()` 启动即检（`_check_lark_oapi_floor`）：低于门槛时按"hermes ≥ 0.19（必断 WS）→ ERROR / 其余 → WARNING"分级，日志指纹含 07-21 根因与修复命令，先于一切 patch 输出便于按时间线定位；③`__main__.py doctor` 增加 lark-oapi 版本行 + 门槛校验；④文档（AGENT_GUIDE 依赖行/排障表/FAQ）同步 (`pyproject.toml`, `plugin/__init__.py`, `__main__.py`, `docs/AGENT_GUIDE.md`) |
+| 🐛 Bug Fix (P1) | **AGENT_GUIDE "方式三 pip install" 指向第三方衍生包**：PyPI 存在同名牌 `hermes-lark-streaming` 2.4.0——实为第三方账号（monkey2jack）上传的衍生包（fork 本仓库 10 个核心文件字节级相同 + 自有"泡波"主题层，产品名 aiduPOP），包元数据署名却是 Aowen-Nowor。照文档执行会装到它而非本插件；`__main__.py` 找不到包时的兜底提示第 1 条也在教用户 `pip install hermes-lark-streaming`（v1.0.2 残留） | 用户已确认非本人发布；本插件官方渠道只有 Gitee/GitHub 仓库 | ①AGENT_GUIDE 方式三（pip 安装）**整节删除**——pip 对 hermes 插件体系本为无效路径（插件从 `~/.hermes/plugins` 加载，不走 site-packages），且编号"方式"在结构上暗示可选项（该文档专为 Agent 自动解析设计，删除比警示更无歧义）；②`__main__.py` 兜底提示删除 pip 建议、重编号（保留直接运行/PYTHONPATH 两条合法路径）；③README 双语在 Cheerwhy 不兼容警示旁新增 🚫 PyPI 冒名包警示框（冒名包披露与"勿 pip install"指引保留在 README）(`docs/AGENT_GUIDE.md`, `__main__.py`, `README.md`, `README.zh-CN.md`) |
+| 🐛 Bug Fix (P2) | **WS 渠道健康零可观测性**：lark-oapi WS 重连预算耗尽后 dispatch 线程静默退出，适配器仍报"已连接"，hermes gateway 无 is_connected 轮询——生产 2 个月 WS 断连 41 次/恢复 0 条日志，渠道死亡完全不可见（插件健康看门狗是唯一探测手段） | 断连日志在 SDK 线程内被吞 | ①`aowen` 新增 `record_inbound()`（线程安全）：`on_feishu_normalize` 在 feishu 平台过滤后记录每条入站消息的时间戳+计数（该注入点在 `_handle_message` 顶部，native/RELAY 两种部署的入站都经过）；②`/aowen monitor` 新增"渠道健康"区：入站消息计数 + 最近入站时间（相对时长），附"长时间无入站而网关在线 → 疑似 WS 静默断连"提示；③`monitor reset` 保留 `last_inbound_at`（渠道活性事实，非可清零计数器）(`aowen/__init__.py`, `patching/hooks.py`) |
+| 🐛 Bug Fix (P2) | **cron 拦截日志误导 + 刷屏**：`"cron delivery intercepted"`（"拦截"）措辞让操作者以为消息被阻断（安全语境联想）；且一次 cron 推送打 4 条 INFO（intercepted / ctrl.enabled / do_cron_deliver / delivered） | v1.7.0 引入的中继日志合唱 | 误导文案改为中性的 `"cron delivery redirected to streaming card"` 并降级 debug；`ctrl.enabled`/`_do_cron_deliver` 两处合唱降 debug；保留 `"cron card delivered"` 单条 INFO 作成功确认；relay 车道日志保留 INFO（RELAY 拓扑唯一可见性）(`patching/gateway.py`, `controller/mixin.py`) |
+| 🐛 Bug Fix (P2) | **Phase 2 batch 300315 后 answer 丢失→全量重建死循环（07-02 生产实锤根因链）**：batch_update 非幂等——首次尝试服务端已生效但响应丢失（网络超时/SDK 瞬态重试），重试撞 300315 "not find elementID: context_loading_hint"（insert_before 目标已被上次删除）。旧处理器清空 dirty 却不标记元素已创建 → 之后每次 flush 全量重建 add_elements batch → 每次撞 300315 → answer 永远上不了卡片 → 完成时靠 R1-03 文本兜底重发整条答案（v1.7.0 前 = 彻底丢失） | Phase 2 的 element-not-found 分支未镜像 v1.4.1 对 Phase 3 的同型修复（后者同步 hint_removed 并保留 dirty 重试） | **状态再同步**：300315 命中 Phase 2 时，标记 answer（+当批含 panel 时 panel）已创建、hint 已移除（hint 只被本 batch 在流中删除——被点名不存在 ⟹ 上次已生效），**保留** dirty 并落穿到本函数下半段，本次 flush 直接把内容写进已存在元素。配套自愈：①`feishu/client.py` 新增 `extract_not_found_element_id()`（解析 300315 消息中被点名的 elementID）；②Phase 3 处理器按点名元素精确处置——panel/answer 本体不存在时丢弃跟踪标记走 add 路径重建（兜底再同步对 panel 的极小概率误标记 race）；③Phase 2 add_elements 锚点自适应：hint 已移除时退锚 `_LOADING_ELEMENT_ID`（seal 同款合法锚点），避免重入路径再撞 300315；④完成期 drain 面板 300315 丢弃跟踪，消 8 轮同错重试刷屏 (`controller/linear_mixin.py`, `feishu/client.py`) |
+| 🔧 P3 | client.py:427 `if elapsed_ms > 200: pass` 死代码（含 t0/elapsed_ms 计时骨架） | cardkit_create 的 perf 调试时代残留，stream_element 版算了时长即丢弃 | 删除三行死代码；cardkit_create 的真 perf debug 行保留 (`feishu/client.py`) |
+| 🔧 P3 | adapter.py clarify 日志文案过时：`"(SDK stale bound method path — _on_card_action_trigger wrapper bypassed)"` 描述的是 v1.5.0 之前的废弃架构 | v1.5.0 已删该 wrapper，v1.4.2 起 `_handle_card_action_event` 就是唯一主链路（生产 6/6 全走此路径），旧文案误导读者以为降级路径触发 | 日志与孤儿注释重写为"主拦截路径"语义；抑制非 clarify 动作的注释补全 hermes 0.21 源码依据（adapter.py:3191 每个 card 点击都会合成 `/card` 命令进会话） (`patching/adapter.py`) |
+| 🔧 P3 | pruning WARNING 噪声：终态 session 过期清理以 WARNING 刷屏（实测 2 个月 180 条，零次伴随真故障） | 正常生命周期事件误用告警级别 | 降级 debug；"活跃 session 超 TTL"（真异常）保持 WARNING (`controller/core.py`) |
+| 🔧 P3 | **停机通知误分类为 error**：hermes 停机/重启通知硬编码 `"⚠️ Gateway restarting/shutting down — …"`（run.py `_notify_active_sessions_of_shutdown`，源码证实），⚠️ 前缀使全部 13 次计划内停机被 `_classify_gateway_message` 归入 error 桶（卡片注册表与日志显示为错误）；zh 版 `♻ 正在重启网关` 则误入 session 桶 | 分类器无 lifecycle 概念，error 关键词表含 ⚠️ | 新增 `lifecycle` 分类（置于 error/session 之前）：覆盖 EN 停机/排空/重启关键字（"Gateway restarting/shutting down/stopping"、"queued for the next turn"、"not accepting another turn"、"Draining"）与 ZH 关键字（"正在重启网关"、"活跃代理结束后重启"）(`patching/adapter.py`) |
+| 🔧 P3 | 版本口径文档过时：验证基线停 v0.20.5；依赖行写 1.4.0（连 1.4.24 都不是）；hermes 版本支持 FAQ 含糊 | v1.7.0 后 hermes 已发 v0.21.0 | 验证基线升 **hermes-agent v0.21.0（tag v2026.8.31）**（本次全量测试在该源码上跑通）；AGENT_GUIDE 概览表加验证基线行；FAQ 给出明确版本支持矩阵（0.17+ / 生产建议 0.19+ / RELAY 需 0.20.5+）(`docs/AGENT_GUIDE.md`) |
+
+**审计方法**: 三方对齐求证（v1.7.0 生产日志 + 插件代码 + hermes-agent v0.21.0 源码）。①07-21 断链时间线（10:09:36 升级→10:11 失败起点→10:31 最后失败→10:34 手工修复）与 07-02 卡片构建失败链均来自生产日志逐行复核；②lark-oapi 1.6.4 参数引入由 4 个版本 wheel 源码比对证实（extra_ua_tags 在 1.5.1 缺失、1.6.4 存在）；③停机通知文案直接读 hermes run.py `_notify_active_sessions_of_shutdown` 源码（f"⚠️ Gateway {action} — {hint}" 硬编码英文，zh 变体来自 locales gateway.draining/restart.restarting）；④PyPI 冒名包经 PyPI JSON API + wheel 内容比对（10 文件字节级相同 + 泡波主题层），用户确认非本人发布；⑤Phase 2 状态再同步的推理链：hint 在流中仅被本 batch 删除 ⟹ 被点名不存在 ⟹ 上次已生效（answer 元素 Path A/B 必含），answer_dirty=False ⟹ 内容已在服务端的守恒不变式保证落穿路径正确；⑥修复后全量测试见下。
+
+**已知限制**:
+- last_inbound 是人工诊断信号而非告警——渠道空闲与渠道死亡的判别仍需人工（避免合法空闲触发误报）；后续可考虑可配置的 staleness 阈值告警
+- lifecycle 分类基于 hermes 当前文案关键字——hermes 未来改动停机通知措辞会退回 system/error 分类（降级为显示不精确，无功能影响）
+- PyPI 冒名包警示只能覆盖本仓库文档触达的用户；若需从 PyPI 侧治理（名称争议/下架申请）需另行向 PyPI 管理员提交
 
 ---
 

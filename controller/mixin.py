@@ -56,7 +56,10 @@ class ControllerMixin:
     _flush_deferred_background_reviews: Callable[[CardSession], None]
 
     async def _do_cron_deliver(self, chat_id: str, content: str) -> None:
-        _logger.info("cron _do_cron_deliver: chat=%s content_len=%d", chat_id[:12], len(content))
+        # v1.8.0 (P2-2): 与 _wrap_cron_deliver 的合唱日志一起降级——
+        # 一次 cron 推送以前打 4 条 INFO（intercepted/ctrl.enabled/此处/
+        # delivered）。保留 delivered 一条 INFO 作确认，其余转 debug。
+        _logger.debug("cron _do_cron_deliver: chat=%s content_len=%d", chat_id[:12], len(content))
         await self._ensure_init()
         assert self._client is not None
         card = build_cron_card(content)

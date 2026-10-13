@@ -35,6 +35,10 @@ _logger = logging.getLogger("hermes_lark_streaming")
 
 # v1.3.2: module-level constant (was previously re-defined on every on_interrupted call)
 _INTERRUPT_MAP_MAX = 200
+# v1.8.1 (P1): 与 _INTERRUPT_MAP_MAX 同构的防泄漏上界。continuation 路由的
+# 正常生命周期由「目标封卡终态 → 其 _cleanup 的 stale-key 清理」收敛；上界
+# 只兜底极端场景（目标永不到达终态时避免 map 无限增长）。
+_CONTINUATION_MAP_MAX = 200
 
 from ..state.session import CardSession  # noqa: F401 — re-exported for backward compatibility
 
@@ -168,6 +172,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         """记录 old_message_id -> new_message_id 的续写映射。线程安全。"""
         with self._continuation_map_lock:
             self._continuation_map[old_message_id] = new_message_id
+            # v1.8.1 (P1): 防泄漏上界（与 _interrupt_map 同构）——目标会话永
+            # 不终态的极端场景下路由无法收敛，丢弃最旧条目兑底。
+            if len(self._continuation_map) > _CONTINUATION_MAP_MAX:
+                excess = len(self._continuation_map) - _CONTINUATION_MAP_MAX
+                for old_key in list(self._continuation_map.keys())[:excess]:
+                    self._continuation_map.pop(old_key, None)
 
     def _pop_continuation_id(self, message_id: str) -> str | None:
         """取出并删除 message_id 对应的 continuation id（用于 on_completed 一次性消费）。"""
@@ -224,6 +234,9 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # anchor_id 设为原 anchor_id（reply 时仍回复到用户原始消息，保持线程上下文）
         new_session.anchor_id = anchor_id if anchor_id != new_message_id else None
         new_session._is_continuation = True
+        # v1.8.1 (P1): 继承原会话的话题隔离键——续写卡仍属于同一个话题，
+        # 其它话题新消息的并发 seal 检查不应把它误封。
+        new_session.thread_id = stale_session.thread_id
         # v1.4.0 fix: 预先创建 unified_state + 标记 linear=True，避免 on_answer 在
         new_session.linear = True
         new_session.unified_state = UnifiedLinearState()
@@ -340,6 +353,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         message_id: str | None,
         chat_id: str,
         anchor_id: str | None = None,
+        thread_id: str | None = None,
     ) -> None:
         """消息处理开始 — 创建会话 + 发占位卡片."""
         if not self.enabled:
@@ -354,8 +368,16 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         # v1.3.6 fix: 用 seen set 跟踪已处理的 session 对象，防止同一 session
         seen_sessions: set[int] = set()
+        # v1.8.1 (P1): 并发 seal 的隔离键从 chat_id 收敛为 (thread_id or chat_id)。
+        # 话题群/群内话题中不同 topic 的消息共享 chat_id，但在 hermes 侧是
+        # 各自独立的 session（session key 含 thread_id）——旧比较会把别的
+        # 话题的活跃卡误封。话题内（同 thread_id）新消息打断旧卡、普通
+        # 群聊/私聊（thread_id=None）退回 chat_id 维度，均与 hermes 会话
+        # 语义逐场景对齐。
+        new_scope = thread_id or chat_id
         for existing_msg_id, existing_session in self._sess_items_snapshot():
-            if existing_session.chat_id != chat_id:
+            existing_scope = existing_session.thread_id or existing_session.chat_id
+            if existing_scope != new_scope:
                 continue
             if existing_session.is_terminal_phase:
                 continue
@@ -406,12 +428,19 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 _logger.debug('metrics: record_card_created failed (reuse path)', exc_info=True)
             return
 
-        session = CardSession(message_id, chat_id, loop)
+        session = CardSession(message_id, chat_id, loop, thread_id=thread_id)
         self._sess_put(message_id, session)
         if anchor_id and anchor_id != message_id:
             session.anchor_id = anchor_id
             self._sess_put(anchor_id, session)
-        _logger.info("HLS: session created msg=%s trace=%s chat=%s anchor=%s", (message_id or "?")[:12], session.card_trace_id, chat_id[:12], (anchor_id or "")[:12])
+        _logger.info(
+            "HLS: session created msg=%s trace=%s chat=%s anchor=%s thread=%s",
+            (message_id or "?")[:12],
+            session.card_trace_id,
+            chat_id[:12],
+            (anchor_id or "")[:12],
+            (thread_id or "")[:12],
+        )
 
         # v1.1.0: Record metrics
         try:
@@ -584,6 +613,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         new_message_id: str,
         chat_id: str,
         anchor_id: str | None = None,
+        thread_id: str | None = None,
     ) -> None:
         """用户发送新消息导致前一条消息被中断 — abort A + create B."""
         if not self.enabled:
@@ -682,7 +712,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             loop = self._get_loop()
             if loop is not None:
                 reply_anchor_id = anchor_id if anchor_id and anchor_id != new_message_id else None
-                session = CardSession(new_message_id, chat_id, loop)
+                session = CardSession(new_message_id, chat_id, loop, thread_id=thread_id)
                 session.anchor_id = reply_anchor_id
                 self._sess_put(new_message_id, session)
                 if reply_anchor_id:
@@ -935,8 +965,32 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             for k in stale_keys:
                 del self._interrupt_map[k]
         # v1.4.0 fix: 清理 _continuation_map 中以本 message_id 为 old 或 new 的条目。
+        # v1.8.3 (P1, issue #15): 清理以本 message_id 为 KEY 的路由前，先检查
+        # 路由目标（continuation 会话）是否仍活跃。竞态链：重激活会先异步封
+        # 旧卡（_reactivate_session_for_continuation → _do_linear_complete →
+        # _cleanup(old)），路由注册发生在 fire 之后 —— 封卡任务先于注册完成
+        # 时 pop 是无害的空操作；但封卡任务在注册之后才完成时（常态，封卡含
+        # 多次网络往返），这里的无条件 pop 会删掉刚注册的路由，hermes 随后的
+        # on_completed(old) 重定向落空、命中旧卡幂等分支，续卡永不封闭（且
+        # 可能被后台审查继续写入）。目标仍活跃时保留路由，交给
+        # on_completed(old) 一次性消费（_pop_continuation_id）；目标已终态/
+        # 不存在时照常清理。
         with self._continuation_map_lock:
-            self._continuation_map.pop(message_id, None)
+            cont_target = self._continuation_map.get(message_id)
+            keep_route = False
+            if cont_target is not None:
+                cont_sess = self._sess_get(cont_target)
+                if cont_sess is not None and not cont_sess.is_terminal_phase:
+                    keep_route = True
+            if keep_route:
+                _logger.info(
+                    "HLS: cleanup keeps continuation route old=%s -> cont=%s "
+                    "(target still active; on_completed(old) will consume it)",
+                    (message_id or "?")[:12],
+                    (cont_target or "?")[:12],
+                )
+            else:
+                self._continuation_map.pop(message_id, None)
             stale_cont_keys = [k for k, v in self._continuation_map.items() if v == message_id]
             for k in stale_cont_keys:
                 del self._continuation_map[k]
@@ -1002,14 +1056,32 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             from ..cardkit.md import optimize_markdown_style
             content = optimize_markdown_style(text) or text
             reply_id = session.anchor_id or session.message_id
-            await self._client.reply_text(reply_id, content)
+            # v1.8.3 (P1, issue #18-3): reply API requires an om_ message id;
+            # a synthetic id (bg_* task id) fails with 99992354 and the old
+            # bare `except: pass` silently swallowed the text. For non-om_
+            # targets send directly to the chat — same delivery, correct API.
+            if reply_id and str(reply_id).startswith("om_"):
+                await self._client.reply_text(reply_id, content)
+            elif session.chat_id:
+                await self._client.send_text_to_chat(session.chat_id, content)
+            else:
+                _logger.warning(
+                    "text fallback dropped: no om_ reply target and no chat_id "
+                    "msg=%s",
+                    (session.message_id or "?")[:12],
+                )
+                return
             _logger.info(
                 "text fallback sent: msg=%s len=%d",
                 (session.message_id or "?")[:12],
                 len(content),
             )
         except Exception:
-            pass
+            _logger.warning(
+                "text fallback failed: msg=%s",
+                (session.message_id or "?")[:12],
+                exc_info=True,
+            )
 
     def _prune_stale_sessions(self) -> None:
         """v1.1.1: 只清理已终态的过期 session，保护活跃 session."""
@@ -1020,7 +1092,30 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             if mid is None or now - s.created_at <= self._session_ttl:
                 continue
             if s.is_terminal_phase:
-                _logger.warning("pruning stale terminal session: msg=%s", (mid or "?")[:20])
+                # v1.8.1 (P1): 终态会话的 TTL 回收不再无条件斩断 continuation 路由。
+                # 此前竞态链：长任务流式卡被服务端关闭触发重激活（map[old]=cont）→
+                # old 封卡终态后超 TTL 被回收 → _cleanup 无条件 pop map[old] →
+                # hermes 后续 on_answer/on_completed(old) 重定向落空 → 续写新卡
+                # 永转圈（cont 非终态，本方法只告警不清理）→ 会话泄漏。
+                # 修复：cont 目标仍非终态时延迟回收本会话，等 cont 封卡终态后
+                # 由其自身 _cleanup 的 stale-key 清理（v1.4.0 已有）移除路由，
+                # 下轮 prune 再回收本会话——路由生命周期与续写会话严格同步。
+                cont_id = self._resolve_continuation_id(mid)
+                if cont_id is not None:
+                    cont_sess = self._sess_get(cont_id)
+                    if cont_sess is not None and not cont_sess.is_terminal_phase:
+                        _logger.info(
+                            "HLS: prune deferred — terminal session msg=%s still "
+                            "holds continuation route to active msg=%s",
+                            (mid or "?")[:20],
+                            cont_id[:20],
+                        )
+                        continue
+                # v1.8.0 (P3): 正常的过期清理（终态 session 超过 TTL 被回收）
+                # 在生产里以 WARNING 级别刷屏（实测 2 个月 180 条、零一次伴随
+                # 真故障）。降级 debug——真正反常的是下面的"活跃 session 超
+                # TTL"，保留 WARNING。
+                _logger.debug("pruning stale terminal session: msg=%s", (mid or "?")[:20])
                 self._cleanup(mid)
             else:
                 # 活跃 session 超 TTL 只打日志，不清理（避免 AI 回调丢失）

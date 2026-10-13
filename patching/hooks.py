@@ -49,6 +49,15 @@ def on_feishu_normalize(
     if platform != "feishu":
         return
 
+    # v1.8.0 (P2-1): WS 渠道活性脉冲——每条到达 _handle_message 的飞书消息
+    # 都证明 WS 长连接活着（lark SDK 重连耗尽后线程静默死亡、适配器仍报
+    # 已连接，last_inbound 是 /aowen monitor 唯一可见的活性信号）。
+    try:
+        from ..aowen import record_inbound
+        record_inbound()
+    except Exception:
+        _logger.debug("HLS: record_inbound failed", exc_info=True)
+
     raw = getattr(event, "raw_message", None)
     raw_event = raw.get("event") if isinstance(raw, dict) else None
     if raw_event is None:
@@ -87,9 +96,21 @@ def on_feishu_normalize(
         event.source = source
 
 @_safe_hook()
-def on_message_started(*, ctrl: Any, message_id: str, chat_id: str, anchor_id: str | None = None) -> None:
+def on_message_started(
+    *,
+    ctrl: Any,
+    message_id: str,
+    chat_id: str,
+    anchor_id: str | None = None,
+    thread_id: str | None = None,
+) -> None:
     """[注入点 1] 函数开头 — message.started."""
-    ctrl.on_message_started(message_id=message_id, chat_id=chat_id, anchor_id=anchor_id)
+    ctrl.on_message_started(
+        message_id=message_id,
+        chat_id=chat_id,
+        anchor_id=anchor_id,
+        thread_id=thread_id,
+    )
 
 @_safe_hook(default_return=False)
 def on_message_completed(
@@ -195,6 +216,7 @@ def on_message_interrupted(
     new_message_id: str,
     chat_id: str,
     anchor_id: str | None = None,
+    thread_id: str | None = None,
 ) -> None:
     """[注入点 9] interrupt 发生 — message.interrupted."""
     ctrl.on_interrupted(
@@ -202,6 +224,7 @@ def on_message_interrupted(
         new_message_id=new_message_id,
         chat_id=chat_id,
         anchor_id=anchor_id,
+        thread_id=thread_id,
     )
 
 

@@ -91,12 +91,64 @@ def _ast_class_has_method(tree: ast.Module, class_name: str, method_name: str) -
     return False
 
 
+def _ast_any_class_has_method(tree: ast.Module, method_name: str) -> bool:
+    """Check whether ANY class in the AST defines the given method.
+
+    v1.8.4: Mixin 布局的 AST 扫描助手 —— hermes v0.21.x 把 GatewayRunner 拆成
+    18 个 Mixin 组合、AIAgent 拆成 14 个，被补丁的方法可能定义在 Mixin 基类
+    而非组合类类体。对候选文件内所有 ClassDef 取并集，语义与
+    ``_AIAgent_CALLBACK_MODULE_CANDIDATES``（v1.8.2）一致。
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if item.name == method_name:
+                        return True
+    return False
+
+
 def _ast_module_has_function(tree: ast.Module, func_name: str) -> bool:
     """Check whether an AST tree contains a top-level function with the given name."""
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name == func_name:
                 return True
+    return False
+
+
+def _ast_method_sig_has_param(
+    tree: ast.Module, class_name: str, method_name: str, param_name: str,
+) -> bool:
+    """Check whether a class method's signature in the AST declares *param_name*.
+
+    v1.8.2: 方案 A 的 AST fallback 辅助 —— hermes 依赖不可用（CI best-effort
+    安装失败）时，用签名级 AST 检查代替 inspect.signature。
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if (
+                    isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name == method_name
+                ):
+                    args = item.args
+                    all_args = (
+                        list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
+                    )
+                    return any(a.arg == param_name for a in all_args)
+    return False
+
+
+def _ast_function_sig_has_param(
+    tree: ast.Module, func_name: str, param_name: str,
+) -> bool:
+    """Check whether a top-level function's signature in the AST declares *param_name*."""
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+            args = node.args
+            all_args = list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
+            return any(a.arg == param_name for a in all_args)
     return False
 
 
@@ -164,6 +216,10 @@ class TestGatewayRunner:
             "GatewayRunner class not found in gateway/run.py (AST analysis)"
         )
 
+    # v1.8.4: 三个方法存在性测试的 AST 兜底统一改为候选并集扫描 —— import 层
+    # 语义不变（hasattr 经 MRO 命中 Mixin 方法，v0.21.x 运行时仍为 True）；
+    # AST 层此前只扫 gateway/run.py 单文件类体，v0.21.x Mixin 化后必然失明。
+
     def test_gateway_runner_has_handle_message(self, hermes_src: Path) -> None:
         """GatewayRunner should have _handle_message method."""
         try:
@@ -175,10 +231,13 @@ class TestGatewayRunner:
             return
         except (ImportError, AttributeError):
             pass
-        tree = _parse_ast(hermes_src, "gateway.run")
-        assert tree is not None, "gateway/run.py not found"
-        assert _ast_class_has_method(tree, "GatewayRunner", "_handle_message"), (
-            "GatewayRunner._handle_message not found (AST analysis)"
+        for mod_path in _GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is not None and _ast_any_class_has_method(tree, "_handle_message"):
+                return
+        assert False, (
+            f"GatewayRunner._handle_message not found in any candidate module "
+            f"{_GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES} (AST analysis)"
         )
 
     def test_gateway_runner_has_handle_message_with_agent(self, hermes_src: Path) -> None:
@@ -192,10 +251,15 @@ class TestGatewayRunner:
             return
         except (ImportError, AttributeError):
             pass
-        tree = _parse_ast(hermes_src, "gateway.run")
-        assert tree is not None, "gateway/run.py not found"
-        assert _ast_class_has_method(tree, "GatewayRunner", "_handle_message_with_agent"), (
-            "GatewayRunner._handle_message_with_agent not found (AST analysis)"
+        for mod_path in _GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is not None and _ast_any_class_has_method(
+                tree, "_handle_message_with_agent"
+            ):
+                return
+        assert False, (
+            f"GatewayRunner._handle_message_with_agent not found in any candidate "
+            f"module {_GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES} (AST analysis)"
         )
 
     def test_gateway_runner_has_run_agent(self, hermes_src: Path) -> None:
@@ -209,14 +273,59 @@ class TestGatewayRunner:
             return
         except (ImportError, AttributeError):
             pass
-        tree = _parse_ast(hermes_src, "gateway.run")
-        assert tree is not None, "gateway/run.py not found"
-        assert _ast_class_has_method(tree, "GatewayRunner", "_run_agent"), (
-            "GatewayRunner._run_agent not found (AST analysis)"
+        for mod_path in _GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is not None and _ast_any_class_has_method(tree, "_run_agent"):
+                return
+        assert False, (
+            f"GatewayRunner._run_agent not found in any candidate module "
+            f"{_GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES} (AST analysis)"
         )
 
 
 # ── Tests: AIAgent ───────────────────────────────────────────────────
+
+
+# v1.8.2: AIAgent 回调属性的 AST 扫描候选 —— hermes v0.21.1 (v2026.9.7) 把
+# 回调属性赋值从 run_agent.py / agent/conversation_loop.py 迁到了
+# gateway/run_turn_runner.py（_wire_turn_agent_callbacks）和 agent/agent_init.py，
+# 旧的两文件扫描面上 ast.Attribute 节点数归零。按 _FEISHU_ADAPTER_MODULE_CANDIDATES
+# 的模式扩候选取并集；候选文件在旧版 hermes 缺失时自动跳过（纯增量，不改旧语义）。
+_AIAgent_CALLBACK_MODULE_CANDIDATES = [
+    "run_agent",                     # AIAgent 定义 + __init__ 构造回调参
+    "agent.conversation_loop",       # v0.10+ 会话循环（历史赋值点，v0.21.1 起归零）
+    "gateway.run_turn_runner",       # v0.21.1+ _wire_turn_agent_callbacks（4/5 赋值点）
+    "agent.agent_init",              # v0.21.1+ AIAgent.__init__ 委托实现（background_review 赋值）
+]
+
+# v1.8.4: GatewayRunner / AIAgent 方法存在性的 AST 扫描候选 —— hermes v0.21.x
+# 的 Mixin 化把被补丁方法搬出了原单体文件的类体：
+#   _handle_message            → gateway/run_inbound.py（GatewayInboundMixin）
+#   _handle_message_with_agent / _run_agent / _run_background_task
+#                              → gateway/run_turn.py（GatewayTurnMixin）
+#   AIAgent.run_conversation   → agent/turn_facade.py（TurnFacadeMixin）
+# 单文件类体扫描面（gateway.run / run_agent）上方法定义数归零，哨兵必然失明。
+# 候选文件在旧版 hermes 缺失时自动跳过（纯增量，不改旧语义，沿用
+# _AIAgent_CALLBACK_MODULE_CANDIDATES / _RUN_CONVERSATION_METHOD_CANDIDATES
+# 的既有候选并集模式）。
+_GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES = [
+    "gateway.run",          # 旧版单体：方法在 GatewayRunner 类体内（< v0.21.x）
+    "gateway.run_inbound",  # v0.21.x+ _handle_message（GatewayInboundMixin）
+    "gateway.run_turn",     # v0.21.x+ _handle_message_with_agent/_run_agent/
+                            # _run_background_task（GatewayTurnMixin）
+]
+
+_AIAGENT_METHOD_MODULE_CANDIDATES = [
+    "run_agent",            # 旧版单体：run_conversation 在 AIAgent 类体内（< v0.21.x）
+    "agent.turn_facade",    # v0.21.x+ run_conversation（TurnFacadeMixin，MRO 命中）
+]
+
+# v1.8.4: class_name → AST 候选模块映射（TestMonkeyPatchTargets 用）。
+# FeishuAdapter 不在此表 —— 它已有专属的多路径 + BasePlatformAdapter 继承链回退。
+_CLASS_METHOD_AST_MODULE_CANDIDATES = {
+    "GatewayRunner": _GATEWAY_RUNNER_METHOD_MODULE_CANDIDATES,
+    "AIAgent": _AIAGENT_METHOD_MODULE_CANDIDATES,
+}
 
 
 class TestAIAgent:
@@ -247,18 +356,29 @@ class TestAIAgent:
             return
         except (ImportError, AttributeError):
             pass
-        tree = _parse_ast(hermes_src, "run_agent")
-        assert tree is not None, "run_agent.py not found"
-        assert _ast_class_has_method(tree, "AIAgent", "run_conversation"), (
-            "AIAgent.run_conversation not found (AST analysis)"
+        # v1.8.4: AST 兜底改候选并集 —— v0.21.x 起 run_conversation 经
+        # TurnFacadeMixin 进入 MRO（agent/turn_facade.py），run_agent.py 类体扫描失明。
+        for mod_path in _AIAGENT_METHOD_MODULE_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is not None and _ast_any_class_has_method(tree, "run_conversation"):
+                return
+        assert False, (
+            f"AIAgent.run_conversation not found in any candidate module "
+            f"{_AIAGENT_METHOD_MODULE_CANDIDATES} (AST analysis)"
         )
 
     def test_aiagent_callback_attributes(self, hermes_src: Path) -> None:
         """AIAgent should support the expected callback attributes.
 
-        These are set dynamically on AIAgent instances by Hermes's
-        conversation loop. We verify they are assigned somewhere in the
-        source by checking for attribute assignments in the AST.
+        v1.8.2 两层验证（hermes v0.21.1 迁移回调赋值点后重构）：
+
+        - **Tier 1（import 层）**：``AIAgent.__init__`` 构造签名必须含 4 个回调
+          构造参（stream_delta / interim_assistant / tool_progress / reasoning）
+          ——这才是“agent 实例携带回调属性”的真实契约，v0.17.0~v0.21.1 一致。
+          background_review_callback 非构造参（两版本均由赋值点覆盖），走 Tier 2。
+        - **Tier 2（AST 层）**：按 ``_AIAgent_CALLBACK_MODULE_CANDIDATES`` 并集扫描
+          ``ast.Attribute``，维持旧语义“全空才 fail”——v0.21.1 并集 4/5
+          （reasoning_callback 只剩构造参、无赋值点），v0.21.0 并集 5/5。
         """
         # Callback attribute names the plugin wraps
         callback_attrs = [
@@ -268,46 +388,50 @@ class TestAIAgent:
             "reasoning_callback",
             "background_review_callback",
         ]
+        # Constructor-level callback params (the real runtime contract)
+        ctor_callback_attrs = [
+            "stream_delta_callback",
+            "interim_assistant_callback",
+            "tool_progress_callback",
+            "reasoning_callback",
+        ]
 
-        # Check via import (instance attributes — look at __init__ or
-        # conversation_loop for assignments)
+        # ── Tier 1: import 层 —— __init__ 构造参契约 ──
         try:
+            import inspect
+
             from run_agent import AIAgent
 
-            # AIAgent instances set these dynamically, so we can only
-            # verify the class exists. Check that run_conversation or
-            # __init__ references these attributes in the source.
-            # Fall through to AST check for thoroughness.
+            sig_params = set(inspect.signature(AIAgent.__init__).parameters)
+            missing_ctor = [a for a in ctor_callback_attrs if a not in sig_params]
+            assert not missing_ctor, (
+                f"AIAgent.__init__ 缺少回调构造参数 {missing_ctor} —— "
+                f"hermes 回调契约变化，插件回调包装（patching/callbacks.py）"
+                f"可能失效，需人工复核"
+            )
         except (ImportError, AttributeError):
-            pass
+            pass  # hermes 依赖不可用（CI best-effort 安装失败）→ 落 Tier 2
 
-        # AST check: verify these attribute names appear in run_agent.py
-        # or agent/conversation_loop.py
-        tree = _parse_ast(hermes_src, "run_agent")
-        cl_tree = _parse_ast(hermes_src, "agent.conversation_loop")
-
+        # ── Tier 2: AST 层 —— 候选模块并集，“全空才 fail” ──
         found_attrs: set[str] = set()
-        for t in (tree, cl_tree):
-            if t is None:
-                continue
-            for node in ast.walk(t):
-                if isinstance(node, ast.Attribute) and isinstance(node.attr, str):
-                    if node.attr in callback_attrs:
-                        found_attrs.add(node.attr)
+        any_tree = False
+        for mod_path in _AIAgent_CALLBACK_MODULE_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is None:
+                continue  # 候选文件在该版本不存在（如 v0.21.0 无 run_turn_runner.py）
+            any_tree = True
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and node.attr in callback_attrs:
+                    found_attrs.add(node.attr)
 
-        missing = set(callback_attrs) - found_attrs
-        if missing:
-            # Not all attributes found in AST — this is a soft warning,
-            # not a hard failure, because the attributes might be set
-            # via **kwargs or other dynamic patterns not visible in AST.
-            pass
-
-        # If at least some are found, the test passes. If NONE are found
-        # in either file, that's a stronger signal of breakage.
-        if not found_attrs and (tree is not None or cl_tree is not None):
+        # If NONE are found in any candidate module, that's a stronger signal
+        # of breakage (individual misses are soft — attributes may be wired via
+        # **kwargs / setattr loops invisible to AST).
+        if not found_attrs and any_tree:
             pytest.fail(
                 f"None of the expected callback attributes ({callback_attrs}) "
-                f"were found in run_agent.py or agent/conversation_loop.py. "
+                f"were found in any candidate module: "
+                f"{_AIAgent_CALLBACK_MODULE_CANDIDATES}. "
                 f"The plugin's callback wrapping may be broken."
             )
 
@@ -487,6 +611,13 @@ class TestMonkeyPatchTargets:
         tree = _parse_ast(hermes_src, module_path)
         if tree is not None and _ast_class_has_method(tree, class_name, method_name):
             return  # Found in declared path's class body
+        # v1.8.4: Mixin 布局回退 —— hermes v0.21.x 把 GatewayRunner/AIAgent 拆成
+        # Mixin 组合，方法定义搬到候选文件（run_inbound/run_turn/turn_facade）。
+        # 按候选并集扫描（any-class 语义），候选缺失自动跳过。
+        for cand_mod in _CLASS_METHOD_AST_MODULE_CANDIDATES.get(class_name, []):
+            cand_tree = _parse_ast(hermes_src, cand_mod)
+            if cand_tree is not None and _ast_any_class_has_method(cand_tree, method_name):
+                return  # Found in mixin candidate module
         # v1.4.0: 多路径回退（仅对 FeishuAdapter —— 其他 class 直接跳过）
         if class_name == "FeishuAdapter":
             for alt_path in self._FEISHU_ADAPTER_FALLBACK_PATHS:
@@ -554,6 +685,11 @@ class TestMonkeyPatchTargets:
         # skip even though _add_reaction/_remove_reaction exist.
         if module_path in _FEISHU_ADAPTER_MODULE_CANDIDATES:
             candidate_paths = list(_FEISHU_ADAPTER_MODULE_CANDIDATES)
+        elif class_name in _CLASS_METHOD_AST_MODULE_CANDIDATES:
+            # v1.8.4: GatewayRunner/AIAgent 可选目标（如 _run_background_task）
+            # 同样按 Mixin 候选并集扫描 —— v0.21.x 起该方法定义在
+            # gateway/run_turn.py（GatewayTurnMixin），单文件扫描会误报 skip。
+            candidate_paths = list(_CLASS_METHOD_AST_MODULE_CANDIDATES[class_name])
         else:
             candidate_paths = [module_path]
 
@@ -568,7 +704,15 @@ class TestMonkeyPatchTargets:
                 pass
             # Fallback: AST
             tree = _parse_ast(hermes_src, candidate)
-            if tree is not None and _ast_class_has_method(tree, class_name, method_name):
+            if tree is None:
+                continue
+            if class_name in _CLASS_METHOD_AST_MODULE_CANDIDATES:
+                # v1.8.4: Mixin 候选文件里方法定义在 Mixin 基类（如
+                # GatewayTurnMixin）而非组合类（GatewayRunner）类体 ——
+                # 用 any-class 并集语义扫描。
+                if _ast_any_class_has_method(tree, method_name):
+                    return  # Found via AST (mixin layout)
+            elif _ast_class_has_method(tree, class_name, method_name):
                 return  # Found via AST
         # Not found — issue a warning (not a failure)
         pytest.skip(
@@ -577,36 +721,115 @@ class TestMonkeyPatchTargets:
         )
 
 
-# ── v1.1.2: Hermes v0.17.0 兼容性验证 ──
+# ── v1.1.2: Hermes 签名兼容性验证（v0.17.0 起累积，v1.8.2 迁移检测面）──
+
+
+# v1.8.2: run_conversation 生产面候选 —— 插件生产代码真正用 inspect.signature
+# 探测 persist_* 参数的两个位置（patching/__init__.py 的 AIAgent.run_conversation
+# 检测 + patching/gateway.py 的 agent.conversation_loop.run_conversation 检测）。
+# hermes v0.21.1 (v2026.9.7) 将 GatewayRunner._run_agent 泛化为
+# (self, message, context_prompt, history, source, session_id, **turn_kwargs)，
+# persist_* 参数移入 **turn_kwargs 透传、不再显式出现在 _run_agent 签名中；
+# 但两个 run_conversation 生产面在 v0.17.0~v0.21.1 全程显式声明（经
+# run_turn_runner 的 kwargs 透传链仍原样到达）。
+_RUN_CONVERSATION_METHOD_CANDIDATES = [
+    ("run_agent", "AIAgent"),                # v0.17.0~v0.21.0：run_agent.py 直接定义
+    ("agent.turn_facade", "TurnFacadeMixin"),  # v0.21.1+：拆分后 AIAgent.run_conversation 经 MRO 命中
+]
+
+_RUN_CONVERSATION_FUNCTION_CANDIDATES = [
+    "agent.conversation_loop",  # v0.10+ 模块级函数（插件模块级 patch 点）
+]
+
+
+def _persist_param_supported(hermes_src: Path, param_name: str) -> bool | None:
+    """Check whether *param_name* is declared on the run_conversation production surfaces.
+
+    Returns:
+        True  — 至少一个面可解析，且全部可解析面均声明该参数
+        False — 至少一个面可解析，且均未声明该参数
+        None  — 两个面都无法解析（import 失败且 AST 候选全缺）
+
+    v1.8.2（方案 A）：检测点从 GatewayRunner._run_agent 迁移到插件生产代码
+    的真实探测面，与 patching/__init__.py、patching/gateway.py 逐字对齐。
+    """
+    import inspect
+
+    # Tier 1: import 层 —— 与插件生产代码相同的 inspect.signature 探测
+    surfaces: list[tuple[str, Any]] = []
+    try:
+        from run_agent import AIAgent
+
+        surfaces.append(("AIAgent.run_conversation", AIAgent.run_conversation))
+    except (ImportError, AttributeError):
+        pass
+    try:
+        import agent.conversation_loop as _cl_mod
+
+        surfaces.append(("agent.conversation_loop.run_conversation", _cl_mod.run_conversation))
+    except (ImportError, AttributeError):
+        pass
+
+    if surfaces:
+        return all(
+            param_name in set(inspect.signature(func).parameters)
+            for _, func in surfaces
+        )
+
+    # Tier 2: AST fallback —— hermes 依赖不可用时按候选扫描签名
+    for mod_path, class_name in _RUN_CONVERSATION_METHOD_CANDIDATES:
+        tree = _parse_ast(hermes_src, mod_path)
+        if tree is not None and _ast_method_sig_has_param(
+            tree, class_name, "run_conversation", param_name,
+        ):
+            return True
+    for mod_path in _RUN_CONVERSATION_FUNCTION_CANDIDATES:
+        tree = _parse_ast(hermes_src, mod_path)
+        if tree is not None and _ast_function_sig_has_param(
+            tree, "run_conversation", param_name,
+        ):
+            return True
+    return None
 
 
 class TestV017SignatureChanges:
-    """v1.1.2: 验证 Hermes v0.17.0 的方法签名变化。
+    """v1.1.2: 验证 Hermes 的方法签名变化（v0.17.0 起累积）。
 
-    v0.17.0 (v2026.6.19) 新增/变更：
-    - _run_agent 新增 persist_user_message 参数
-    - run_conversation 内部重构（提取 prologue/finalizer），入口不变
-    - _session_key_for_source 内部处理 profile，签名不变
+    - v0.17.0 (v2026.6.19)：run_conversation 新增 persist_user_message 参数
+    - v0.21.1 (v2026.9.7)：GatewayRunner._run_agent 泛化为
+      ``(self, message, context_prompt, history, source, session_id, **turn_kwargs)``，
+      persist_* 参数移入 **turn_kwargs 透传。插件真正探测的是两个稳定的
+      run_conversation 生产面（v0.17.0~v0.21.1 全程显式声明），哨兵随之
+      迁移（v1.8.2 方案 A）。
     """
 
-    def test_run_agent_has_persist_user_timestamp_param(self, hermes_src: Path) -> None:
-        """_run_agent 应支持 persist_user_timestamp 参数（v0.16.0+）."""
-        import inspect
-        from gateway.run import GatewayRunner
-        sig = inspect.signature(GatewayRunner._run_agent)
-        assert "persist_user_timestamp" in sig.parameters, (
-            "_run_agent 缺少 persist_user_timestamp 参数 "
-            "（插件用 inspect.signature 检测此参数是否存在）"
+    def test_run_conversation_has_persist_user_timestamp_param(self, hermes_src: Path) -> None:
+        """run_conversation 双生产面应支持 persist_user_timestamp 参数（v0.16.0+）.
+
+        v1.8.2: 检测点从 GatewayRunner._run_agent 迁移到插件生产代码的真实
+        探测面。v0.21.1 泛化 _run_agent 后 persist 参数不再出现在其签名中，
+        但经 run_turn_runner 的 **turn_kwargs 透传链仍原样到达这两个面。
+        """
+        supported = _persist_param_supported(hermes_src, "persist_user_timestamp")
+        assert supported, (
+            "run_conversation 生产面缺少 persist_user_timestamp 参数，或两个面均"
+            "无法解析 —— 插件用 inspect.signature 检测此参数（v0.21.1 起该参数"
+            "经 _run_agent 的 **turn_kwargs 透传，终至此处），需人工复核"
         )
 
-    def test_run_agent_has_persist_user_message_param(self, hermes_src: Path) -> None:
-        """_run_agent 应支持 persist_user_message 参数（v0.17.0 新增）."""
-        import inspect
-        from gateway.run import GatewayRunner
-        sig = inspect.signature(GatewayRunner._run_agent)
-        if "persist_user_message" not in sig.parameters:
+    def test_run_conversation_has_persist_user_message_param(self, hermes_src: Path) -> None:
+        """run_conversation 双生产面应支持 persist_user_message 参数（v0.17.0 新增）.
+
+        v1.8.2: 与 persist_user_timestamp 同步迁移检测面。v0.21.1 泛化
+        _run_agent 后该参数在 run_conversation 双面仍显式声明
+        （turn_facade / conversation_loop），测试从 skip 恢复为硬验证。
+        """
+        supported = _persist_param_supported(hermes_src, "persist_user_message")
+        if supported is None:
+            pytest.skip("run_conversation 生产面均不可解析 —— 布局超出已知候选")
+        if supported is False:
             pytest.skip(
-                "_run_agent 无 persist_user_message 参数 "
+                "run_conversation 无 persist_user_message 参数 "
                 "（Hermes < v0.17.0，插件用 inspect.signature 自动兼容）"
             )
 
@@ -617,7 +840,25 @@ class TestV017SignatureChanges:
             return
         except (ImportError, AttributeError):
             pass
-        from run_agent import AIAgent
-        assert hasattr(AIAgent, "run_conversation"), (
-            "AIAgent.run_conversation 不存在（v0.17.0 重构可能移除了入口）"
+        try:
+            from run_agent import AIAgent
+
+            assert hasattr(AIAgent, "run_conversation"), (
+                "AIAgent.run_conversation 不存在（v0.17.0 重构可能移除了入口）"
+            )
+            return
+        except (ImportError, AttributeError):
+            pass
+        # v1.8.4: hermes 依赖不可用（CI Python < 3.14 装不上 hermes v0.21.6+ 的
+        # 3.14-only 依赖）时 conversation_loop 与 run_agent 的 import 都会失败 ——
+        # 此前第二个 import 无保护，ModuleNotFoundError 直接把用例炸成 error。
+        # AST 兜底按 run_conversation 双生产面候选（AIAgent / TurnFacadeMixin）扫描。
+        for mod_path, class_name in _RUN_CONVERSATION_METHOD_CANDIDATES:
+            tree = _parse_ast(hermes_src, mod_path)
+            if tree is not None and _ast_any_class_has_method(tree, "run_conversation"):
+                return
+        assert False, (
+            f"run_conversation 入口不存在：conversation_loop 模块、"
+            f"AIAgent.run_conversation 与 AST 候选 "
+            f"{_RUN_CONVERSATION_METHOD_CANDIDATES} 全部落空"
         )

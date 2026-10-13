@@ -26,6 +26,11 @@ _metrics: dict[str, Any] = {
     "stream_element_failures": 0,
     "batch_update_calls": 0,
     "active_sessions": 0,
+    # v1.8.0 (P2-1): WS 渠道健康脉冲——lark SDK 重连预算耗尽后 dispatch
+    # 线程静默退出，适配器仍报"已连接"，gateway 无 is_connected 轮询，
+    # last_inbound 是唯一能从 /aowen monitor 看到的渠道活性信号。
+    "inbound_messages": 0,
+    "last_inbound_at": None,
     "started_at": time.time(),
 }
 
@@ -66,14 +71,32 @@ def set_active_sessions(count: int) -> None:
     with _metrics_lock:
         _metrics["active_sessions"] = count
 
+def record_inbound() -> None:
+    """v1.8.0 (P2-1): 记录一条飞书入站消息（WS 渠道活性脉冲）。
+
+    lark-oapi 的 WS 长连接在重连次数耗尽后线程静默退出，适配器的
+    "connected" 状态不变、gateway 也不轮询——此时唯一可见的症状是
+    last_inbound 停止增长。/aowen monitor 展示该指标供人工诊断。
+    """
+    with _metrics_lock:
+        _metrics["inbound_messages"] += 1
+        _metrics["last_inbound_at"] = time.time()
+
 def get_metrics() -> dict[str, Any]:
     """Get current metrics snapshot."""
     with _metrics_lock:
         uptime = time.time() - _metrics["started_at"]
+        _ts = _metrics.get("last_inbound_at")
+        if _ts:
+            _age = time.time() - _ts
+            _last_inbound_h = _format_uptime(_age) + " 前"
+        else:
+            _last_inbound_h = "尚无入站"
         return {
             **_metrics,
             "uptime_seconds": round(uptime, 1),
             "uptime_human": _format_uptime(uptime),
+            "last_inbound_age_human": _last_inbound_h,
             "error_codes": dict(_error_codes),
         }
 
@@ -453,6 +476,20 @@ def build_monitor_card() -> dict[str, Any]:
             _metric_block("批量更新", m["batch_update_calls"], icon_key="info", color="default"),
             _metric_block("活跃会话", m["active_sessions"], icon_key="agent", color="orange" if m["active_sessions"] > 0 else "default"),
         ),
+        {"tag": "hr"},
+        # v1.8.0 (P2-1): WS 渠道健康——lark SDK 重连耗尽后线程静默死亡，
+        # 适配器仍报已连接、gateway 无 is_connected 轮询，last_inbound 是
+        # 唯一可观测的渠道活性信号。长时间无入站而网关在线 → 疑似静默断连。
+        _section_title("渠道健康", color="blue"),
+        _two_col(
+            _metric_block("入站消息", m["inbound_messages"], icon_key="info", color="default"),
+            _metric_block("最近入站", m["last_inbound_age_human"], icon_key="warning", color="default"),
+        ),
+        _icon_div(
+            "info",
+            "长时间无入站而网关在线 → 疑似 WS 静默断连（SDK 重连耗尽后适配器仍报已连接）",
+            icon_color="grey", text_size="notation",
+        ),
     ]
 
     if m["error_codes"]:
@@ -657,6 +694,7 @@ def _do_reset() -> None:
     with _metrics_lock:
         old_created = _metrics["cards_created"]
         old_errors = _metrics["api_errors"]
+        _old_last_inbound = _metrics.get("last_inbound_at")
 
         _metrics = {
             "cards_created": 0,
@@ -668,6 +706,10 @@ def _do_reset() -> None:
             "stream_element_calls": 0,
             "stream_element_failures": 0,
             "batch_update_calls": 0,
+            "inbound_messages": 0,
+            # v1.8.0 (P2-1): last_inbound_at 是渠道活性事实而非可累加计数器，
+            # reset 保留（reset 语义是清零统计，不是假装渠道从未收到消息）。
+            "last_inbound_at": _old_last_inbound,
             "active_sessions": _metrics["active_sessions"],
             "started_at": time.time(),
         }
@@ -723,6 +765,7 @@ __all__ = [
     "record_card_aborted",
     "record_api_call",
     "record_api_error",
+    "record_inbound",
     "set_active_sessions",
     "get_metrics",
     "build_monitor_card",

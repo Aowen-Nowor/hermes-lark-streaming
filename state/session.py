@@ -70,6 +70,7 @@ class CardSession:
         "terminal_reason",
         "terminal_source",
         "text",
+        "thread_id",
         "tool_use",
         "unified_state",
     )
@@ -79,10 +80,16 @@ class CardSession:
         message_id: str,
         chat_id: str,
         loop: asyncio.AbstractEventLoop,
+        thread_id: str | None = None,
     ) -> None:
         self.message_id = message_id
         self.anchor_id: str | None = None
         self.chat_id = chat_id
+        # v1.8.1 (P1): 飞书话题隔离键。话题群/群内话题中同一 chat 的不同
+        # topic 共享 chat_id 但各自是独立的 hermes session（session key 含
+        # thread_id，gateway/session.py:1198）；并发 seal 检查据此跳过
+        # 其它话题的活跃卡。普通群聊/私聊为 None → 退回 chat_id 维度。
+        self.thread_id: str | None = thread_id
         self.state: str = IDLE
         self.card_msg_id: str | None = None
         self.card_id: str | None = None
