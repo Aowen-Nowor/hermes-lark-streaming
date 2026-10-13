@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.0.15 (2026-10-13)
+
+**hermes 平台通知轨卡片化——子代理失败通知 >300 字符漏洞（Task 21 用户追问「子代理的消息是否也做成卡片消息了」举一反三增量）。**
+
+背景：v2.0.14 十二条输出路径盘点未单列子代理（delegate_task）专项。本轮取证（hermes 最新源码逐行）：子代理架构天然受限——官方设计铁律「The parent only ever sees the delegation call and the summary result」（delegate_tool.py:9-11），且 `DELEGATE_BLOCKED_TOOLS` 硬禁子代理调 `send_message`（delegate_tool_toolsets.py:14-23 "no cross-platform side effects"）——子代理中间过程与自发消息**不存在出站路径**。实际出站仅五条：delegate 工具进度行（面板 ✓）/ 失败超时通知（本条修复）/ 后台完成结果（`[IMPORTANT:…]` 合成消息注入父会话唤醒新回合 → 主流卡片 ✓）/ 批量 per-task 失败通告（同注入 ✓）/ cron 会话子代理（结果并入 cron 投递 → R1 cron 卡 ✓）。漏洞仅在失败通知：`_deliver_platform_notice` 直发 `adapter.send`（run_notifications.py:208），飞书 thread_id=None 时 metadata=None 无任何标记 → CH_PLAIN；官方 `format_subagent_failure_line`（delegate_tool_progress.py:64-93，f-string 硬编码前缀 `⚠️ Subagent failed/timed out`）的 reason 经 `_clean_error_text` cap 200 字符，整行最长 ≈359 字符——超出 `_is_progress_text` 工具行 300 上限：「长通知 + 活跃卡在场」既不升格进面板、又命中不了 oneshot R3（要求无活跃卡）→ `super().send()` 原生 post，孤挂卡片旁。timeout 行（max ≈265）与 credits 警告族（AgentNotice 唯一生产方 credits_tracker.py，全行 <100 字符）现状已覆盖。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| P2 | 子代理失败/超时通知 >300 字符且活跃卡在场时，以原生 post 文本孤挂卡片旁 | 通知轨无 metadata 标记 → CH_PLAIN；`_is_progress_text` 300 上限拦截升格；oneshot R3 要求无活跃卡（通知被官方 gate `_run_still_current` 锁定回合内发出，活跃卡大概率存在） | **平台通知轨识别（方案 A）**：`_is_progress_text` 对官方固定前缀 `⚠️ Subagent failed/timed out`（容忍裸 ⚠ 变体）豁免 300 上限（600 防御，与围栏块一致）→ 复用既有升格路径：有活跃卡 → 并入面板（v2.0.10 通报行样式，⚠️ → `warning_outlined` 官方图标）；无活跃卡 → early-create 回合卡 + 暂存（后续 answer 帧接管，单卡全回合）。**拒绝 oneshot R4**（通知 → 独立 gateway 卡）：通知锁定回合内，独立静态卡与回合卡并存 = v2.0.11 多卡片观感回归；升格路径与现状 ≤300 字符通知行为完全一致。回合外唯一可能是调度 race 窗口 → 暂存并入下一卡（Task 18 P2-C 已知限制家族，不丢消息不多卡）。hermes 通知行硬编码英文（locales 全库无中文通知文案），正则不猜测中文变体 |
+
+**审计方法**: hermes 源码逐行（delegate_tool.py 架构注释 / delegate_tool_toolsets.py DELEGATE_BLOCKED_TOOLS / delegate_tool_progress.py format_subagent_failure_line + _clean_error_text cap / run_turn_runner.py:182-198 `_progress_subagent_notice` gate + :1185-1197 notice_callback 同轨 / run_notifications.py:176-208 `_deliver_platform_notice` 终点 + :1267-1348 `_inject_watch_notification` 合成注入 + :98 `_mark_internal_notification` / credits_tracker.py AgentNotice 全部生产方枚举）+ v2 adapter/classify/engine/progline/cards 全链重读 → 识别层单点豁免实现 → 全量 620/620（v2.0.15 新增 24 用例：启发式豁免 9 / 分类层不变 2 / 升格层 5 + 渲染先例 2 / composer 集成 3 / adapter 接线 3）→ ruff 基线相等（144=144，新代码零新增）。真飞书 E2E 走 full 回归（⚠️ 行与 v2.0.10 已验收的 credits 通报行渲染路径完全一致，无新渲染代码）。
+
+---
+
 ## v2.0.14 (2026-10-13)
 
 **cron 定时投递卡片化 + 回合外正式投递一次性定稿卡——用户 2026-10-13 截图事故修复 + hermes→飞书输出路径全量盘点（举一反三）。**

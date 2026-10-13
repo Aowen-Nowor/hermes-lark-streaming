@@ -4,11 +4,11 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.14-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.15-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.21-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
-[![tests](https://img.shields.io/badge/tests-596%20passed-brightgreen)](#测试与-e2e)
+[![tests](https://img.shields.io/badge/tests-620%20passed-brightgreen)](#测试与-e2e)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
 *回答打字机流式呈现 · 工具与思考实时进面板 · 澄清问题变成可点击卡片 · 全程零 monkey-patch*
@@ -38,6 +38,9 @@ hermes 内置飞书平台的**增强版**：适配器完整继承内置 `FeishuA
 **回合外投递（v2.0.14）**
 - **cron 定时任务响应卡片化**：任务名标题行 + markdown 正文 + job_id 溯源页脚（此前为富文本 post）；成功/失败/队列重发三种投递同源覆盖（官方 `metadata["job_id"]` 精确识别，零启发式）
 - 回合外定稿（非流式单发回复）与 ≥200 字主动长文（send_message 工具族）同走静态卡通道；`feishu_streaming.oneshot_cards` 一键回原生
+
+**平台通知轨（v2.0.15）**
+- 子代理失败/超时通知（`⚠️ Subagent failed/timed out` 官方固定前缀）豁免进度行 300 字符上限：有活跃卡并入面板（warning_outlined 通报行样式），无活跃卡 early-create 回合卡——不再孤挂原生 post 文本
 
 **交互卡片**
 - 澄清请求渲染为按钮/输入卡片，点击即回复，三态反馈（选择 → 已提交 → 已确认），操作者授权校验 fail-closed

@@ -88,11 +88,33 @@ def _strip_internal_meta(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return meta
 
 
+# ── v2.0.15 平台通知轨识别（子代理失败通知 >300 字符漏洞，Task 21/22）────────
+# hermes 子代理失败/超时通知经 _deliver_platform_notice 直发 adapter.send
+#（gateway/run_notifications.py:208），metadata 无任何标记（飞书 thread_id=None
+# 时为 None）→ CH_PLAIN，只能靠文本识别。官方行格式（tools/delegate_tool_progress.py
+# format_subagent_failure_line:64-93，f-string 硬编码前缀）：
+#   ``⚠️ Subagent failed — "{goal}" after {t}: {reason}. Details: /agents, …``
+#   ``⚠️ Subagent timed out … without finishing. …``
+# reason 经 _clean_error_text cap 200 字符（:38-45），整行最长 ≈359 字符——超出
+# 工具行默认 300 上限（_is_progress_text），致「长通知 + 活跃卡在场」漏到原生
+# post 文本（⚠️ emoji 行本应升格进面板）。警告族 AgentNotice（credits_tracker.py
+# 唯一生产方）行全部 <100 字符，默认上限已覆盖，无需特判。
+# 前缀锚定 + 600 防御上限（与围栏块一致）；⚠ 容忍带/不带 U+FE0F 变体。
+# hermes 该行硬编码英文（无 i18n，locales 全库无「子代理失败」通知文案），
+# 不猜测中文变体。
+_PLATFORM_NOTICE_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^⚠\uFE0F?\s+Subagent\s+(?:failed|timed out)\b"),
+)
+
+
 def _is_progress_text(content: str) -> bool:
     """启发式：progress lane 文本 = thinking 气泡 或 emoji 开头的短工具行.
 
     v2.0.6：裸围栏代码块（`` ``` `` 开头，连续 terminal 调用省略 header 的
-    真实形态）也判为 progress；上限放宽到 600（块含命令正文比单行预览长）。"""
+    真实形态）也判为 progress；上限放宽到 600（块含命令正文比单行预览长）。
+    v2.0.15：hermes 平台通知轨（⚠️ Subagent failed/timed out 固定前缀，
+    官方 f-string 硬编码）豁免 300 上限——reason cap 200 使整行可达 ~359，
+    超 300 会漏成原生 post；前缀特异性高（hermes 专属词），误吸收风险≈0。"""
     text = (content or "").strip()
     if not text:
         return False
@@ -100,6 +122,8 @@ def _is_progress_text(content: str) -> bool:
         return True
     if text.startswith("```"):
         return len(text) <= 600  # 命令块远短于 600；长文本不可能是进度块
+    if any(rx.match(text) for rx in _PLATFORM_NOTICE_RES):
+        return len(text) <= 600  # 通知行实测最长 ~359；600 防御未来文案变长
     if len(text) > 300:  # 工具行都很短；长文本不可能是工具行
         return False
     return bool(_EMOJI_RE.match(text))
