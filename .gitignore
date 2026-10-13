@@ -13,3 +13,4 @@ tests/samples/
 .deps/
 .hermes-last-release
 worklog.md
+*.bak.*
