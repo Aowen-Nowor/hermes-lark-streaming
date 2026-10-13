@@ -1,3 +1,16 @@
+## v1.8.1 (2026-09-15)
+
+卡片标题层级修复 — 取消 Markdown 标题降级，H1–H6 原样透传。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P1) | 卡片里的 Markdown 标题看不出层级：`## 二级标题` 渲染成普通文本 | `optimize_markdown_style()` 把所有标题压低到 H4/H5（`#`→`####`、`##`~`######`→`#####`）。飞书 Card 2.0 富文本组件原生支持 H1–H6（字号 26/22/20/18/17/14px），压到 16–17px 后与正文 14px 几乎无差别，层级信息彻底丢失 | 移除标题降级分支及 3 个专用正则（`_RE_H1_TO_H3` / `_RE_HEADING_DEMOTE` / `_RE_H1_DEMOTE`），标题原样透传（`cardkit/md.py`） |
+| 🧪 Test | 标题相关断言改为「原样保留」 | 旧断言锁定降级行为 | `test_heading_levels_preserved`、`test_heading_not_demoted`、`test_mixed_headings_and_code`、`test_headings_preserved_in_cron_card` |
+
+**定位链路**：用户反馈 → cron 日报 `_do_cron_deliver()` → `build_cron_card()` → `optimize_markdown_style()`。降级逻辑自 v1.2.1 起存在且无文档说明；用户确认方案 A（完整保留原级别）。**影响面**：所有飞书卡片（流式回复 + cron/gateway 推送），不止 cron 日报。
+
+---
+
 ## v1.8.0 (2026-08-16)
 
 工具调用过渡文字不再污染卡片正文 — interim 文本（工具调用前的过渡叙述，如"我先查一下…"）默认不写入答案正文，卡片只显示最终答案。

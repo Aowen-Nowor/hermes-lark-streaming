@@ -54,7 +54,7 @@ Background: _run_background_task ── [Hook 1/2]
 | `├ cards.py` | 卡片组装器 | streaming/complete/IM-fallback 卡片 |
 | `├ special.py` | 专用卡片类型 | cron/gateway/clarify 三态卡片 + `normalize_clarify_choices` (v1.3.0) |
 | `├ i18n.py` | 中英双语映射 | `_T` dict + `_i18n()`/`_t()` |
-| `└ md.py` | Markdown 处理 | 标题/表格降级、长文本分块 |
+| `└ md.py` | Markdown 处理 | 表格降级、长文本分块（**标题 H1–H6 原样透传，不降级** — v1.8.1 起） |
 | **controller/** | **主控制器子包** | |
 | `├ __init__.py` | 重导出门面 | StreamCardController + CardSession + 状态常量 |
 | `├ core.py` | 主控制器(单例) | 管理生命周期 + 并发限流 (v1.1.0) + epoch 校验 + _sessions/_interrupt_map 线程安全锁 (v1.3.0) |

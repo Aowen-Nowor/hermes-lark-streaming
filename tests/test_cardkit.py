@@ -35,20 +35,17 @@ from hermes_lark_streaming.state.linear import ReasoningRound
 
 
 class TestOptimizeMarkdownStyle:
-    def test_h1_downgraded_to_h4(self) -> None:
-        assert "#### Title" in optimize_markdown_style("# Title")
-
-    def test_h2_downgraded_to_h5(self) -> None:
-        assert "##### Sub" in optimize_markdown_style("## Sub")
-
-    def test_h3_downgraded_to_h5(self) -> None:
-        assert "##### Deep" in optimize_markdown_style("### Deep")
-
-    def test_h4_h5_h6_unchanged(self) -> None:
-        text = "#### H4\n##### H5\n###### H6"
+    def test_heading_levels_preserved(self) -> None:
+        """H1–H6 原样透传 — 飞书 Card 2.0 原生支持各级标题（2026-09-15 方案 A）."""
+        text = "# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6"
         result = optimize_markdown_style(text)
-        assert "#### H4" in result
-        assert "##### H5" in result
+        for line in text.split("\n"):
+            assert line in result
+
+    def test_heading_not_demoted(self) -> None:
+        assert "#### Title" not in optimize_markdown_style("# Title")
+        assert "##### Sub" not in optimize_markdown_style("## Sub")
+        assert "##### Deep" not in optimize_markdown_style("### Deep")
 
     def test_heading_in_code_block_preserved(self) -> None:
         text = "```\n# Should not change\n```"
@@ -73,8 +70,10 @@ class TestOptimizeMarkdownStyle:
     def test_mixed_headings_and_code(self) -> None:
         text = "# Title\n```\n# Code heading\n```\n## Sub"
         result = optimize_markdown_style(text)
-        assert "#### Title" in result
+        assert "# Title" in result
+        assert "## Sub" in result
         assert "# Code heading" in result
+        assert "#### Title" not in result
 
 
 class TestStripInvalidImageKeys:
@@ -511,14 +510,14 @@ class TestBuildCronCard:
         card = build_cron_card(content)
         assert len(card["body"]["elements"]) > 1
 
-    def test_headings_downgraded_in_cron_card(self) -> None:
+    def test_headings_preserved_in_cron_card(self) -> None:
         from hermes_lark_streaming.cardkit import build_cron_card
 
         content = "# Title\nSome text"
         card = build_cron_card(content)
-        # optimize_markdown_style downgrades h1 → h4
         combined = " ".join(e["content"] for e in card["body"]["elements"])
-        assert "#### Title" in combined
+        assert "# Title" in combined
+        assert "#### Title" not in combined
 
 
 # --- Cache footer field ---

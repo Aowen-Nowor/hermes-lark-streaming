@@ -1,4 +1,4 @@
-"""Markdown 文本处理 — 标题降级、表格降级、图片 key 剥离、长文本分块."""
+"""Markdown 文本处理 — 表格降级、图片 key 剥离、长文本分块."""
 
 from __future__ import annotations
 
@@ -20,9 +20,6 @@ _RE_UNPAIRED_ASTERISK = re.compile(r'(?<!\\)\*(?=[^\s*])')
 _RE_TABLE_ROW = re.compile(r"\|.+\|\n\|[-:| ]+\|[\s\S]*?(?=\n\n|\n(?!\|)|$)")
 _RE_IMAGE_REF = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
 _RE_CODE_BLOCK_EXTRACT = re.compile(r"(^|\n)(`{3,})([^\n]*)\n[\s\S]*?\n\2(?=\n|$)")
-_RE_H1_TO_H3 = re.compile(r"^#{1,3} ", re.MULTILINE)
-_RE_HEADING_DEMOTE = re.compile(r"^#{2,6} (.+)$", re.MULTILINE)
-_RE_H1_DEMOTE = re.compile(r"^# (.+)$", re.MULTILINE)
 _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 _RE_SHORT_MD_CHECK = re.compile(r'^#{1,6} |\n#{1,6} |```|!\[|\n{3,}')
 # v1.3.0: placeholder pattern for restoring protected code/bold/italic blocks
@@ -114,7 +111,13 @@ def escape_markdown_asterisks(text: str) -> str:
     return text
 
 def optimize_markdown_style(text: str) -> str:
-    """1. 提取代码块用占位符保护"""
+    """代码块保护 + 空行压缩 + 无效图片 key 剥离。
+
+    标题（H1–H6）**不再降级**（2026-09-15 用户确认方案 A）：飞书 Card 2.0 富文本
+    组件原生支持 H1–H6（字号 26/22/20/18/17/14px），此前把所有标题一律压到
+    H4/H5（16–17px），与正文 14px 几乎无差别，层级信息在卡片里彻底丢失。
+    历史：v1.2.1 引入降级（无文档说明），本版移除。
+    """
     if len(text) < 100 and not _RE_SHORT_MD_CHECK.search(text):
         return text
     try:
@@ -131,19 +134,14 @@ def optimize_markdown_style(text: str) -> str:
 
         r = _RE_CODE_BLOCK_EXTRACT.sub(_extract, text)
 
-        # 2. 标题降级（仅当存在 H1-H3 时）
-        if _RE_H1_TO_H3.search(text):
-            r = _RE_HEADING_DEMOTE.sub(r'##### \1', r)
-            r = _RE_H1_DEMOTE.sub(r'#### \1', r)
-
-        # 3. 还原代码块
+        # 2. 还原代码块
         for i, block in enumerate(code_blocks):
             r = r.replace(f"{mark}{i}___", block)
 
-        # 4. 压缩多余空行
+        # 3. 压缩多余空行
         r = _RE_MULTI_NEWLINE.sub("\n\n", r)
 
-        # 5. 剥离无效图片 key
+        # 4. 剥离无效图片 key
         r = _strip_invalid_image_keys(r)
 
         return r
