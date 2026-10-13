@@ -88,6 +88,36 @@ def _session_usage_from(ctx: dict | None, result: Any) -> tuple[dict[str, Any], 
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
 
+def _get_session_title(agent_ref) -> str:
+    """从 agent 对象安全地获取 session_title."""
+    if not agent_ref:
+        return ""
+    try:
+        session_db = getattr(agent_ref, "_session_db", None)
+        session_id = getattr(agent_ref, "session_id", None)
+        if session_db and session_id:
+            title = session_db.get_session_title(session_id)
+            return title or ""
+    except Exception:
+        pass
+    return ""
+
+def _resolve_provider(agent_ref) -> str:
+    """从 agent 对象提取 provider 名称，对 custom provider 解析实际名称."""
+    if not agent_ref:
+        return ""
+    provider = getattr(agent_ref, "provider", "") or ""
+    if provider != "custom":
+        return provider
+    custom_providers = getattr(agent_ref, "_custom_providers", []) or []
+    base_url = (getattr(agent_ref, "base_url", "") or "").rstrip("/")
+    for entry in custom_providers:
+        if isinstance(entry, dict):
+            entry_url = (entry.get("base_url") or "").rstrip("/")
+            if base_url and entry_url == base_url:
+                return entry.get("name", "custom")
+    return provider
+
 def _wrap_handle_message(orig: Callable) -> Callable:
     """Inject NORMALIZE hook at the top of GatewayRunner._handle_message."""
 
@@ -544,14 +574,16 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     estimated_cost_usd = getattr(_agent_ref_child, "session_estimated_cost_usd", 0) if _agent_ref_child else 0
                     cost_status = getattr(_agent_ref_child, "session_cost_status", "unknown") if _agent_ref_child else "unknown"
 
+                    _provider_value = _resolve_provider(_agent_ref_child)
                     # v1.8.3 (P1, issue #12): unified usage extraction
                     _tokens_child, _context_child = _session_usage_from(ctx, result)
-
                     card_sent_child = on_message_completed(
                         message_id=ctx["message_id"],
                         answer=result.get("final_response", ""),
                         duration=_elapsed_child,
                         model=result.get("model", ""),
+                        provider=_provider_value,
+                        session_title=_get_session_title(_agent_ref_child),
                         tokens=_tokens_child,
                         context=_context_child,
                         api_calls=result.get("api_calls", 0),
@@ -582,6 +614,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     duration=time.monotonic() - _saved_parent_ctx.get("_msg_start_time", time.monotonic()),
                     aborted=True,
                     error_message="Interrupted by new message",
+                    session_title=_get_session_title(ctx.get("_agent_ref") if ctx else None),
                 )
                 _saved_parent_ctx["card_sent"] = True
                 # BUG FIX (v0.15.4): Also set card_sent on the original
@@ -624,14 +657,16 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                 cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
 
+                _provider_value = _resolve_provider(_agent_ref)
                 # v1.8.3 (P1, issue #12): unified usage extraction
                 _tokens, _context = _session_usage_from(ctx, result)
-
                 card_sent = on_message_completed(
                     message_id=ctx["message_id"],
                     answer=result.get("final_response", ""),
                     duration=_elapsed,
                     model=result.get("model", ""),
+                    provider=_provider_value,
+                    session_title=_get_session_title(_agent_ref),
                     tokens=_tokens,
                     context=_context,
                     api_calls=result.get("api_calls", 0),
@@ -801,14 +836,16 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                     estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                     cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
 
+                    _provider_value = _resolve_provider(_agent_ref)
                     # v1.8.3 (P1, issue #12): unified usage extraction
                     _tokens, _context = _session_usage_from(ctx, result)
-
                     card_sent = on_message_completed(
                         message_id=task_id,
                         answer=(result or {}).get("final_response", ""),
                         duration=_elapsed,
                         model=(result or {}).get("model", ""),
+                        provider=_provider_value,
+                        session_title=_get_session_title(_agent_ref),
                         tokens=_tokens,
                         context=_context,
                         api_calls=(result or {}).get("api_calls", 0),

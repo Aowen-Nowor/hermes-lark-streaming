@@ -1,3 +1,47 @@
+## v2.0.0 (2026-10-13)
+
+**fork 合并版** — 合并上游 v1.8.0 → v1.8.4 全部修复，并保留 fork 独有改动。
+
+| 来源 | 内容 |
+|------|------|
+| fork 独有 | 标题层级修复 — 取消 Markdown 标题降级，H1–H6 原样透传（见 v1.8.1-fork） |
+| fork 独有 | `interim_to_answer` 配置项 — 工具调用过渡文字默认不写入卡片正文（见 v1.8.0-fork） |
+| 上游 v1.8.4 | hermes v0.21.6 集成哨兵误报修复（纯测试/文档，零运行时改动） |
+| 上游 v1.8.3 | GitHub Issues 专项：网关启动死锁（P0）+ WebUI TypeError + footer usage + 续卡竞态 + 平台隔离 + 异常封卡 + 非 om_ 投递 |
+| 上游 v1.8.2 | hermes v0.21.1 集成哨兵适配（纯测试/文档） |
+| 上游 v1.8.1 | 外部反馈专项：话题并发误杀 + 续卡竞态泄漏 + agent 异常封卡 + 非飞书渠道隔离 + /bg 锚点 |
+| 上游 v1.8.0 | 生产日志审计：lark-oapi 门槛 + WS 渠道健康 + cron 日志 + Phase 2 状态再同步等 10 项 |
+
+> **版本号说明**：本 fork 自 **v2.0.0** 起采用独立编号。此前 fork 的 v1.8.0 / v1.8.1 与上游同号但内容不同，为免混淆已在下方以 `-fork` 后缀标注。
+
+---
+
+## v1.8.1-fork (2026-09-15)
+
+卡片标题层级修复 — 取消 Markdown 标题降级，H1–H6 原样透传。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| 🐛 Bug Fix (P1) | 卡片里的 Markdown 标题看不出层级：`## 二级标题` 渲染成普通文本 | `optimize_markdown_style()` 把所有标题压低到 H4/H5（`#`→`####`、`##`~`######`→`#####`）。飞书 Card 2.0 富文本组件原生支持 H1–H6（字号 26/22/20/18/17/14px），压到 16–17px 后与正文 14px 几乎无差别，层级信息彻底丢失 | 移除标题降级分支及 3 个专用正则（`_RE_H1_TO_H3` / `_RE_HEADING_DEMOTE` / `_RE_H1_DEMOTE`），标题原样透传（`cardkit/md.py`） |
+| 🧪 Test | 标题相关断言改为「原样保留」 | 旧断言锁定降级行为 | `test_heading_levels_preserved`、`test_heading_not_demoted`、`test_mixed_headings_and_code`、`test_headings_preserved_in_cron_card` |
+
+**定位链路**：用户反馈 → cron 日报 `_do_cron_deliver()` → `build_cron_card()` → `optimize_markdown_style()`。降级逻辑自 v1.2.1 起存在且无文档说明；用户确认方案 A（完整保留原级别）。**影响面**：所有飞书卡片（流式回复 + cron/gateway 推送），不止 cron 日报。
+
+---
+
+## v1.8.0-fork (2026-08-16)
+
+工具调用过渡文字不再污染卡片正文 — interim 文本（工具调用前的过渡叙述，如"我先查一下…"）默认不写入答案正文，卡片只显示最终答案。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|------|-----------|------|-----------|
+| ✨ Feature | 新增 `interim_to_answer` 配置项（默认 `false`） | Hermes 的 `interim_assistant_callback`（工具调用前过渡文字）与 `stream_delta_callback`（最终答案）是两条独立通道。旧逻辑把 interim 文本的 answer 部分也追加进卡片正文，导致用户在工具调用间隙看到"我先查一下…"等过渡文字混入最终答案 | `_linear_on_thinking` 中 answer 分支受 `interim_to_answer` 控制：`false`（默认）时跳过，卡片正文纯最终答案；`true` 时恢复旧行为。reasoning 部分仍由 `show_reasoning` 独立控制，不受影响 (`controller/linear_mixin.py`, `config/reader.py`) |
+| 🧪 Test | 新增 4 个 `TestLinearOnThinkingInterimToAnswer` 单元测试 | 旧测试 `test_dedup_with_mixed_reasoning_and_answer` 依赖旧行为（interim answer 写入正文），新默认值下会失败 | 新增测试覆盖：默认 false 跳过、true 接受、false 时 reasoning 仍处理、true 时保留增量追加去重。旧测试显式开启 `interim_to_answer=True` 保留原意图。870 passed，5 个失败为环境预存问题（真实配置覆盖 + venv 缺 setuptools），与本次改动无关（git stash 验证） |
+
+---
+
+---
+
 ## v1.8.4 (2026-10-09)
 
 hermes v0.21.6 集成哨兵误报修复版 — 纯测试与文档，零运行时代码改动，CI workflow 按约定不动。hermes v0.21.6 发布次日（2026-10-08），每日集成测试报告 30 用例 9 failed（均为 GatewayRunner/AIAgent 方法存在性哨兵）。经 5 轮审计 + 本地双环境 100% 复现确认：**插件运行时代码与 hermes v0.21.6 完全兼容，9 个失败全部是假警报**。根因是两层叠加：①hermes v0.21.6 的 pyproject 将全部 45 个依赖标记 `python_version >= '3.14'`（官方仅支持 3.14，.python-version=3.14），而 CI workflow 钉死 Python 3.11 → `pip install -e .`（best-effort + `|| true`）实际装入 0 个依赖 → hermes 在 CI 里 import 全灭（本地复现首个缺失模块为 ruamel），30 用例全部落到 AST 兜底层；②hermes v0.21.x Mixin 化把被补丁方法搬出了原单体文件（v1.8.2 修过同型问题的第三批残留）——`_handle_message`→`gateway/run_inbound.py`（GatewayInboundMixin）、`_handle_message_with_agent`/`_run_agent`/`_run_background_task`→`gateway/run_turn.py`（GatewayTurnMixin）、`AIAgent.run_conversation`→`agent/turn_facade.py`（TurnFacadeMixin），AST 兜底只扫 `gateway/run.py`/`run_agent.py` 单文件类体，必然失明 → 8 用例误报"方法不存在"；③`test_run_conversation_still_callable` 的第二个 import 无异常保护 → `ModuleNotFoundError`（dotenv）把用例炸成 error，成为第 9 个失败。
@@ -108,6 +152,7 @@ hermes v0.21.1 (tag v2026.9.7) 升级冲击适配版 — 纯测试与文档，�
 - lifecycle 分类基于 hermes 当前文案关键字——hermes 未来改动停机通知措辞会退回 system/error 分类（降级为显示不精确，无功能影响）
 - PyPI 冒名包警示只能覆盖本仓库文档触达的用户；若需从 PyPI 侧治理（名称争议/下架申请）需另行向 PyPI 管理员提交
 
+---
 
 ## v1.7.0 (2026-08-26)
 
@@ -190,6 +235,10 @@ Clarify 卡片失效复发修复 — hermes v0.19.0 升级后 clarify 退回纯�
 | 🔧 Refactor (P1) | 删除 deferred loading 3 套重打 → 1 套按需 repatch | v1.4.0 的 2s+8s 定时重打 + v1.4.1 的 60s 懒重打共 3 套，治标不治本。v1.4.2 的 `_handle_card_action_event` patch + 按需 repatch（`_wrap_feishu_adapter_send` 入口检查 `id(type(self))`）覆盖所有场景 | 删除 `_schedule_direct_patch` + `_apply_feishu_adapter_deferred_repatch`。`_wrap_feishu_adapter_send` 入口新增 6 行按需 repatch 检查：`if id(type(self)) not in _patched_feishu_classes: _apply_feishu_adapter_patches(type(self), is_repatch=True)`。O(1) set lookup，每条消息触发，覆盖任何 deferred loading 时窗口 (`patching/__init__.py`, `patching/adapter.py`) |
 | 🔧 Refactor (P1) | 删除 `_on_card_action_trigger` patch (`_wrap_feishu_card_action_trigger`/`_empty_card_action_response`) | SDK WebSocket 模式下 `register_p2_card_action_trigger` 保存 bound method 引用，类属性替换不影响已保存引用 → patch 从未执行（生产日志铁证：patched ✓ 9 次，wrapper 0 次）。`_handle_card_action_event` patch（v1.4.2）通过 `self.` 动态查找可靠覆盖 | 删除 `_wrap_feishu_card_action_trigger` + `_empty_card_action_response` + `_apply_feishu_adapter_patches` 中的注册块。保留 `_wrap_handle_card_action_event`（v1.4.2 主链路修复）(`patching/adapter.py`, `patching/__init__.py`) |
 | 🔧 Refactor (P2) | 统一错误处理 + 精简注释 | 7 处散落 `except FeishuAPIError` 各自判 streaming_closed/schema_error/element_not_found。注释占比 23%，含大量"what"叙述和版本历史 | 新增 `_handle_cardkit_error(session, e, phase) -> str` 统一分类（streaming_closed/schema_error/element_not_found/other），7 处调用简化。注释精简到 ~8%，保留"why"和坑警告，删"what"叙述。生产代码 14,780 → ~10,300 行 (-30%) (`controller/linear_mixin.py`, 所有文件) |
+| ✨ Feature | 新增 `width_mode` 卡片宽度配置 | CardKit 支持 `width_mode` 配置：`default`(600px)、`fill`(撑满窗口)。通过 CardKit ApiConfig 设置 | 新增 `width_mode` 配置项（默认 `default`），传入 `build_streaming_card_v2` → CardKit `config.width_mode` 或 `config.width`（像素值时） (`config/reader.py`, `cardkit/cards.py`) |
+| ✨ Feature | 卡片 footer 显示 provider 字段 | 支持在卡片 footer 显示 provider 名称，对 custom provider 自动解析实际名称（如 phicotek） | 新增 `_resolve_provider()` 辅助函数提取 provider 并解析 custom provider。默认 `footer.fields` 包含 `provider` 字段 (`patching/gateway.py`, `cardkit/elements.py`, `config/reader.py`) |
+| ✨ Feature | 卡片图片嵌入 — IMG 路径上传 + 可配置 image_size | 支持 `IMG:/path` 格式引用本地图片，自动上传到飞书并嵌入卡片。`image_size` 配置支持预设尺寸和自定义 Wpx Hpx | 新增 `_process_media_images()` 上传 IMG 路径图片，`_extract_images_from_markdown()` 支持 `image_size` 参数 (`controller/linear_mixin.py`, `cardkit/elements.py`, `config/reader.py`) |
+| ✨ Feature | 卡片顶部显示会话标题 | 在卡片顶部显示 📋 **标题** + 分隔线，标题超过 50 字符自动截断。`show_session_title` 配置项控制是否显示（默认 true） | 新增 `_get_session_title()` 从 agent 对象安全获取标题，`_build_session_title_header()` 渲染标题元素 (`patching/gateway.py`, `cardkit/elements.py`, `config/reader.py`, `controller/linear_mixin.py`) |
 | ✅ Compat | hermes v0.18.1 兼容性验证 | hermes 2026.07.07 更新到 v0.18.1 | SSH 服务器读 hermes v0.18.1 源码：所有 patch 目标方法存在（`_on_card_action_trigger`/`_handle_card_action_event`/`send_clarify`/`_build_event_handler`/GatewayRunner 方法/AIAgent.run_conversation` with `persist_user_timestamp`/`cron._deliver_result`）。`_on_card_action_trigger` 仍调用 `self._handle_card_action_event(data)`（动态查找）→ v1.4.2 patch 有效。`/card` 仍不在 COMMAND_REGISTRY → `_handle_card_action_event` patch 仍需。集成测试 26 passed, 4 skipped |
 
 **审计方法**: 架构收敛经生产日志 + 代码 + hermes 源码三方对齐。①SSH 服务器取 agent.log（4 个 rotated 文件）grep：IM 降级 0 次触发（死代码）、全量重建 22 次全是 header 颜色切换（非失败兜底）、`_on_card_action_trigger patched ✓` 9 次但 wrapper 0 次（SDK bound method 失效铁证）。②读 hermes v0.18.1 源码确认所有 patch 目标方法存在且 `_on_card_action_trigger` 仍通过 `self.` 动态查找调用 `_handle_card_action_event`。③集成测试（HERMES_SRC_DIR=/usr/local/lib/hermes-agent）26 passed, 4 skipped。858 单元测试通过，0 回归。生产代码 14,780 → ~10,300 行 (-30%)，主链路唯一化（CardKit create → Phase 2 → Phase 3 → preservative seal，无降级分支）。

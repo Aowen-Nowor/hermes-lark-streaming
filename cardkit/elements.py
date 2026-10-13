@@ -54,21 +54,28 @@ _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 _RE_BACKTICK_RUN = re.compile(r"`+")
 _RE_MD_SPECIAL = re.compile(r"([`*_{}\[\]<>])")
 
-def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
-    """提取飞书图片为独立 Card 2.0 img 元素，返回 (清理后的文本, img元素列表)."""
+def _extract_images_from_markdown(text: str, *, image_size: str = "fit_horizontal") -> tuple[str, list[dict]]:
+    """提取飞书图片为独立 Card 2.0 img 元素，返回 (清理后的文本, img元素列表).
+    image_size: "fit_horizontal"(默认), "stretch", "large", "medium", "small", "tiny", 或 "Wpx Hpx".
+    """
     images: list[dict] = []
 
     def _replace(m: re.Match) -> str:
         alt = m.group(1)
         img_key = m.group(2)
-        images.append({
+        element = {
             "tag": "img",
             "img_key": img_key,
-            "scale_type": "fit_horizontal",
             "alt": {"tag": "plain_text", "content": alt},
             "corner_radius": "8px",
             "preview": True,
-        })
+        }
+        if image_size == "fit_horizontal":
+            element["scale_type"] = "fit_horizontal"
+        else:
+            element["scale_type"] = "crop_center"
+            element["size"] = image_size
+        images.append(element)
         return ""
 
     cleaned = _IMG_MD_PATTERN.sub(_replace, text)
@@ -704,13 +711,50 @@ def _build_footer_elements(
         },
     ]
 
-def build_preservative_seal_actions(*, partial: bool = False, footer_data: dict | None = None, is_error: bool = False, is_aborted: bool = False, error_message: str = "", footer_fields: list[list[str]] | None = None, footer_show_label: bool = False, existing_elements: set[str] | None = None, card_trace_id: str = "") -> list[dict]:
+def _build_session_title_header(title: str) -> list[dict]:
+    """构建会话标题头部元素."""
+    if not title:
+        return []
+    # 截断过长的标题
+    max_len = 50
+    display_title = title if len(title) <= max_len else title[:max_len] + "..."
+    safe_title = _escape_md(display_title)
+    return [
+        {
+            "tag": "markdown",
+            "content": f"📋 **{safe_title}**",
+            "text_size": "heading",
+        },
+        {"tag": "hr"},
+    ]
+
+def build_preservative_seal_actions(*, partial: bool = False, footer_data: dict | None = None, is_error: bool = False, is_aborted: bool = False, error_message: str = "", footer_fields: list[list[str]] | None = None, footer_show_label: bool = False, existing_elements: set[str] | None = None, card_trace_id: str = "", session_title: str = "") -> list[dict]:
     """构建保留式封卡 batch_update actions. Inserts error panel + footer via insert_before
     loading_icon, then deletes loading_hint + loading_icon. existing_elements filters deletes."""
     actions: list[dict] = []
 
     def _elem_exists(eid: str) -> bool:
         return existing_elements is None or eid in existing_elements
+
+    # Session title header — insert at the very top of the card.
+    if session_title:
+        title_elements = _build_session_title_header(session_title)
+        if title_elements:
+            # Find the first existing element to insert before
+            first_target = None
+            for candidate in (UNIFIED_PANEL_ELEMENT_ID, ANSWER_ELEMENT_ID, STREAMING_ELEMENT_ID, _LOADING_HINT_ELEMENT_ID, _LOADING_ELEMENT_ID):
+                if _elem_exists(candidate):
+                    first_target = candidate
+                    break
+            if first_target:
+                actions.append({
+                    "action": "add_elements",
+                    "params": {
+                        "type": "insert_before",
+                        "target_element_id": first_target,
+                        "elements": title_elements,
+                    },
+                })
 
     # Error/interrupt panel.
     if error_message:
@@ -823,6 +867,10 @@ def _render_footer_field(
 
     if name == "model":
         v = data.get("model") or None
+        return v, v
+
+    if name == "provider":
+        v = data.get("provider") or None
         return v, v
 
     if name == "tokens":
