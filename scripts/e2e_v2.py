@@ -401,8 +401,52 @@ async def scenario_plain(client: FeishuClient, chat_id: str) -> None:
         artifacts.append(f"plain 文本消息: {msg_id}")
 
 
+async def scenario_oneshot(client: FeishuClient, chat_id: str) -> None:
+    print("== 场景 oneshot：cron 投递一次性定稿卡（v2.0.14）==")
+    from hermes_lark_streaming.cardkit import build_cron_card, build_gateway_card
+    from hermes_lark_streaming.cardkit.special import parse_cron_delivery
+
+    # 官方 _deliver_result 包装格式（cron/scheduler_delivery.py:2025-2031）
+    wrapped = (
+        "Cronjob Response: e2e-oneshot-demo\n"
+        "(job_id: e2e0nest014)\n"
+        "-------------\n"
+        "\n"
+        "#### 一次性定稿卡验证\n\n"
+        "- 官方包装头解析（任务名 + job_id）\n"
+        "- **markdown 粗体渲染**\n"
+        "- 灰色 job_id 溯源页脚\n\n"
+        "本卡即 cron 定时任务投递的落地形态（此前为 msg_type=post 富文本）。\n"
+    )
+    title, job_id, body = parse_cron_delivery(wrapped)
+    check("包装头解析（任务名）", title == "e2e-oneshot-demo", f"title={title!r}")
+    check("包装头解析（job_id）", job_id == "e2e0nest014", f"job_id={job_id!r}")
+    check("包装头剥离", "Cronjob Response:" not in body and "(job_id:" not in body)
+    card = build_cron_card(body, title=title, job_id=job_id)
+    elements = card["body"]["elements"]
+    check(
+        "cron 卡构建（标题行 + job_id 页脚）",
+        elements[0]["tag"] == "div"
+        and elements[0]["icon"]["token"] == "time_outlined"
+        and "job_id: e2e0nest014" in elements[-1]["text"]["content"],
+    )
+    msg_id = await client.send_card_to_chat(chat_id, card)
+    check("cron 一次性卡直发成功", bool(msg_id), f"msg={msg_id}")
+    if msg_id:
+        artifacts.append(f"cron 一次性卡消息: {msg_id}")
+
+    gw_card = build_gateway_card(
+        "✅ oneshot 场景：回合外 final（notify 无活跃卡）与 ≥200 字 plain "
+        "同走本静态卡通道（build_gateway_card）。\n\n第二张：gateway 静态卡变体。"
+    )
+    msg2 = await client.send_card_to_chat(chat_id, gw_card)
+    check("gateway 静态卡直发成功", bool(msg2), f"msg={msg2}")
+    if msg2:
+        artifacts.append(f"gateway 静态卡消息: {msg2}")
+
+
 # ── 主流程 ──────────────────────────────────────────────────────────────────
-SCENARIOS = ("connect", "answer", "progress", "interim", "full", "burst", "native", "clarify", "plain")
+SCENARIOS = ("connect", "answer", "progress", "interim", "full", "burst", "native", "clarify", "plain", "oneshot")
 
 
 async def run(selected: list[str]) -> int:
@@ -434,6 +478,8 @@ async def run(selected: list[str]) -> int:
                 await scenario_clarify(composer, client, chat_id)
             elif name == "plain":
                 await scenario_plain(client, chat_id)
+            elif name == "oneshot":
+                await scenario_oneshot(client, chat_id)
             else:  # pragma: no cover
                 check(f"未知场景 {name}", False)
         except Exception as exc:

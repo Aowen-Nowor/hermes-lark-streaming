@@ -1,13 +1,15 @@
 name: feishu-streaming-platform
 label: Feishu / Lark (Streaming Cards)
 kind: platform
-version: "2.0.13"
+version: "2.0.14"
 description: >
   Feishu / Lark CardKit v2.0 streaming-card platform for Hermes Agent —
   a drop-in, zero-monkey-patch replacement for the built-in Feishu platform.
   Answers stream into live CardKit cards with a typing effect, tool progress
-  and thinking bubbles render into the card status panel, and clarification
-  prompts become interactive cards. Inherits the full built-in FeishuAdapter
+  and thinking bubbles render into the card status panel, clarification
+  prompts become interactive cards, and out-of-turn deliveries (cron job
+  responses, long-form proactive sends) arrive as static digest cards
+  instead of raw text. Inherits the full built-in FeishuAdapter
   surface (WebSocket/webhook, media, threads, DM pairing, group gating,
   comments, meeting invites) and adds the card layer on top. Enable by
   switching the platform name from `feishu` to `feishu-streaming` in the

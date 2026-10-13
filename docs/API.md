@@ -52,6 +52,7 @@ gateway:
 | `panel_expanded` | bool | `false` | 状态面板默认展开 |
 | `streaming_panel_expanded` | bool | `false` | 流式期状态面板展开 |
 | `native_streaming` | bool | `true` | native streaming 通道（v2.0.13）：适配器声明官方 `SUPPORTS_NATIVE_STREAMING`，答案流走 `send_stream_frame` 原生帧（工具边界不封卡，单卡全回合）；`false` 回 edit-based 流 |
+| `oneshot_cards` | bool | `true` | 回合外正式投递一次性卡（v2.0.14）：cron 投递族（metadata `job_id`）→ build_cron_card 标题+溯源页脚；回合外 final（notify 无活跃卡）与 ≥200 字无标记长文 → build_gateway_card 静态卡；`false` 全部落回原生路径（v2.0.13 行为） |
 | `print_strategy` | str | `"delay"` | 打字机策略（透传 CardKit streaming_config） |
 | `print_step` | int | `4` | 打字机步长 |
 | `flush_interval_ms` | int | `200` | 兼容保留（V2 节流由 hermes 通道自带） |
@@ -68,9 +69,11 @@ gateway:
 |---|---|---|
 | answer 流首帧 | `metadata["expect_edits"]=true` | 创建 CardKit 卡片并发出 |
 | answer 流更新 | `edit_message(card_message_id, ...)` | CardKit 实体流式更新 |
-| 定稿 | `edit_message(..., finalize=true)` 或 `metadata["notify"]=true` | answer 终值落盘 + 关流式 + 摘要 |
+| 定稿 | `edit_message(..., finalize=true)` 或 `metadata["notify"]=true` | answer 终值落盘 + 关流式 + 摘要（无活跃卡时 → 一次性静态卡，v2.0.14） |
 | 工具/思考/interim | `metadata["_interim_send"]=true`（+ 文本模板识别） | 卡片状态区（无活跃卡片时暂存并入） |
-| 普通消息 / cron | 无标记 | 原生路径（继承行为） |
+| cron 投递 | `metadata["job_id"]`（官方标记，scheduler_delivery.py:1458） | 一次性定稿卡：包装头解析（任务名标题行 + job_id 溯源页脚），v2.0.14 |
+| 长文无标记 | 无标记且 ≥200 字 | 一次性静态卡（send_message 工具族长文），v2.0.14 |
+| 普通消息 | 无标记（<200 字） | 原生路径（继承行为） |
 
 ## 6. 指令
 

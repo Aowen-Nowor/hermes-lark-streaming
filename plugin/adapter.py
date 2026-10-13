@@ -287,6 +287,19 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             if upgraded is not None:
                 cls = upgraded
                 _logger.debug("feishu-streaming: plain send upgraded to progress (progress lane)")
+        # v2.0.14：回合外正式投递 → 一次性静态定稿卡（cron 投递族 /
+        # 回合外 final / 长文 plain）。三规则见 _send_oneshot_card；
+        # 返回 None（不适用/降级）时维持下方既有路由，消息永不丢。
+        if reply_to is None:
+            try:
+                oneshot = await self._send_oneshot_card(chat_id, content, metadata, cls)
+            except Exception:  # 降级红线：任何失败走原生路径
+                _logger.warning(
+                    "feishu-streaming: oneshot card failed — native fallback", exc_info=True,
+                )
+                oneshot = None
+            if oneshot is not None:
+                return oneshot
         if cls is None or cls.channel == CH_PLAIN:
             return await super().send(
                 chat_id, content, reply_to=reply_to, metadata=_strip_internal(metadata),
@@ -299,6 +312,95 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         if result is None:
             return await super().send(chat_id, content, reply_to=reply_to, metadata=_strip_internal(metadata))
         return result
+
+    async def _send_oneshot_card(
+        self,
+        chat_id: str,
+        content: str,
+        metadata: dict[str, Any] | None,
+        cls: Any,
+    ) -> Any | None:
+        """v2.0.14：回合外正式投递一次性静态定稿卡（无状态，永不参与回合）.
+
+        根因背景（Task 20 取证，2026-10-13 job 967430ee4ab2 事故）：cron 投递
+        走 live adapter lane（cron/scheduler_delivery.py:2107 _deliver_via_live_adapter
+        → gateway/delivery.py:322 transport.send），metadata 携带官方标记
+        ``{"job_id": ..., "notify": True}``（scheduler_delivery.py:1458）。
+        classify → CH_FINAL → engine._on_final_send 无活跃卡返回 None →
+        super().send() 原生 post 文本（im GET 实锤 om_x100b63e…f570a msg_type=post）。
+        V1 曾以 monkey-patch _deliver_result 实现卡片化（patching/gateway.py:853），
+        v2 移除补丁层后能力断档——本方法以适配器正式表面恢复，且信号比 V1
+        更精确（V1 无条件拦截；V2 按 metadata job_id 精确识别）。
+
+        三规则（按序短路，全部命中才走卡片）：
+        R1 cron 投递族：metadata 带 ``job_id``（官方标记，成功/失败/队列
+           排水三 lane 同源）→ 无条件卡片，标题取包装头任务名
+           （parse_cron_delivery 解析 scheduler_delivery.py:2025 官方格式）。
+        R2 回合外定稿：notify=True（CH_FINAL）且无活跃卡 → 卡片
+           （有活跃卡 = 回合定稿语义，保持既有 finalize 路径不变）。
+        R3 长文主动投递：无任何标记（CH_PLAIN）且无活跃卡且 ≥200 字
+           → 卡片（send_message 工具族长文；短文本保持原生，避免过度卡片化）。
+
+        无状态红线：不注册 composer state、不取 per-chat 锁、永不升格、
+        永不进面板——一次性卡与回合卡互不干扰（v2.0.11 多卡片根因不涉及）。
+        降级红线：CardKit 凭证缺失 / 配置关闭 / thread_id 非法 → None
+        （调用方回落原生路径）；发送异常向上抛（send() 捕获后回落），
+        内容永不丢失。
+        """
+        if self._card_config is not None and not bool(
+            getattr(self._card_config, "oneshot_cards", True)
+        ):
+            return None
+        meta = metadata if isinstance(metadata, dict) else {}
+        job_id = str(meta.get("job_id") or "").strip()
+        channel = getattr(cls, "channel", "") if cls is not None else ""
+        try:
+            has_active = self._composer.active_state(chat_id) is not None
+        except Exception:  # noqa: BLE001 — 状态查询失败按无活跃卡处理
+            has_active = False
+        if job_id:
+            gate = "cron"
+        elif channel == "final" and not has_active:
+            gate = "final"
+        elif channel == "plain" and not has_active and len((content or "").strip()) >= 200:
+            gate = "longform"
+        else:
+            return None
+        client = self._get_card_client()
+        if client is None:
+            return None
+        from ..cardkit import build_cron_card, build_gateway_card
+        from ..cardkit.special import parse_cron_delivery
+
+        if gate == "cron":
+            title, wrapped_id, body = parse_cron_delivery(content)
+            card = build_cron_card(
+                body, title=title or "Cronjob", job_id=job_id or wrapped_id,
+            )
+        else:
+            card = build_gateway_card(content)
+        thread_id = str(meta.get("thread_id") or "").strip()
+        if thread_id.startswith("om_"):
+            # 话题/线程续投：官方 thread_id 在飞书即 root 消息 id → 线程内回复卡
+            message_id = await client.reply_card(thread_id, card)
+        else:
+            message_id = await client.send_card_to_chat(chat_id, card)
+        _logger.info(
+            "feishu-streaming: oneshot card delivered (%s) chat=%s job=%s msg=%s",
+            gate, chat_id[:12], job_id[:12] or "-", str(message_id or "")[:16],
+        )
+        try:
+            from gateway.platforms.base import SendResult
+
+            return SendResult(success=True, message_id=str(message_id) if message_id else None)
+        except Exception:  # noqa: BLE001 — 无 hermes 环境（测试/独立使用）最小回退
+            class _SendResult:  # 结构镜像官方 SendResult
+                def __init__(self, success: bool, message_id: str | None = None) -> None:
+                    self.success = success
+                    self.message_id = message_id
+                    self.error: str | None = None
+
+            return _SendResult(success=True, message_id=str(message_id) if message_id else None)
 
     def supports_native_streaming(
         self, chat_type: str | None = None, metadata: dict[str, Any] | None = None,

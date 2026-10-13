@@ -4,11 +4,11 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.13-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.14-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.21-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
-[![tests](https://img.shields.io/badge/tests-570%20passed-brightgreen)](#测试与-e2e)
+[![tests](https://img.shields.io/badge/tests-596%20passed-brightgreen)](#测试与-e2e)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
 *回答打字机流式呈现 · 工具与思考实时进面板 · 澄清问题变成可点击卡片 · 全程零 monkey-patch*
@@ -34,6 +34,10 @@ hermes 内置飞书平台的**增强版**：适配器完整继承内置 `FeishuA
 - **native streaming 通道（v2.0.13）**：适配器声明官方 `SUPPORTS_NATIVE_STREAMING`，答案流走 `send_stream_frame` 原生帧——工具边界不再封卡，单卡全回合；任何帧失败自动回落 edit/send（帧永不丢）；`feishu_streaming.native_streaming` 可一键回 edit-based
 - 工具进度与思考过程实时渲染进卡片状态面板：`agent loop · N 轮 · M 个工具 · 耗时` 动态标题、思考按轮分组（`第 N 轮 · X.Xs`）、思考正文 markdown 渲染（灰色小字号，`**加粗**`/`*斜体*`/`` `代码` `` 生效）、单工具耗时（`Terminal (2.3 s)`）、官方图标体系
 - 两步优雅定稿：终值落盘 + `close_streaming`，页脚呈现耗时 / 模型 / 上下文统计；纯回答回合自动移除空面板壳（v2.0.13）
+
+**回合外投递（v2.0.14）**
+- **cron 定时任务响应卡片化**：任务名标题行 + markdown 正文 + job_id 溯源页脚（此前为富文本 post）；成功/失败/队列重发三种投递同源覆盖（官方 `metadata["job_id"]` 精确识别，零启发式）
+- 回合外定稿（非流式单发回复）与 ≥200 字主动长文（send_message 工具族）同走静态卡通道；`feishu_streaming.oneshot_cards` 一键回原生
 
 **交互卡片**
 - 澄清请求渲染为按钮/输入卡片，点击即回复，三态反馈（选择 → 已提交 → 已确认），操作者授权校验 fail-closed
@@ -125,6 +129,7 @@ plugins:
 | `max_reasoning_rounds` | — | 思考轮次上限 |
 | `streaming_panel_expanded` | `true` | 状态面板默认展开 |
 | `native_streaming` | `true` | native streaming 通道（v2.0.13）：false 回 edit-based 流（v2.0.12 行为） |
+| `oneshot_cards` | `true` | 回合外投递一次性卡（v2.0.14）：cron 投递族 / 回合外 final / ≥200 字长文；false 全部回原生文本（v2.0.13 行为） |
 | `footer.fields` / `footer.show_label` | — | 定稿页脚字段（elapsed/model/cost/status 等） |
 | `gateway_cards` | `false` | 网关级卡片投递 |
 
@@ -174,12 +179,13 @@ python -m pytest tests/
 # 冒烟（无飞书凭证）
 python scripts/smoke_v2.py
 
-# 真飞书 E2E（8 场景：connect / answer / progress / interim / full / burst / clarify / plain）
+# 真飞书 E2E（10 场景：connect / answer / progress / interim / full / burst / native / clarify / plain / oneshot）
 export FEISHU_E2E_APP_ID=cli_xxx FEISHU_E2E_APP_SECRET=xxx FEISHU_E2E_CHAT_ID=oc_xxx
 python scripts/e2e_v2.py --scenario all
 ```
 
 `burst` 场景即 v2.0.11 修复的验收：并发帧 gather 投递，断言恒为单卡片。
+`oneshot` 场景即 v2.0.14 修复的验收：cron 投递一次性定稿卡（官方包装头解析 + 标题行 + job_id 溯源页脚）。
 
 ## FAQ
 

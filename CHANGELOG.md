@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.0.14 (2026-10-13)
+
+**cron 定时投递卡片化 + 回合外正式投递一次性定稿卡——用户 2026-10-13 截图事故修复 + hermes→飞书输出路径全量盘点（举一反三）。**
+
+背景：用户云服务器 cron 任务 `daily-morning-news-830`（job 967430ee4ab2）08:31:15 投递，飞书收到富文本而非卡片（im GET 实锤 `om_x100b63e3f3f570a…` msg_type=`post`）。取证定案：hermes cron 投递经 live adapter lane（cron/scheduler_delivery.py:2107 `_deliver_via_live_adapter` → gateway/delivery.py:322 `transport.send`）以 `adapter.send` 落地，metadata 携带官方标记 `{"job_id", "notify": True}`（scheduler_delivery.py:1458）；插件 classify → CH_FINAL → `engine._on_final_send` 回合外无活跃卡返回 None → `super().send()` 原生 post 文本。V1 曾以 monkey-patch `_deliver_result` 实现 cron 卡片化（DEV patching/gateway.py:853 `_wrap_cron_deliver` 无条件拦截 + `build_cron_card`），v2 移除补丁层后能力断档。举一反三全量盘点 hermes→飞书 12 条输出路径：流式回复（native 卡）/状态通报（v2.0.10 advisory）/思考中继（面板）/澄清卡/媒体/降级红线（原生保底）均有既定语义，仅 3 条**回合外**路径落原生文本——cron 投递族、回合外 final、长文主动投递（send_message 工具族）。三者同源同修。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| P1 | cron 定时任务响应以富文本（post）而非卡片投递（成功/失败/队列排水三 lane 同源） | live lane `adapter.send` → CH_FINAL → 回合外无活跃卡 → 原生 post；V1 补丁层能力未随零补丁架构迁移 | **一次性定稿卡（R1）**：`adapter._send_oneshot_card`——metadata 带 `job_id`（官方标记，scheduler_delivery.py:1458，零启发式）即渲染 `build_cron_card`：官方包装头 `parse_cron_delivery` 解析（scheduler_delivery.py:2025-2031 格式逐行镜像；wrap_response=false 无头时兜底标题 "Cronjob"）→ 标题行（time_outlined + 任务名粗体）+ hr + 正文 markdown（表格降级/长文切分沿用 V1 遗产）+ 灰色 job_id 溯源页脚（`_build_notice_row` 同构）；thread_id 为 om_ 消息 id 时线程内回复卡。一次性卡**无状态**：不注册 composer state、不取 per-chat 锁、与回合卡互不干扰（v2.0.11 多卡片根因不涉及） |
+| P2 | 回合外 final（notify 无活跃卡）落原生文本（非流式单发回复等） | 同通道 | **R2**：`build_gateway_card` 静态卡；有活跃卡 = 回合定稿语义，保持既有 finalize 路径不变 |
+| P2 | ≥200 字无标记主动投递（send_message 工具族）落原生文本 | CH_PLAIN → 原生 | **R3**：长文静态卡；<200 字保持原生（短消息卡片化属过度设计） |
+
+**审计方法**: hermes 源码逐行（scheduler_delivery.py `_deliver_result` 双 lane / `_live_route_metadata` :1458 / `delivery_queue` drain 同收敛 :1376 / send_message_tool live metadata）+ 服务器日志取证（agent.log:2530 live adapter lane + message_id；config.yaml 无 `cron:` 节 → notify 默认 True）+ im GET 消息类型实锤 → V1（DEV 分支）考古（`_wrap_cron_deliver` + relay lane job_id 识别先例）→ 插件 adapter/cardkit/config 重读后实现 → 全量 596/596（v2.0.14 新增 26 用例：包装头解析 7 / cron 卡扩展 4 / 三规则门控 11 / send 接线 4）→ ruff 基线相等（新代码零新增）。真飞书 E2E 新增 `oneshot` 场景（包装头解析断言 + cron 卡/gateway 卡双直发）。
+
+**⚠️ 部署环境事故（本轮发现并修复，影响 v2.0.13）**: 首次部署后生产 lane 验证仍发 post——取证发现 `~/.hermes/plugins/` 顶层存在历史部署备份副本 `hermes-lark-streaming.bak-v211/.bak-v212`，与主目录同 plugin key（feishu-streaming-platform）；官方加载器对同名 key 选择 **.bak-v212（v2.0.12 代码）**（agent.log `Loading plugin 'feishu-streaming-platform' (path=…bak-v212)` 铁证）→ **v2.0.13 自 2026-10-12 部署起从未真正上线**（Task 19 的探针 25/25 与 E2E 全绿为假象：探针 sys.path 直挂主目录、E2E 直构 composer，均未经过加载器选择）。修复：全部影子副本挪出 `~/.hermes/plugins/`（→ `~/.hermes/plugin-backups/`），重启后 `Loading … path=…/hermes-lark-streaming` 铁证 v2.0.14 真身加载，生产 lane 临时 cron 任务实证 `msg_type=interactive`。**部署卫生规则（永久生效）**：①部署备份必须放 plugins 目录之外；②部署验证必须包含「Loading plugin … path=」日志行路径检查（磁盘 md5 / sys.path 探针都无法代表运行时真身）。
+
+**已知限制**:
+- cron 卡为一次性静态卡（无流式/无状态面板）——cron 投递无回合上下文，属投递物非对话；执行期工具过程仍只在服务端日志可见
+- `cron.wrap_response: false` 的裸投递走 R1 时标题为兜底 "Cronjob"（无任务名可解析）
+- cron 投递与活跃流式卡并发时为两张独立卡（投递物与回合答案语义不同，刻意不合并进面板）
+
+---
+
 ## v2.0.13 (2026-10-12)
 
 **答案流迁移 hermes native streaming 通道（P1-B）+ 空面板壳清除（P1-A）——Task 18 取证报告两项修复落地（用户拍板「两个都做了吧」）。**

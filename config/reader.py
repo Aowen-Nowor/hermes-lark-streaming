@@ -239,6 +239,19 @@ class Config:
         return _to_bool(sec.get("native_streaming", True), default=True)
 
     @property
+    def oneshot_cards(self) -> bool:
+        """v2.0.14：回合外正式投递一次性卡片（默认 True）.
+
+        True → 三类出站帧不再落原生 post 文本，改渲染为静态定稿卡：
+        1. cron 投递族（metadata 带 ``job_id``，成功/失败/队列排水同源）
+        2. 回合外定稿（notify=True 且无活跃卡——非流式单发回复等）
+        3. 长文主动投递（无标记 plain 且 ≥200 字——send_message 工具族）
+        False → 全部落回原生路径（v2.0.13 行为，一键回退）。
+        """
+        sec = self._plugin_sec()
+        return _to_bool(sec.get("oneshot_cards", True), default=True)
+
+    @property
     def gateway_cards(self) -> bool:
         """默认 True. TTL 缓存读取."""
         cached = self._reload_cached()
