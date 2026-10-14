@@ -181,7 +181,7 @@ class TestRenderRealFormats:
     def test_terminal_block_renders_icon_title_command(self):
         els = _render_status_children([REAL_TERMINAL_BLOCK])
         pairs = _div_texts(els)
-        assert pairs[0] == ("setting_outlined", "<font color='green'>**Terminal**</font>")
+        assert pairs[0] == ("code_outlined", "<font color='green'>**Terminal**</font>")  # v2.0.16
         # 命令缩进灰字（22px 与 V1 一致），无 emoji、无 ``` 泄漏
         assert pairs[1][1] == 'echo "=== 时间 ==="; date "+%Y-%m-%d %H:%M:%S"'
         assert els[1]["margin"] == "0px 0px 0px 22px"

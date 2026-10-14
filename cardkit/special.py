@@ -122,10 +122,14 @@ def parse_cron_delivery(content: str) -> tuple[str, str, str]:
 
 
 def _cron_title_row(title: str) -> dict[str, Any]:
-    """cron 卡标题行：官方 standard_icon + lark_md 粗体（与面板标题行同原语）."""
+    """cron 卡标题行：lark_md 粗体（与面板标题行同原语）.
+
+    v2.0.16：去除 time_outlined 头部图标（用户验收：cron 卡头部不用图标；
+    job_id 溯源页脚行保留图标）。div 无 icon 为已验证原语（命令摘要行
+    _build_tool_step_detail 同构）。
+    """
     return {
         "tag": "div",
-        "icon": {"tag": "standard_icon", "token": "time_outlined"},
         "text": {"tag": "lark_md", "content": f"**{_escape_md(title)}**"},
     }
 
@@ -134,7 +138,7 @@ def build_cron_card(content: str, *, title: str = "", job_id: str = "") -> dict[
     """Cron 推送用的静态卡片 — schema 2.0，markdown 内容.
 
     v2.0.14 扩展（向后兼容）：``title`` 非空时在正文前插入标题行
-    （time_outlined 图标 + 粗体，V1 极简卡无标题行）；``job_id`` 非空时在
+    （v2.0.16 起无图标粗体行，V1 极简卡无标题行）；``job_id`` 非空时在
     末尾追加灰色 notation 页脚行（_build_notice_row 同构）——溯源信息
     （原包装头的 ``(job_id: ...)`` 行）从正文上移到页脚，正文不再重复。
     缺省参数下与 V1 行为逐字节一致（既有测试冻结该契约）。

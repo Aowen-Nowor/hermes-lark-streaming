@@ -98,10 +98,36 @@ def _round_elapsed_ms(lines: list[str], line_times: list[float]) -> dict[int, fl
     return out
 
 
+def _last_thinking_group(lines: list[str]) -> tuple[int, bool]:
+    """最后一组连续 💬 思考行的 ``(起始下标, 是否延伸到末尾)``；无思考组 ``(-1, False)``.
+
+    v2.0.16 三色状态的组态判定：延伸到末尾 = 流式期该轮尚未被后续行
+    （工具/通报/下一轮）封口 → 进行中（橙）；延伸被截断 = 已封口 → 绿。
+    """
+    start = -1
+    prev = False
+    last_is_thinking = False
+    for i, raw in enumerate(lines):
+        text = strip_dedup_suffix(raw or "")
+        if not text.strip():
+            continue
+        kind = parse_progress_line(text)[0]
+        if kind == "thinking":
+            if not prev:
+                start = i
+            prev = True
+        else:
+            prev = False
+        last_is_thinking = kind == "thinking"
+    return start, bool(start >= 0 and last_is_thinking)
+
+
 def _render_status_children(
     lines: list[str],
     durations: dict[str, str] | None = None,
     line_times: list[float] | None = None,
+    *,
+    turn_state: str = "finalized",
 ) -> list[dict[str, Any]]:
     """status_lines → V1 风格面板子元素（解析失败行降级为原始 markdown）.
 
@@ -124,10 +150,20 @@ def _render_status_children(
     - 思考正文 plain_text → lark_md（_build_reasoning_body_detail：逐行
       <font color='grey'> 包裹保持灰色缩进视觉，markdown 语义生效）；
       命令摘要保持 plain_text（命令是代码非 markdown 语义）
+
+    v2.0.16（用户验收：轮次标题恒绿，V1 是绿/橙/红三色）：
+    - ``turn_state="streaming"``（流式期）：最后一组未被封口的 💬 思考轮
+      → 橙（orange-300，V1 current_reasoning 语义）；其余组 → 绿。
+    - ``turn_state="finalized"``（默认，定稿收口）：全部绿（已完成）。
+    - 红（失败）不实施：V1 ``failed=True`` 全库零调用，hermes 工具进度行
+      仅启动时发射（run_turn_runner.py:_progress_build_message）无失败形态
+      ——帧流无失败数据源，不伪造；失败语义由 ⚠️ 橙色警告行承载。
     """
     children: list[dict[str, Any]] = []
     round_no = 0
     prev_thinking = False
+    streaming = turn_state == "streaming"
+    last_group_start, open_at_end = _last_thinking_group(lines)
     elapsed_by_line = _round_elapsed_ms(lines, list(line_times or []))
     for idx, line in enumerate(lines):
         text = strip_dedup_suffix(line)
@@ -137,9 +173,12 @@ def _render_status_children(
         if kind == "thinking":
             if not prev_thinking:
                 round_no += 1
+                # v2.0.16 三色：流式期最后一组未封口思考轮 → 橙（V1 对齐），
+                # 其余组恒绿（定稿轮）；finalize 重渲染收口为全绿。
                 children.append(
                     _build_reasoning_round_title(
-                        round_no, elapsed_by_line.get(idx, 0.0), finalized=True)
+                        round_no, elapsed_by_line.get(idx, 0.0),
+                        finalized=not (streaming and open_at_end and idx == last_group_start))
                 )
             prev_thinking = True
             body = clean or text[len(_THINKING_PREFIX):].strip() or text
@@ -182,24 +221,31 @@ def _render_status_children(
 
 
 def _build_notice_row(icon_token: str, body: str) -> dict[str, Any]:
-    """通报行：官方 standard_icon + 灰色 notation 正文（v2.0.10）.
+    """通报行：官方 standard_icon + notation 正文（v2.0.10；v2.0.16 警告族橙色）.
 
     与工具标题行同构（div + standard_icon + notation 字号），正文用
-    plain_text 灰色（与思考/预览详情同字体体系，无 markdown 注入面），
+    plain_text（与思考/预览详情同字体体系，无 markdown 注入面），
     保证未识别通报行与面板其余行视觉一致——用户验收要求“面板一律
     飞书官方图标 + 统一样式”（限流提示行 ⏱️ 裸 markdown 事故 2026-10-12）。
+
+    v2.0.16：警告族（⚠️/🚨 → warning_outlined）图标与正文橙色——用户验收
+    “警告类不能用灰色”（Model fallback 行 2026-10-13 截图）；其余通报行
+    保持灰色。text_color 仅 plain_text 支持（v2.0.12 取证），orange 为
+    V1 错误面板生产原语（elements._build_error_panel）。
     """
+    warning = icon_token == "warning_outlined"
+    color = "orange" if warning else "grey"
     return {
         "tag": "div",
         "icon": {
             "tag": "standard_icon",
             "token": icon_token,
-            "color": "grey",
+            "color": color,
         },
         "text": {
             "tag": "plain_text",
             "content": body,
-            "text_color": "grey",
+            "text_color": color,
             "text_size": "notation",
         },
     }
@@ -328,6 +374,7 @@ def build_streaming_card_v2(
     panel_title: str = "",
     status_durations: dict[str, str] | None = None,  # v2.0.8：工具行耗时表
     status_times: list[float] | None = None,         # v2.0.8：行到达时间戳
+    turn_state: str = "streaming",                   # v2.0.16：轮次三色（流式末轮橙/定稿全绿）
 ) -> dict[str, Any]:
     """Card lifecycle (v1.0.2+):
 
@@ -338,6 +385,8 @@ def build_streaming_card_v2(
     ``panel_title``：面板动态标题（V1: "agent loop · N 个工具"；空 → 静态 "agent loop"）。
     ``status_durations``：单工具耗时表（行 → "2.3 s"）；``status_times``：
     行到达时间戳（思考轮次耗时）。均 v2.0.8，缺失时对应装饰省略。
+    ``turn_state``（v2.0.16）："streaming"（默认，本函数即流式卡工厂——末组
+    未封口思考轮橙色）| "finalized"（定稿收口全绿，finalize 重渲染专用）。
     """
     elements: list[dict] = []
 
@@ -347,7 +396,8 @@ def build_streaming_card_v2(
         _apply_panel_title(panel, panel_title)
         if status_lines:
             panel["elements"] = _render_status_children(
-                status_lines, durations=status_durations, line_times=status_times)
+                status_lines, durations=status_durations, line_times=status_times,
+                turn_state=turn_state)
         elements.append(panel)
 
     # ── Streaming answer element ──

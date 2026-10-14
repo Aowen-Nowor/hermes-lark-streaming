@@ -4,11 +4,11 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.15-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.16-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.21-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
-[![tests](https://img.shields.io/badge/tests-620%20passed-brightgreen)](#测试与-e2e)
+[![tests](https://img.shields.io/badge/tests-649%20passed-brightgreen)](#测试与-e2e)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
 *回答打字机流式呈现 · 工具与思考实时进面板 · 澄清问题变成可点击卡片 · 全程零 monkey-patch*
@@ -41,6 +41,10 @@ hermes 内置飞书平台的**增强版**：适配器完整继承内置 `FeishuA
 
 **平台通知轨（v2.0.15）**
 - 子代理失败/超时通知（`⚠️ Subagent failed/timed out` 官方固定前缀）豁免进度行 300 字符上限：有活跃卡并入面板（warning_outlined 通报行样式），无活跃卡 early-create 回合卡——不再孤挂原生 post 文本
+
+**面板视觉（v2.0.16）**
+- 折叠面板轮次三色（V1 对齐）：流式进行中思考轮橙色、已完成绿、定稿收口全绿；警告族通报行（⚠️/🚨）橙色醒目，其余通报行保持灰
+- Terminal/shell 工具行 `code_outlined` 代码图标（原齿轮）；cron 卡头部去图标（job_id 溯源页脚保留）
 
 **交互卡片**
 - 澄清请求渲染为按钮/输入卡片，点击即回复，三态反馈（选择 → 已提交 → 已确认），操作者授权校验 fail-closed

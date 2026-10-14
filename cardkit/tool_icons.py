@@ -32,8 +32,9 @@ __all__ = [
 ]
 
 # v2.0.10：默认工具图标从 tool_02 换为官方枚举 token（用户验收要求“面板一律
-# 飞书官方图标”，而 tool_02 不在官方 enumerations-for-icons 清单内；
-# code_outlined 语义中性，且与 terminal 的 setting_outlined 视觉区分）。
+# 飞书官方图标”，而 tool_02 不在官方 enumerations-for-icons 清单内）。
+# v2.0.16：terminal 从 setting_outlined 并入 code_outlined（用户验收：shell 行
+# 齿轮图标语义不符，统一代码图标；默认与 shell 行同 token 为预期结果）。
 DEFAULT_TOOL_ICON = "code_outlined"
 
 # v2.0.10：非工具类通报行（限流/警告/后台通知等 emoji 开头且解析不出工具结构
@@ -65,8 +66,9 @@ _TOOL_ICONS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("grep",), "doc-search_outlined"),
     (("glob",), "folder_outlined"),
     # "terminal" 为 hermes 实际 shell 工具名（V1 表只有 exec/bash/command/run，
-    # v2.0.4 按生产工具名补充，保证 shell 行命中官方图标）
-    (("exec", "bash", "command", "run", "terminal"), "setting_outlined"),
+    # v2.0.4 按生产工具名补充，保证 shell 行命中官方图标；
+    # v2.0.16 用户验收：setting_outlined 齿轮 → code_outlined）
+    (("exec", "bash", "command", "run", "terminal"), "code_outlined"),
     (("browser", "playwright", "navigate"), "browser-mac_outlined"),
     (("agent", "task", "spawn"), "robot_outlined"),
     (("check", "determine", "verify"), "list-check_outlined"),

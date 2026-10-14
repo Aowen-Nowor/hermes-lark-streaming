@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.0.16 (2026-10-13)
+
+**面板视觉四项修复（用户 2026-10-13 截图验收）——Terminal 图标、轮次三色、警告行橙色、cron 头部去图标。**
+
+背景：用户飞书实测截图四项 UI 反馈：①折叠面板 Terminal 工具行齿轮图标语义不符；②轮次标题恒绿（V1 是绿/橙/红三色）；③警告行（Model fallback）灰色不醒目；④cron 卡头部图标冗余。恒绿根因：v2.0.5 设计决策「💬 行到达即完整，恒绿不伪造状态」——文本行渲染路径 `_render_status_children` 恒传 `finalized=True`，V1 结构化路径的橙色对位物（`current_reasoning_text` → `finalized=False`）在文本行路径缺失。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| P2 | 折叠面板 Terminal 工具行图标为 setting_outlined 齿轮，语义不符 | V1 state/tooluse.py 描述符表移植（exec/bash/command/run/terminal 同组 setting_outlined） | shell 工具族整组 → `code_outlined`（官方枚举；默认图标本就是 code_outlined，v2.0.10「与 terminal 视觉区分」的注释理由随本次作废） |
+| P2 | 轮次标题恒绿——流式进行中的思考轮与已定稿轮无视觉区分 | v2.0.5 恒绿决策；文本行路径无「未封口轮」判定 | **turn_state 三色**：`_render_status_children(turn_state)`——streaming 期最后一组未封口 💬 思考轮 → orange-300（V1 current_reasoning 语义，`_last_thinking_group` 判组态：末组思考且延伸到末行 = 未封口），其余组绿；`build_streaming_card_v2` 默认 streaming（生产流式渲染自动生效）。finalize 新增面板收口重渲染（`_reseal_panel`）→ 定稿全绿。**红（失败）不实施**：V1 `failed=True` 全库零调用（红色从未在 V1 轮次实际出现，V1 用户所见的红是工具行错误状态），hermes 工具进度行仅启动时发射（run_turn_runner.py `_progress_build_message`）无失败形态——帧流无失败数据源不伪造；失败语义由 ⚠️ 橙色警告行承载 |
+| P2 | finalize 面板收口的容器 children 替换通道未知（不做全量重建：answer 打字机保护） | 本库 batch_update 只用过 add/delete 两 action | **s146 真飞书探针定案（2026-10-13）**：官方 batch_update 无 update_elements action（V1/V2 变体 code=10002 "action is invalid" 实测；V3 单元素形不适用）→ 采用同批次 `delete_elements(面板)` + `add_elements(insert_before answer 元素)` 重建面板（marker 语义验证：重建后新子元素可被 delete_elements 命中）。幂等优化：流式末渲染已无未封口轮（重建无视觉差异）时跳过 API；装饰性失败仅 warning 不阻断定稿 |
+| P2 | 警告类通报行（⚠️/🚨 → warning_outlined）灰色不醒目（Model fallback 行截图） | v2.0.10 通报行统一灰色 | `_build_notice_row` 按 icon token 分流：warning_outlined → 图标+正文橙色（plain_text `text_color='orange'`——V1 错误面板生产原语；icon `color:'orange'`——clarify 卡生产已验证）；其余通报行（⏱️/💾/ℹ️ 及 cron job_id 页脚）保持灰色 |
+| P2 | cron 卡头部 time_outlined 图标冗余 | v2.0.14 标题行带图标 | `_cron_title_row` 去除 icon 字段（div 无 icon 已验证原语）；job_id 溯源页脚行保留图标 |
+
+**审计方法**: V1（DEV 分支）三色语义考古（cardkit/elements.py:333-399 finalized/current_reasoning 双渲染 + `failed=True` 全库零调用实锤 + V1 CHANGELOG「orange-300 进行中、green 已完成、red 失败」）+ hermes 源码（run_turn_runner.py 工具进度行仅启动形态 / chat_completion_helpers.py:2106 fallback 通知 ⚠️ 前缀实锤）+ s146 真飞书探针（batch_update 四变体 action 实测 + cron 无图标卡 `om_x100b63db454644b0b0910f96d7d9d97` + 橙色双样张卡 `om_x100b63db45a96484b01bb1760a0f622`）→ 实现 → 全量 649/649（新增 29 用例：图标 4 / 组态 5 / 三色 7 / 警告橙 5 / cron 2 / finalize 收口 4 / 图标映射回归 2）→ ruff 基线净减 2（新代码零新增）→ 真飞书 E2E full + oneshot 回归。
+
+**已知限制**:
+- 面板收口重建走 delete+add 同批次：极端失败模式（delete 成功 add 失败）面板消失——装饰性内容，答案不受影响（失败 WARNING 留痕）
+- plain_text `text_color='orange'` 渲染生效性待用户飞书端视觉确认（s116 先例：code=0 但属性生效性无法目验；V1 错误面板同原语生产在先）——若不生效备选 lark_md `<font color='orange'>`（探针卡内双样张可对比）
+- 轮次红色状态无数据源：hermes 帧流未来若新增失败形态（工具失败独立进度行），须先取证再接线
+
+---
+
 ## v2.0.15 (2026-10-13)
 
 **hermes 平台通知轨卡片化——子代理失败通知 >300 字符漏洞（Task 21 用户追问「子代理的消息是否也做成卡片消息了」举一反三增量）。**

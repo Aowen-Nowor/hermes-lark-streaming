@@ -661,6 +661,8 @@ class FrameComposer:
             client, st, answer_element_id=_answer_element_id(),
             footer_fields=self._footer_fields(),
             footer_show_label=self._footer_show_label(),
+            panel_title=_panel_title(st.status_lines, elapsed_ms=_turn_elapsed_ms(st)),
+            panel_expanded=self._panel_expanded(),
         )
         _logger.info(
             "composer: card finalized chat=%s card=%s answer_len=%d status_lines=%d",
@@ -702,6 +704,13 @@ class FrameComposer:
             return bool(self._config.footer_show_label)  # type: ignore[union-attr]
         except Exception:  # noqa: BLE001
             return False
+
+    def _panel_expanded(self) -> bool:
+        """面板展开态（v2.0.16 面板收口重建用；与流式骨架同源同默认）。"""
+        try:
+            return bool(self._config.streaming_panel_expanded)  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            return True
 
 
 def _answer_element_id() -> str:

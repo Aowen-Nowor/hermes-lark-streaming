@@ -103,7 +103,7 @@ class TestBuildCronCardExtended:
         card = build_cron_card("正文", title="daily-job", job_id="j1")
         elements = card["body"]["elements"]
         assert elements[0]["tag"] == "div"
-        assert elements[0]["icon"]["token"] == "time_outlined"
+        assert "icon" not in elements[0]  # v2.0.16：cron 头部无图标（用户验收）
         assert "**daily-job**" in elements[0]["text"]["content"]
         assert elements[1]["tag"] == "hr"
         assert elements[2]["tag"] == "markdown"

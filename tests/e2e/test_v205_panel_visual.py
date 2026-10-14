@@ -86,7 +86,7 @@ class TestToolDisplay:
         assert humanize_tool_name("web-fetch") == "Web fetch"
 
     def test_icons(self):
-        assert resolve_tool_icon("terminal") == "setting_outlined"
+        assert resolve_tool_icon("terminal") == "code_outlined"  # v2.0.16 用户验收
         assert resolve_tool_icon("grep") == "doc-search_outlined"
         assert resolve_tool_icon("read_file") == "file-link-text_outlined"
         assert resolve_tool_icon("unknown_thing") == "code_outlined"  # v2.0.10 官方枚举默认
@@ -165,7 +165,7 @@ class TestRenderStatusChildren:
         kids = _render_status_children(["🖥️ terminal：\"uname -r\""])
         assert len(kids) == 2
         title_el, detail_el = kids
-        assert title_el["icon"]["token"] == "setting_outlined"
+        assert title_el["icon"]["token"] == "code_outlined"
         content = _texts([title_el])[0]
         assert "**Terminal**" in content and "green" in content
         assert _texts([detail_el])[0] == "uname -r"  # 引号已剥壳

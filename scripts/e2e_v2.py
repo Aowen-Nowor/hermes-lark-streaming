@@ -427,7 +427,7 @@ async def scenario_oneshot(client: FeishuClient, chat_id: str) -> None:
     check(
         "cron 卡构建（标题行 + job_id 页脚）",
         elements[0]["tag"] == "div"
-        and elements[0]["icon"]["token"] == "time_outlined"
+        and "icon" not in elements[0]  # v2.0.16：头部无图标
         and "job_id: e2e0nest014" in elements[-1]["text"]["content"],
     )
     msg_id = await client.send_card_to_chat(chat_id, card)
