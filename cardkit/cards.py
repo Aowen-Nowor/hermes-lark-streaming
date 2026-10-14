@@ -52,10 +52,6 @@ _ELEMENT_LIMIT_MARGIN = 5
 # 标题/图标解析见 tool_icons.py（V1 state/tooluse.py 移植）。
 
 
-def _strip_md_quotes(text: str) -> str:
-    return text.strip().strip('"“”').strip()
-
-
 # v2.0.8：单条思考正文显示上限（V1 _REASONING_DISPLAY_LIMIT 同款）
 _REASONING_DISPLAY_LIMIT = 2000
 
@@ -347,14 +343,6 @@ def _enforce_card_element_limit(
     # Update panel children in the card
     panel["elements"] = children
     return card
-
-def _build_summary(text: str) -> dict[str, Any]:
-    """Feishu CardKit 2.0 displays ``i18n_content.<locale>`` for users"""
-    truncated = text[:120].replace("\n", " ").replace("```", "").strip()
-    return {
-        "content": truncated,
-        "i18n_content": _i18n(truncated, truncated),
-    }
 
 def build_streaming_card_v2(
     *,

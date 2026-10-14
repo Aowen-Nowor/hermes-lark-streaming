@@ -49,7 +49,6 @@ __all__ = [
     'build_panel_header',
     'build_panel_children',
     '_count_tag_objects',
-    '_is_collapse_hint_child',
 ]
 
 _IMG_MD_PATTERN = re.compile(r"!\[([^\]]*)\]\((img_[^)\s]+)\)")
@@ -244,21 +243,6 @@ def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = 
     }
 
 _REASONING_DISPLAY_LIMIT = 2000  # 单条推理文本最大显示字数
-
-def _is_collapse_hint_child(child: Any) -> bool:
-    """Whether a panel child is the collapsed-items hint (bilingual-safe).
-
-    Matches BOTH hint spellings — the seal format ("⚡ 还有 N 项已折叠" /
-    "⚡ N items collapsed") and the panel-builder format ("⚡ 还有 X 轮早期推理、
-    Y 步早期操作已折叠"). Length-guarded so a real reasoning round that merely
-    mentions collapse words is never mistaken for the hint.
-    """
-    if not isinstance(child, dict):
-        return False
-    content = child.get("content", "")
-    if not isinstance(content, str) or not content.startswith("⚡") or len(content) > 80:
-        return False
-    return "已折叠" in content or "collapse" in content.lower()
 
 def _truncate_reasoning(text: str) -> str:
     """截断过长推理文本至 _REASONING_DISPLAY_LIMIT."""

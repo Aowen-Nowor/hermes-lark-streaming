@@ -4,7 +4,7 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.16-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.17-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.21-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
@@ -132,13 +132,15 @@ plugins:
 | `print_strategy` | `delay` | 打字机策略（`delay` / `fast`） |
 | `print_step` | `4` | 打字机步长 |
 | `card_ttl_sec` | `600` | 卡片会话 TTL（秒） |
-| `max_tool_steps` | `20` | 状态区工具行上限 |
-| `max_reasoning_rounds` | — | 思考轮次上限 |
 | `streaming_panel_expanded` | `true` | 状态面板默认展开 |
 | `native_streaming` | `true` | native streaming 通道（v2.0.13）：false 回 edit-based 流（v2.0.12 行为） |
 | `oneshot_cards` | `true` | 回合外投递一次性卡（v2.0.14）：cron 投递族 / 回合外 final / ≥200 字长文；false 全部回原生文本（v2.0.13 行为） |
 | `footer.fields` / `footer.show_label` | — | 定稿页脚字段（elapsed/model/cost/status 等） |
-| `gateway_cards` | `false` | 网关级卡片投递 |
+
+> v2.0.17 移除 V1 遗留死键：`linear` / `panel_expanded` / `flush_interval_ms` /
+> `answer_flush_interval_ms` / `feishu_base_url` / `show_reasoning` / `gateway_cards` /
+> `max_tool_steps` / `max_reasoning_rounds` —— V2 引擎从未消费；陈旧键留在
+> config.yaml 中无副作用，平台启停由 hermes 平台配置（`platforms.feishu-streaming`）负责。
 
 完整说明见 [docs/API.md](docs/API.md)。
 
@@ -160,7 +162,7 @@ hermes-lark-streaming/
 ├── feishu/                   # FeishuClient（CardKit REST + 瞬态重试）
 ├── config/                   # 配置读取（config.yaml → Config）
 ├── aowen/                    # /aowen 指令
-├── tests/                    # 542 用例（单元 + e2e mock 全链路）
+├── tests/                    # 644 用例（单元 + e2e mock 全链路）
 ├── scripts/                  # e2e_v2 真飞书验收 / smoke_v2 冒烟 / release 工具
 ├── docs/                     # API.md
 ├── assets/screenshots/       # 实景截图

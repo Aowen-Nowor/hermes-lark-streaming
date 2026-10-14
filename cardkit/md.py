@@ -14,9 +14,6 @@ _MAX_CHUNK_CHARS = 2400
 # ── Pre-compiled regex patterns (P2-01: avoid recompilation on every call) ──
 _RE_FENCED_CODE = re.compile(r'```[\s\S]*?```')
 _RE_INLINE_CODE = re.compile(r'`[^`]+`')
-_RE_BOLD = re.compile(r'\*{2,3}(?!\s)((?:(?!\*{2,3}).)+?)(?<!\s)\*{2,3}', re.DOTALL)
-_RE_VALID_ITALIC = re.compile(r'(?<![a-zA-Z0-9_])\*(?!\s)((?:(?!\*).)+?)(?<!\s)\*', re.DOTALL)
-_RE_UNPAIRED_ASTERISK = re.compile(r'(?<!\\)\*(?=[^\s*])')
 _RE_TABLE_ROW = re.compile(r"\|.+\|\n\|[-:| ]+\|[\s\S]*?(?=\n\n|\n(?!\|)|$)")
 _RE_IMAGE_REF = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
 _RE_CODE_BLOCK_EXTRACT = re.compile(r"(^|\n)(`{3,})([^\n]*)\n[\s\S]*?\n\2(?=\n|$)")
@@ -25,8 +22,6 @@ _RE_HEADING_DEMOTE = re.compile(r"^#{2,6} (.+)$", re.MULTILINE)
 _RE_H1_DEMOTE = re.compile(r"^# (.+)$", re.MULTILINE)
 _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 _RE_SHORT_MD_CHECK = re.compile(r'^#{1,6} |\n#{1,6} |```|!\[|\n{3,}')
-# v1.3.0: placeholder pattern for restoring protected code/bold/italic blocks
-_RE_PROTECTED_PLACEHOLDER = re.compile(r'\x00P(\d+)P\x00')
 
 __all__ = [
     "_MAX_CRON_TABLES",
@@ -34,7 +29,6 @@ __all__ = [
     "_find_tables_outside_code_blocks",
     "_split_long_text",
     "_strip_invalid_image_keys",
-    "escape_markdown_asterisks",
     "optimize_markdown_style",
 ]
 
@@ -76,42 +70,6 @@ def _strip_invalid_image_keys(text: str) -> str:
         return m.group(0) if m.group(2).startswith("img_") else ""
 
     return _RE_IMAGE_REF.sub(_replace, text)
-
-def escape_markdown_asterisks(text: str) -> str:
-    """飞书 Markdown 解析器比 CommonMark 更激进——会把 2*4000+4*3000"""
-    if '\x00' in text:
-        text = text.replace('\x00', '')
-
-    if '*' not in text:
-        return text
-
-    _protected: list[str] = []
-
-    def _save(m: re.Match) -> str:
-        _protected.append(m.group(0))
-        return f'\x00P{len(_protected) - 1}P\x00'
-
-    # Step 1: 保护代码区域
-    text = _RE_FENCED_CODE.sub(_save, text)
-    text = _RE_INLINE_CODE.sub(_save, text)
-
-    # Step 2: 保护粗体 **...** 和 ***...***
-    text = _RE_BOLD.sub(_save, text)
-
-    text = _RE_VALID_ITALIC.sub(_save, text)
-
-    # Step 4: 转义剩余 *（飞书可能误配对的）
-    text = _RE_UNPAIRED_ASTERISK.sub(r'\\*', text)
-
-    if _protected:
-        for i in range(len(_protected) - 1, -1, -1):
-            text = text.replace(f'\x00P{i}P\x00', _protected[i])
-
-    # Null bytes render as boxes (□) in Feishu and must never reach the API.
-    if '\x00' in text:
-        text = text.replace('\x00', '')
-
-    return text
 
 def optimize_markdown_style(text: str) -> str:
     """1. 提取代码块用占位符保护"""

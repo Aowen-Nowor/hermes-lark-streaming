@@ -80,11 +80,6 @@ except Exception:  # noqa: BLE001 — 纯 SDK / 卡片引擎独立使用 / 测�
     _FeishuAdapter = _MissingBuiltin
 
 
-def _ensure_builtin() -> None:
-    if _FeishuAdapter is _MissingBuiltin:
-        _get_builtin()  # 成功则 rebind 不可行（类已定义）——直接报原始错误
-        raise RuntimeError("feishu-streaming: builtin adapter became available after class creation")
-
 PLATFORM_NAME = "feishu-streaming"
 
 # ── 活跃适配器注册表（供 /aowen 状态卡等模块级设施获取运行状态）──────────

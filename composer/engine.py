@@ -543,6 +543,14 @@ class FrameComposer:
         return SendResult(success=True, message_id=st.card_message_id)
 
     async def _stream_answer(self, st: CardTurnState) -> None:
+        # v2.0.17：空 content 守卫——飞书 stream_element 的 content 必填非空
+        # （s152 真飞书探针 2026-10-14：content="" → 99992402 field validation
+        # failed；未闭合 markdown/围栏/分隔线等其余 9 种形态全部合法）。native
+        # 复合帧「answer 空 + 进度行非空」是工具边界后的固有低频形态，空串
+        # 直发 degrade 并连锁拆卡（2026-10-14 14:37 生产三卡事故，v2.0.11 家族
+        # 同症状新根因）。cumulative 快照语义下空 = 无新内容，跳过 API 无损。
+        if not (st.answer_text or "").strip():
+            return
         client = self._get_client()
         if client is None:
             raise RuntimeError("card client unavailable")

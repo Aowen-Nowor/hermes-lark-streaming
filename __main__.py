@@ -151,8 +151,6 @@ def _cmd_status() -> int:
         from hermes_lark_streaming.config import Config
 
         cfg = Config()
-        print(f"Config feishu_streaming.enabled: {cfg.enabled}")
-        print(f"Config feishu_streaming.linear: {cfg.linear}")
         print(f"Feishu credentials: {'configured' if (cfg.env_app_id or cfg.feishu_app_id) else 'MISSING'}")
         print()
         print("V2 architecture: native platform plugin, zero monkey-patching.")
@@ -168,7 +166,6 @@ def _cmd_verify() -> int:
         from hermes_lark_streaming.config import Config
 
         cfg = Config()
-        print(f"Config hermes_lark_streaming.enabled: {cfg.enabled}")
         print(f"Feishu credentials: {'configured' if (cfg.env_app_id or cfg.feishu_app_id) else 'MISSING'}")
 
         # Verify that gateway modules are importable
@@ -251,11 +248,10 @@ def _cmd_doctor() -> int:
         from hermes_lark_streaming.config import Config
         cfg = Config()
         print("[3/6] Configuration:")
-        for k in ("enabled", "linear", "gateway_cards", "flush_interval_ms",
-                   "card_duration_sec", "print_strategy", "print_step",
-                   "panel_expanded", "streaming_panel_expanded",
-                   "max_tool_steps", "max_reasoning_rounds",
-                   "footer_fields", "footer_show_label"):
+        for k in ("card_duration_sec", "print_strategy", "print_step",
+                   "streaming_panel_expanded",
+                   "footer_fields", "footer_show_label", "native_streaming",
+                   "oneshot_cards"):
             print(f"      {k:24}{getattr(cfg, k, '?')}")
     except Exception as e:
         print(f"[3/6] Configuration:     FAILED — {e}")

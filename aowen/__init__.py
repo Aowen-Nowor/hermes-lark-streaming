@@ -355,25 +355,20 @@ def build_status_card() -> dict[str, Any]:
         ]
 
         # ── Config section (collapsible, grouped by category) ──
+        # v2.0.17：移除 V1 遗留死键展示（enabled/linear/flush_interval_ms/
+        # gateway_cards/panel_expanded/show_reasoning/max_tool_steps/
+        # max_reasoning_rounds）——V2 引擎从未消费，误导致运维排障方向。
         has_creds = bool(cfg.feishu_app_id or cfg.env_app_id)
 
         streaming_cfg = [
-            f"`enabled`: `{cfg.enabled}`",
-            f"`linear`: `{cfg.linear}`",
-            f"`flush_interval_ms`: `{cfg.flush_interval_ms}`",
             f"`card_ttl_sec`: `{cfg.card_duration_sec}`",
             f"`print_strategy`: `{cfg.print_strategy}`",
             f"`print_step`: `{cfg.print_step}`",
         ]
         card_cfg = [
-            f"`gateway_cards`: `{cfg.gateway_cards}`",
-            f"`panel_expanded`: `{cfg.panel_expanded}`",
             f"`streaming_panel_expanded`: `{cfg.streaming_panel_expanded}`",
-            f"`show_reasoning`: `{cfg.show_reasoning}`",
-        ]
-        limit_cfg = [
-            f"`max_tool_steps`: `{cfg.max_tool_steps}`",
-            f"`max_reasoning_rounds`: `{cfg.max_reasoning_rounds}`",
+            f"`native_streaming`: `{cfg.native_streaming}`",
+            f"`oneshot_cards`: `{cfg.oneshot_cards}`",
             f"`footer_show_label`: `{cfg.footer_show_label}`",
         ]
         creds_cfg = [
@@ -385,8 +380,6 @@ def build_status_card() -> dict[str, Any]:
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(streaming_cfg), "text_size": "notation"}},
             _section_title("卡片行为", color="blue"),
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(card_cfg), "text_size": "notation"}},
-            _section_title("数量限制", color="blue"),
-            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(limit_cfg), "text_size": "notation"}},
             _section_title("凭证", color="blue"),
             {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(creds_cfg), "text_size": "notation"}},
         ]

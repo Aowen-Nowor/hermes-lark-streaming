@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.0.17 (2026-10-14)
+
+**多卡片事故 P0 根治（stream_element 空 content 守卫）+ V1 遗留代码全仓清理（用户指令「保持整个 V2 项目代码干净无冗余」）。**
+
+背景（P0）：2026-10-14 14:37 CST 生产（gateway30/v2.0.16）「几点了」回合拆 3 张卡——API call #2 流首帧模型 content 尚空，native 复合帧 = 空 answer + Terminal 进度行 → `_stream_answer("")` 直发 → 飞书 `cardkit_stream_element` 报 **99992402 field validation failed** → composer degrade → engine.py:150 `active_state` 返回 None → 下一帧连建新卡（卡 2 二连炸）→ stream fallback close 转 native text → 卡 3（纯答案流成功）。s152 真飞书探针二分定案：**stream_element 的 content 必填非空**（content="" → 99992402；未闭合粗体/围栏/分隔线等其余 9 变体全部 code=0；骨架卡 create 的空 answer 种子合法）。潜伏期：`_stream_answer` 自 v2.0.13 引入起无空守卫；v2.0.13/14 因影子副本事故未上线（Task 20），native streaming 真实生产运行自 v2.0.15（10-13）起一天余，低频形态未暴露属正常样本量。v2.0.11 同症状不同根因（当时是 check-then-act 竞态，本次是 API 契约）。
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| P0 | 「一个问题拆 3 张卡」再现（14:37 生产事故） | `_stream_answer`（v2.0.13 起）与 `finalize_card` 第一步（answer 终值 patch）均无空串守卫，空 content 直发被飞书 99992402 拒绝 → degrade → 连锁建卡 | **两处空守卫**：`engine._stream_answer` 与 `finalize.finalize_card` 对空/空白 answer 跳过 stream_element 调用——cumulative 快照语义下空 = 无新内容，跳过 API 无损且省调用（v2.0.0「无变化不触发 cardkit_update」同语义家族）；纯工具回合（answer 全程空）finalize 照常走页脚/关流式，合法终态不再炸 |
+| 清理 | V1 遗留死函数 ×5 | V2 架构迁移后遗留，全仓零引用（AST 交叉扫描定案） | 删 `cards._strip_md_quotes` / `cards._build_summary` / `adapter._ensure_builtin`（v2.0.0 导入期绑定后作废）/ `md.escape_markdown_asterisks`（V1 文本转义管线，docstring 残句；连带 4 个仅其使用的正则）/ `elements._is_collapse_hint_child`（docstring 自述依赖 V1 linear_mixin seal-time re-trim） |
+| 清理 | V1 遗留死配置属性 ×12 + 连带孤儿机制 | reader 属性定义后 V2 引擎零消费（engine 仅读 card_duration_sec/footer_fields/footer_show_label/streaming_panel_expanded 四属性；adapter 仅读 print_strategy/print_step/oneshot_cards/native_streaming） | 删 `enabled`（平台启停归 hermes 平台配置）/ `linear`（V1 linear_mixin 架构开关）/ `panel_expanded` / `flush_interval_ms`+`_sec` / `answer_flush_interval_ms`+`_sec`（V1 流式节流参数，V2 引擎自节流）/ `feishu_base_url`（V2 base_url 由 adapter `_domain_name` 派生，adapter.py:115-124）/ `show_reasoning` / `gateway_cards` / `max_tool_steps`+`max_reasoning_rounds`（V2 从未接线，面板裁剪恒默认 20/20）；连带删 `_to_float` / `_reload_cached` / `_RELOAD_CACHE_TTL` / `_reload_cache` 字段（唯一消费者全是被删属性） |
+| 清理 | V1 遗留展示与注入 | aowen 状态卡与 doctor 展示死键误导排障；默认注入仍写死键 | aowen 状态卡配置区改列存活键（+native_streaming/oneshot_cards 增列）；`__main__` status/verify/doctor 同步；`_DEFAULT_STREAMING_CONFIG` 移除 4 个死键（panel_expanded/flush_interval_ms/max_tool_steps/max_reasoning_rounds） |
+| 清理 | V1 遗留测试 ×28 + 幽灵文件 | 死属性用例随属性死亡；tests/integration/ 仅剩已删源文件的 `__pycache__`（test_hermes_compat）；assets img3/img4 全仓零引用 | test_config.py 删 TestEnabled/TestLinear/TestPanelExpanded/TestFeishuBaseURL/TestShowReasoning/flush 四用例，新增 `TestRemovedV1Properties` 12 属性防回引（AttributeError）+ backward-compat 测试改为 stale 键安全忽略断言；删 tests/integration/ 目录与 img3/img4.png |
+
+**保留决策**：`_ensure_legacy_section`/`_backup_config`/`_LEGACY_CONFIG_KEY`（V1 节名→feishu_streaming 迁移 = 安装升级路径，活跃调用非死代码）；`print_strategy`/`print_step`（飞书官方 CardKit streaming_config 参数，adapter→cards 活跃接线）；`include_loading_hint`/`_loading_hint_element`（v2.0.4 自代际废弃 + 测试固化不渲染断言，非 V1 血统，后续可选清理项）；陈旧 config.yaml 键无需手工清理——读取器按需取键，死键无副作用。
+
+**审计方法**: AST 全仓交叉引用扫描（运行时 199 顶层定义 × 全仓引用计数，零引用 3 + `__all__`-only 2）+ config 属性消费矩阵（engine/adapter/aowen/__main__ 全量 getattr/attr 枚举）+ getattr 字符串式引用防御扫描 + `__all__`/facade 星导入核对 + README/docs/CHANGELOG 文档核对 → 实现 → 全量 644/644（v2.0.16 的 649：删 28 个 V1 死属性用例，增 12 防回引 + 1 base_url 键断言 + 10 空守卫用例）→ ruff/真飞书 E2E 回归。
+
+---
+
 ## v2.0.16 (2026-10-13)
 
 **面板视觉四项修复（用户 2026-10-13 截图验收）——Terminal 图标、轮次三色、警告行橙色、cron 头部去图标。**

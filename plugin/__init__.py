@@ -29,16 +29,14 @@ _LEGACY_CONFIG_KEY = "hermes_lark_streaming"
 # lark-oapi 最低版本门槛（hermes-agent >= 0.19 需要 extra_ua_tags 支持）
 _LARK_OAPI_MIN = (1, 6, 4)
 
-# 默认插件配置（键语义与 V1 保持一致，用户配置零迁移成本）
+# 默认插件配置（键语义与 V1 保持一致，用户配置零迁移成本；v2.0.17 移除
+# V1 遗留死键 linear/panel_expanded/flush_interval_ms/max_tool_steps/
+# max_reasoning_rounds——V2 引擎从未消费，详见 Task 24 审计）
 _DEFAULT_STREAMING_CONFIG: dict[str, Any] = {
-    "panel_expanded": False,
     "streaming_panel_expanded": False,
     "print_strategy": "delay",
     "print_step": 4,
-    "flush_interval_ms": 200,
     "card_ttl_sec": 600,
-    "max_tool_steps": 20,
-    "max_reasoning_rounds": 20,
     "footer": {
         "fields": [
             ["status", "elapsed", "model", "cost", "compression_exhausted"],

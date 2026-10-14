@@ -194,12 +194,17 @@ async def finalize_card(
     client.cardkit_stream_element  # noqa: B018 — 提前触发 attribute 错误便于诊断
     state.seq += 1
     # v2.0.9 P0-1：三步定稿全部走 300317 自愈（answer 终值/页脚/关流式）
-    await call_with_seq_recovery(
-        state,
-        lambda seq: client.cardkit_stream_element(
-            state.card_id, answer_element_id, state.answer_text or "", sequence=seq),
-        what="finalize:answer",
-    )
+    # v2.0.17：answer 空时跳过终值 patch——stream_element content="" 被飞书拒
+    # （99992402，s152 真飞书探针定案）；纯工具回合 answer 为空是合法终态。
+    # answer 元素骨架期无条件存在（空 content 占位），页脚 insert_before
+    # 锚点不受影响。
+    if (state.answer_text or "").strip():
+        await call_with_seq_recovery(
+            state,
+            lambda seq: client.cardkit_stream_element(
+                state.card_id, answer_element_id, state.answer_text, sequence=seq),
+            what="finalize:answer",
+        )
     try:
         await _seal_footer(
             client, state,
