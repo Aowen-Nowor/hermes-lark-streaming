@@ -6,8 +6,8 @@ from typing import Any
 
 from .elements import (
     ANSWER_ELEMENT_ID,
-    AUX_TEXT_SIZE_TOKEN,
     UNIFIED_PANEL_ELEMENT_ID,
+    _aux_text_size,
     _build_reasoning_body_detail,
     _build_reasoning_round_title,
     _build_tool_step_detail,
@@ -237,7 +237,7 @@ def _build_notice_row(icon_token: str, body: str) -> dict[str, Any]:
             "tag": "plain_text",
             "content": body,
             "text_color": color,
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         },
     }
 
@@ -286,7 +286,7 @@ def _enforce_card_element_limit(
         if isinstance(child.get("content"), str) and "已折叠" in child["content"]:
             hint_idx = i
             break
-    _HINT_TEMPLATE = {"tag": "markdown", "content": "⚡ 还有 0 项已折叠", "text_size": AUX_TEXT_SIZE_TOKEN}
+    _HINT_TEMPLATE = {"tag": "markdown", "content": "⚡ 还有 0 项已折叠", "text_size": _aux_text_size()}
     _HINT_TAG_COUNT = _count_tag_objects(_HINT_TEMPLATE)  # typically 1
     if hint_idx is None:
         total += _HINT_TAG_COUNT  # Reserve exact space for the new collapse hint
@@ -332,7 +332,7 @@ def _enforce_card_element_limit(
             children.insert(0, {
                 "tag": "markdown",
                 "content": f"⚡ 还有 {trimmed_count} 项已折叠",
-                "text_size": AUX_TEXT_SIZE_TOKEN,
+                "text_size": _aux_text_size(),
             })
 
     # Update panel children in the card
@@ -402,7 +402,8 @@ def build_streaming_card_v2(
                 "print_step": {"default": print_step},
                 "print_strategy": print_strategy,
             },
-            # v2.0.19：自定义字号 token（s157 探针定案 CardKit 接受 config.style）。
+            # v2.0.20：自定义字号完全 opt-in——card_style.text_size 已配置时
+            # 注入 config.style（s157 探针定案 CardKit 接受），未配置零注入。
             **_card_text_style_config(),
             "locales": _LOCALES,
             "summary": {

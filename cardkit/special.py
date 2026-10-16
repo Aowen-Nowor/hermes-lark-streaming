@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from .i18n import _LOCALES, _T, _i18n, _t
-from .elements import _escape_md, _card_text_style_config, AUX_TEXT_SIZE_TOKEN
+from .elements import _escape_md, _card_text_style_config, _aux_text_size
 from .cards import _build_notice_row
 from .md import (
     _MAX_CRON_TABLES,
@@ -188,7 +188,7 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
                 "tag": "plain_text",
                 "content": f"{status_emoji} {status_label}",
                 "text_color": "turquoise",
-                "text_size": AUX_TEXT_SIZE_TOKEN,
+                "text_size": _aux_text_size(),
             },
         })
 
@@ -199,7 +199,8 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
 
     card: dict[str, Any] = {
         "schema": "2.0",
-        # v2.0.19：状态行引用 cus-aux 字号 token → 需注入 config.style（与回合卡一致）。
+        # v2.0.20：card_style 已配置时状态行走 cus-aux token 并注入 config.style；
+        # 未配置时零注入（与回合卡一致，观感同 v2.0.18）。
         "config": {"locales": _LOCALES, **_card_text_style_config()},
         "body": {"elements": elements},
     }

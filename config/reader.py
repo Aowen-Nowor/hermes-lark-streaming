@@ -143,27 +143,33 @@ class Config:
 
     @property
     def card_text_sizes(self) -> dict[str, dict[str, str]]:
-        """v2.0.19：``card_style.text_size`` 自定义字号（answer/aux 两组，各 default/pc/mobile 三档）.
+        """v2.0.20：``card_style.text_size`` 自定义字号（完全 opt-in，默认零注入）.
 
-        值域为飞书卡片 2.0 官方 13 档 token（heading-0 30px ~ x-small 10px），
-        非法值由飞书客户端回落 normal。默认 answer=normal（14px）、
-        aux=notation（12px）——与 v2.0.18 及之前的 normal_v2/notation 观感对齐。
+        用户反馈（2026-10-16）：手机端字号观感变大，要求默认恢复之前观感。
+        语义改为——未配置（默认）→ ``{}``：卡片不注入 ``config.style``、
+        元素不带字号 token，payload 与 v2.0.18 逐字段一致（answer=normal_v2、
+        aux=notation 字面值，观感零变化）。
+        配置后 → answer/aux 两组各 default/pc/mobile 三档；用户未写的组/档位
+        回落 v2.0.18 字面值枚举（answer→normal_v2、aux→notation），保证
+        「只改用户写的档位，其余观感不动」，同时 style.text_size 中两个
+        token 恒有完整定义（元素引用不落空）。值域为飞书卡片 2.0 官方
+        13 档 token（heading-0 30px ~ x-small 10px），非法值由客户端回落 normal。
         """
         sec = self._plugin_sec()
         style = sec.get("card_style")
         if not isinstance(style, dict):
-            style = {}
+            return {}
         ts = style.get("text_size")
-        if not isinstance(ts, dict):
-            ts = {}
+        if not isinstance(ts, dict) or not ts:
+            return {}
         out: dict[str, dict[str, str]] = {}
-        for key, defaults in (
-            ("answer", {"default": "normal", "pc": "normal", "mobile": "normal"}),
+        for key, fallbacks in (
+            ("answer", {"default": "normal_v2", "pc": "normal_v2", "mobile": "normal_v2"}),
             ("aux", {"default": "notation", "pc": "notation", "mobile": "notation"}),
         ):
             group = ts.get(key)
             group = group if isinstance(group, dict) else {}
-            out[key] = {slot: str(group.get(slot, dv) or dv) for slot, dv in defaults.items()}
+            out[key] = {slot: str(group.get(slot, dv) or dv) for slot, dv in fallbacks.items()}
         return out
 
     @property

@@ -43,6 +43,11 @@ __all__ = [
     '_render_footer_field',
     'ANSWER_TEXT_SIZE_TOKEN',
     'AUX_TEXT_SIZE_TOKEN',
+    'ANSWER_TEXT_SIZE_FALLBACK',
+    'AUX_TEXT_SIZE_FALLBACK',
+    '_answer_text_size',
+    '_aux_text_size',
+    '_text_sizes_enabled',
     '_card_text_style_config',
     '_compact',
     '_format_elapsed',
@@ -87,13 +92,17 @@ _LOADING_ELEMENT_ID = "loading_icon"
 _LOADING_HINT_ELEMENT_ID = "context_loading_hint"
 _LOADING_IMG_KEY = "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
 
-# ── v2.0.19 自定义字号 token（config.style.text_size 定义，元素引用）───────
+# ── v2.0.19/20 自定义字号（config.style.text_size 定义，元素引用）──────────
 # s157/s157b 真飞书探针定案：CardKit 实体卡接受 config.style.text_size，
 # 元素 text_size 引用自定义 token（含流式 stream_element/batch_update 通道）。
-# token 名固定，三档值由 Config.card_text_sizes 供（默认 answer=normal、aux=notation，
-# 与 v2.0.18 及之前的 normal_v2/notation 观感对齐）。
+# v2.0.20 用户反馈改完全 opt-in：card_style.text_size 未配置（默认）→ 元素
+# 直接用 v2.0.18 字面值（answer=normal_v2、aux=notation）、骨架卡不注入
+# config.style——payload 与 v2.0.18 逐字段一致（观感零变化）；配置后才切
+# token 路径。token 名固定，三档值由 Config.card_text_sizes 供。
 ANSWER_TEXT_SIZE_TOKEN = "cus-ans"
 AUX_TEXT_SIZE_TOKEN = "cus-aux"
+ANSWER_TEXT_SIZE_FALLBACK = "normal_v2"  # v2.0.18 answer 正文原样字面值
+AUX_TEXT_SIZE_FALLBACK = "notation"  # v2.0.18 辅助行原样字面值
 
 # footer reasoning 等级中文映射（英文行显示官方原值；未知等级双语显示原值）。
 # 官方值域见 hermes_constants.VALID_REASONING_EFFORTS。
@@ -108,15 +117,41 @@ _REASONING_LEVEL_ZH: dict[str, str] = {
 }
 
 
-def _card_text_style_config() -> dict:
-    """v2.0.19：骨架卡 ``config.style`` 注入体（answer/aux 两 token 三档值）.
+def _text_sizes_enabled() -> bool:
+    """v2.0.20：``card_style.text_size`` 是否已配置（完全 opt-in）.
 
-    值来自 ``Config.card_text_sizes``（card_style.text_size 配置）；非 hermes
-    环境（如测试沙箱）Config 亦可加载（空配置走默认值），不依赖 hermes_constants。
+    未配置 → False：元素字号走 v2.0.18 字面值（ANSWER/AUX_TEXT_SIZE_FALLBACK），
+    骨架卡不注入 ``config.style``——默认观感与 v2.0.18 逐字段一致。
+    """
+    from ..config import Config
+
+    return bool(Config().card_text_sizes)
+
+
+def _answer_text_size() -> str:
+    """answer 正文字号值：配置启用 → token；默认 → v2.0.18 字面值 normal_v2."""
+    return ANSWER_TEXT_SIZE_TOKEN if _text_sizes_enabled() else ANSWER_TEXT_SIZE_FALLBACK
+
+
+def _aux_text_size() -> str:
+    """辅助行字号值：配置启用 → token；默认 → v2.0.18 字面值 notation."""
+    return AUX_TEXT_SIZE_TOKEN if _text_sizes_enabled() else AUX_TEXT_SIZE_FALLBACK
+
+
+def _card_text_style_config() -> dict:
+    """v2.0.20：骨架卡 ``config.style`` 注入体（answer/aux 两 token 三档值）.
+
+    仅在 ``card_style.text_size`` 已配置时有体（opt-in）；未配置 → ``{}``
+    （config 不含 style 键，与 v2.0.18 一致）。token 值来自
+    ``Config.card_text_sizes``（未写的组/档位回落 v2.0.18 字面值枚举，
+    保证元素引用的 token 恒有定义）；非 hermes 环境（如测试沙箱）Config
+    亦可加载（空配置 → 未启用 → 不注入），不依赖 hermes_constants。
     """
     from ..config import Config
 
     sizes = Config().card_text_sizes
+    if not sizes:
+        return {}
     return {"style": {"text_size": {ANSWER_TEXT_SIZE_TOKEN: sizes["answer"],
                                      AUX_TEXT_SIZE_TOKEN: sizes["aux"]}}}
 
@@ -169,7 +204,7 @@ def _streaming_element(content: str = "", *, element_id: str = STREAMING_ELEMENT
         "tag": "markdown",
         "content": content,
         "text_align": "left",
-        "text_size": ANSWER_TEXT_SIZE_TOKEN,
+        "text_size": _answer_text_size(),
         "margin": "0px 0px 0px 0px",
         "element_id": element_id,
     }
@@ -217,7 +252,7 @@ def _build_unified_panel_placeholder(*, expanded: bool = False) -> dict:
             "content": en_title,
             "i18n_content": _i18n(en_title, zh_title),
             "text_color": "grey",
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         },
         elements=[{"tag": "markdown", "content": " "}],
     )
@@ -260,7 +295,7 @@ def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = 
         "content": en_full,
         "i18n_content": _i18n(en_full, zh_full),
         "text_color": "grey",
-        "text_size": AUX_TEXT_SIZE_TOKEN,
+        "text_size": _aux_text_size(),
     }
 
     # Header structure (matches _collapsible_panel; icon_position=right → grey).
@@ -342,7 +377,7 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
             "tag": "markdown",
             "content": zh_hint,
             "i18n_content": _i18n(en_hint, zh_hint),
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         })
 
     if panel_events:
@@ -360,7 +395,7 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
                         "text": {
                             "tag": "lark_md",
                             "content": _truncate_reasoning(round_.text),
-                            "text_size": AUX_TEXT_SIZE_TOKEN,
+                            "text_size": _aux_text_size(),
                         },
                     })
             elif kind == "tool" and idx < len(tool_steps):
@@ -382,7 +417,7 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
                     "text": {
                         "tag": "lark_md",
                         "content": _truncate_reasoning(current_reasoning_text),
-                        "text_size": AUX_TEXT_SIZE_TOKEN,
+                        "text_size": _aux_text_size(),
                     },
                 })
 
@@ -408,7 +443,7 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
                         "text": {
                             "tag": "lark_md",
                             "content": _truncate_reasoning(round_.text),
-                            "text_size": AUX_TEXT_SIZE_TOKEN,
+                            "text_size": _aux_text_size(),
                         },
                     })
 
@@ -425,7 +460,7 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
                         "text": {
                             "tag": "lark_md",
                             "content": _truncate_reasoning(current_reasoning_text),
-                            "text_size": AUX_TEXT_SIZE_TOKEN,
+                            "text_size": _aux_text_size(),
                         },
                     })
 
@@ -493,7 +528,7 @@ def _build_tool_step_title(step: dict) -> dict:
         "text": {
             "tag": "lark_md",
             "content": content,
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         },
     }
 
@@ -524,7 +559,7 @@ def _build_reasoning_round_title(round_index: int, elapsed_ms: float, finalized:
         "text": {
             "tag": "lark_md",
             "content": content,
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         },
     }
 
@@ -539,7 +574,7 @@ def _build_tool_step_detail(step: dict) -> dict | None:
             "tag": "plain_text",
             "content": detail,
             "text_color": "grey",
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         },
     }
 
@@ -572,7 +607,7 @@ def _build_reasoning_body_detail(body: str) -> dict | None:
         "text": {
             "tag": "lark_md",
             "content": wrapped,
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         },
     }
 
@@ -603,7 +638,7 @@ def _build_tool_step_output(step: dict) -> dict | None:
         "text": {
             "tag": "lark_md",
             "content": "\n".join(lines),
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         },
     }
 
@@ -666,7 +701,7 @@ def _build_error_panel(error_message: str, *, is_aborted: bool = False, expanded
     markdown_el: dict[str, Any] = {
         "tag": "markdown",
         "content": body_content,
-        "text_size": AUX_TEXT_SIZE_TOKEN,
+        "text_size": _aux_text_size(),
     }
     if body_i18n is not None:
         markdown_el["i18n_content"] = body_i18n
@@ -678,7 +713,7 @@ def _build_error_panel(error_message: str, *, is_aborted: bool = False, expanded
             "content": en_label,
             "i18n_content": _i18n(en_label, zh_label),
             "text_color": "red" if not is_aborted else "orange",
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         },
         elements=[markdown_el],
         vertical_spacing="8px",
@@ -704,7 +739,7 @@ def _build_background_review_panel(messages: list[str], *, expanded: bool = True
             "content": en_title,
             "i18n_content": _i18n(en_title, zh_title),
             "text_color": "grey",
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         },
         elements=children,
     )
@@ -753,7 +788,7 @@ def _build_footer_elements(
             "tag": "markdown",
             "content": en_content,
             "i18n_content": _i18n(en_content, zh_content),
-            "text_size": AUX_TEXT_SIZE_TOKEN,
+            "text_size": _aux_text_size(),
         },
     ]
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.0.20 (2026-10-16)
+
+**卡片自定义字号改完全 opt-in——默认零注入，payload 逐字段还原 v2.0.18（用户反馈手机端字号观感变大）。**
+
+### 背景与处置
+
+- 用户反馈（真飞书手机端）：v2.0.19 字号机制上线后观感变大，要求「默认还是之前那样」，字号配置进 config.yaml 由用户自行开启
+- 根因：v2.0.19 将字号无条件 token 化——`config.style.text_size` 恒注入（默认 answer=normal、aux=notation），与 v2.0.18 的字面值 payload（answer=`normal_v2`、aux=`notation`、config 无 style 段）不逐字节等价；同时 s157/s158 定向样张以 `answer.mobile=x-large` 演示放大档，观感差异被进一步放大
+- 处置（不猜测、主流程解决）：默认路径不再依赖任何「token 值 ≈ 原生观感」的推断——未配置 `card_style` 时卡片 payload 与 v2.0.18 逐字段一致，观感零变化的保证是**结构性的**（同 payload ⇒ 同渲染）；配置后才切 token 路径（s157/s157b 真飞书探针已定案 CardKit 接受）
+
+### 变更
+
+- `Config.card_text_sizes`（config/reader.py）：完全 opt-in。未配置/空配置/畸形配置 → `{}`（零注入）；配置后 answer/aux 两组各 `{default, pc, mobile}` 三档，**未写的组/档位回落 v2.0.18 字面值枚举（answer→normal_v2、aux→notation）**——只改用户写的档位，且 `style.text_size` 中两个 token 恒有完整定义（元素引用不落空）
+- `cardkit/elements.py`：新增 `_text_sizes_enabled` / `_answer_text_size` / `_aux_text_size`（配置启用 → `cus-ans`/`cus-aux` token；默认 → v2.0.18 字面值 `normal_v2`/`notation`）与 `ANSWER_TEXT_SIZE_FALLBACK` / `AUX_TEXT_SIZE_FALLBACK` 常量；22 处 `text_size` 调用点改经助手取值；`_card_text_style_config()` 未配置时返回 `{}`（config 不含 style 键）
+- `cardkit/cards.py` / `cardkit/special.py` / `composer/finalize.py`：调用点同步（含折叠提示模板与收口重建面板标题——同一次构建内取值，流式期与收口期开关状态一致）；style 注入随配置开关
+- 配置样例（config.yaml 的 `feishu_streaming:` 段下，不配置则完全维持旧观感）：
+
+```yaml
+feishu_streaming:
+  card_style:
+    text_size:
+      answer:
+        mobile: x-large   # 仅手机端正文放大（18px），桌面/老客户端保持 v2.0.18 观感
+      aux:
+        mobile: small     # 辅助行（面板思考/工具行/警告/页脚）同理
+```
+
+- 测试：`test_v219_footer_reasoning_font.py` 30 用例——字号段重写为 opt-in 语义（默认零注入断言 / 配置注入断言 / 部分组档位回落断言），新增 `_set_raw` 助手隔离 `_make_config` 直接赋值 `_raw` 的用例间污染；存量 3 处 aux token 断言回退 `notation` 字面值（test_v210/test_v212）
+- 配置兼容：v2.0.19 文档中的 `card_style.text_size` 配置语法不变，仅默认语义由「恒注入（normal/notation）」改为「零注入（未配置时）」；服务器未配置 card_style → 部署后生产观感即刻恢复 v2.0.18
+
 ## v2.0.19 (2026-10-16)
 
 **footer reasoning 等级字段 + 卡片自定义字号（card_style.text_size）+ 三项用户需求可行性定案。**

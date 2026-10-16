@@ -57,8 +57,8 @@ gateway:
 | `card_ttl_sec` | int | `600` | 卡片会话 TTL（秒），超时自动回收 |
 | `footer.show_label` | bool | `false` | footer 标签显示 |
 | `footer.fields` | list | 见说明 | 页脚字段行（`[["status","elapsed","model"]]` 语法，V1 兼容单层列表）；支持字段 `status/elapsed/model/cost/tokens/cache/reasoning`（无值字段自动省略）。`reasoning`（v2.0.19）= 推理等级，需 hermes config `display.show_reasoning: true` 且 `agent.reasoning_effort` 有效（经官方解析器 `resolve_reasoning_config`）；默认字段在条件满足时自动追加，显式配置时不干预 |
-| `card_style.text_size.answer` | map | `normal` 三档 | v2.0.19 正文（answer 元素）字号：`{default, pc, mobile}` 三档；值域官方 13 档 token（heading-0/heading-1/…/normal/notation/xxxx-large/…/x-small），非法值回落 normal。落卡为 `config.style.text_size.cus-ans`（s157 真飞书探针定案 CardKit 接受） |
-| `card_style.text_size.aux` | map | `notation` 三档 | v2.0.19 辅助行字号（面板思考/工具行/警告/页脚/折叠提示），同上三档结构，落卡 token `cus-aux` |
+| `card_style.text_size.answer` | map | 未配置（零注入） | v2.0.20 正文（answer 元素）字号，完全 opt-in：配置后按 `{default, pc, mobile}` 三档生效，未写的组/档位回落 v2.0.18 字面值（answer→`normal_v2`、aux→`notation`）；值域官方 13 档 token（heading-0/heading-1/…/normal/notation/xxxx-large/…/x-small），非法值回落 normal。落卡为 `config.style.text_size.cus-ans`（s157 真飞书探针定案 CardKit 接受）；未配置时不注入 `config.style`，payload 与 v2.0.18 逐字段一致 |
+| `card_style.text_size.aux` | map | 未配置（零注入） | v2.0.20 辅助行字号（面板思考/工具行/警告/页脚/折叠提示），同上三档结构，未写档位回落 `notation`，落卡 token `cus-aux` |
 
 ## 5. 出站帧契约（适配器入口）
 

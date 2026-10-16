@@ -139,8 +139,8 @@ async def _reseal_panel(
     from ..cardkit.cards import _apply_panel_title, _render_status_children
     from ..cardkit.elements import (
         ANSWER_ELEMENT_ID,
-        AUX_TEXT_SIZE_TOKEN,
         UNIFIED_PANEL_ELEMENT_ID,
+        _aux_text_size,
         _collapsible_panel,
     )
     from ..cardkit.i18n import _T, _i18n
@@ -162,8 +162,9 @@ async def _reseal_panel(
         "content": en_title,
         "i18n_content": _i18n(en_title, zh_title),
         "text_color": "grey",
-        # v2.0.19：字号统一走自定义 token（与流式期面板标题一致，收口重建不改观感）。
-        "text_size": AUX_TEXT_SIZE_TOKEN,
+        # v2.0.20：card_style 已配置 → token；未配置 → v2.0.18 字面值 notation
+        # （与流式期面板标题一致，收口重建不改观感）。
+        "text_size": _aux_text_size(),
     }
     panel = _collapsible_panel(expanded=expanded, title_el=title_el, elements=final_children)
     if panel_title:

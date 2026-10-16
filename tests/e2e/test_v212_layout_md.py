@@ -21,7 +21,6 @@ from pathlib import Path
 import hermes_lark_streaming
 from hermes_lark_streaming.cardkit.cards import _render_status_children
 from hermes_lark_streaming.cardkit.elements import (
-    AUX_TEXT_SIZE_TOKEN,
     _build_reasoning_body_detail,
     _build_tool_step_detail,
 )
@@ -75,7 +74,7 @@ class TestReasoningBodyDetail:
         assert el["margin"] == "0px 0px 0px 22px"
         text = el["text"]
         assert text["tag"] == "lark_md"
-        assert text["text_size"] == AUX_TEXT_SIZE_TOKEN
+        assert text["text_size"] == "notation"  # v2.0.20：默认 = v2.0.18 字面值
         assert "text_color" not in text  # text_color 仅 plain_text 支持，不落在 lark_md
         assert text["content"] == "<font color='grey'>**Planning tool use**</font>"
 
@@ -103,7 +102,7 @@ class TestReasoningBodyDetail:
         """缩进（22px）与字号（notation）与 V1/V2 灰字视觉一致。"""
         el = _build_reasoning_body_detail("x")
         assert el["margin"] == "0px 0px 0px 22px"
-        assert el["text"]["text_size"] == AUX_TEXT_SIZE_TOKEN
+        assert el["text"]["text_size"] == "notation"
 
 
 class TestToolPreviewStaysPlainText:
