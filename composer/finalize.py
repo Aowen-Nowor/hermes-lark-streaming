@@ -65,6 +65,13 @@ async def _seal_footer(
 
     duration_sec = max(0.0, time.monotonic() - getattr(state, "created_at", time.monotonic()))
     footer_data = {"duration": duration_sec, "model": model_name or ""}
+    # v2.0.19：footer reasoning 等级（display.show_reasoning: true 且
+    # reasoning_effort 有效时供值；渲染层无值自动跳过该字段）。
+    from ..config import Config
+
+    reasoning_level = Config().footer_reasoning_level
+    if reasoning_level:
+        footer_data["reasoning_effort"] = reasoning_level
     elements = _build_footer_elements(
         footer_data,
         fields=footer_fields or _DEFAULT_FOOTER_FIELDS,
@@ -132,6 +139,7 @@ async def _reseal_panel(
     from ..cardkit.cards import _apply_panel_title, _render_status_children
     from ..cardkit.elements import (
         ANSWER_ELEMENT_ID,
+        AUX_TEXT_SIZE_TOKEN,
         UNIFIED_PANEL_ELEMENT_ID,
         _collapsible_panel,
     )
@@ -154,7 +162,8 @@ async def _reseal_panel(
         "content": en_title,
         "i18n_content": _i18n(en_title, zh_title),
         "text_color": "grey",
-        "text_size": "notation",
+        # v2.0.19：字号统一走自定义 token（与流式期面板标题一致，收口重建不改观感）。
+        "text_size": AUX_TEXT_SIZE_TOKEN,
     }
     panel = _collapsible_panel(expanded=expanded, title_el=title_el, elements=final_children)
     if panel_title:

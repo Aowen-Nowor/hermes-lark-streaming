@@ -41,6 +41,9 @@ __all__ = [
     '_build_footer_elements',
     'build_preservative_seal_actions',
     '_render_footer_field',
+    'ANSWER_TEXT_SIZE_TOKEN',
+    'AUX_TEXT_SIZE_TOKEN',
+    '_card_text_style_config',
     '_compact',
     '_format_elapsed',
     '_format_duration_label',
@@ -83,6 +86,39 @@ UNIFIED_PANEL_ELEMENT_ID = "agent_process_panel"
 _LOADING_ELEMENT_ID = "loading_icon"
 _LOADING_HINT_ELEMENT_ID = "context_loading_hint"
 _LOADING_IMG_KEY = "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
+
+# ── v2.0.19 自定义字号 token（config.style.text_size 定义，元素引用）───────
+# s157/s157b 真飞书探针定案：CardKit 实体卡接受 config.style.text_size，
+# 元素 text_size 引用自定义 token（含流式 stream_element/batch_update 通道）。
+# token 名固定，三档值由 Config.card_text_sizes 供（默认 answer=normal、aux=notation，
+# 与 v2.0.18 及之前的 normal_v2/notation 观感对齐）。
+ANSWER_TEXT_SIZE_TOKEN = "cus-ans"
+AUX_TEXT_SIZE_TOKEN = "cus-aux"
+
+# footer reasoning 等级中文映射（英文行显示官方原值；未知等级双语显示原值）。
+# 官方值域见 hermes_constants.VALID_REASONING_EFFORTS。
+_REASONING_LEVEL_ZH: dict[str, str] = {
+    "minimal": "极简",
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "xhigh": "极高",
+    "max": "最高",
+    "ultra": "极致",
+}
+
+
+def _card_text_style_config() -> dict:
+    """v2.0.19：骨架卡 ``config.style`` 注入体（answer/aux 两 token 三档值）.
+
+    值来自 ``Config.card_text_sizes``（card_style.text_size 配置）；非 hermes
+    环境（如测试沙箱）Config 亦可加载（空配置走默认值），不依赖 hermes_constants。
+    """
+    from ..config import Config
+
+    sizes = Config().card_text_sizes
+    return {"style": {"text_size": {ANSWER_TEXT_SIZE_TOKEN: sizes["answer"],
+                                     AUX_TEXT_SIZE_TOKEN: sizes["aux"]}}}
 
 def _count_tag_objects(obj: Any) -> int:
     """Recursively count JSON objects with tag key. Feishu Card 2.0 caps at 200 elements."""
@@ -133,7 +169,7 @@ def _streaming_element(content: str = "", *, element_id: str = STREAMING_ELEMENT
         "tag": "markdown",
         "content": content,
         "text_align": "left",
-        "text_size": "normal_v2",
+        "text_size": ANSWER_TEXT_SIZE_TOKEN,
         "margin": "0px 0px 0px 0px",
         "element_id": element_id,
     }
@@ -181,7 +217,7 @@ def _build_unified_panel_placeholder(*, expanded: bool = False) -> dict:
             "content": en_title,
             "i18n_content": _i18n(en_title, zh_title),
             "text_color": "grey",
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         },
         elements=[{"tag": "markdown", "content": " "}],
     )
@@ -224,7 +260,7 @@ def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = 
         "content": en_full,
         "i18n_content": _i18n(en_full, zh_full),
         "text_color": "grey",
-        "text_size": "notation",
+        "text_size": AUX_TEXT_SIZE_TOKEN,
     }
 
     # Header structure (matches _collapsible_panel; icon_position=right → grey).
@@ -306,7 +342,7 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
             "tag": "markdown",
             "content": zh_hint,
             "i18n_content": _i18n(en_hint, zh_hint),
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         })
 
     if panel_events:
@@ -324,7 +360,7 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
                         "text": {
                             "tag": "lark_md",
                             "content": _truncate_reasoning(round_.text),
-                            "text_size": "notation",
+                            "text_size": AUX_TEXT_SIZE_TOKEN,
                         },
                     })
             elif kind == "tool" and idx < len(tool_steps):
@@ -346,7 +382,7 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
                     "text": {
                         "tag": "lark_md",
                         "content": _truncate_reasoning(current_reasoning_text),
-                        "text_size": "notation",
+                        "text_size": AUX_TEXT_SIZE_TOKEN,
                     },
                 })
 
@@ -372,7 +408,7 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
                         "text": {
                             "tag": "lark_md",
                             "content": _truncate_reasoning(round_.text),
-                            "text_size": "notation",
+                            "text_size": AUX_TEXT_SIZE_TOKEN,
                         },
                     })
 
@@ -389,7 +425,7 @@ def build_panel_children(*, reasoning_rounds: list, current_reasoning_text: str 
                         "text": {
                             "tag": "lark_md",
                             "content": _truncate_reasoning(current_reasoning_text),
-                            "text_size": "notation",
+                            "text_size": AUX_TEXT_SIZE_TOKEN,
                         },
                     })
 
@@ -457,7 +493,7 @@ def _build_tool_step_title(step: dict) -> dict:
         "text": {
             "tag": "lark_md",
             "content": content,
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         },
     }
 
@@ -488,7 +524,7 @@ def _build_reasoning_round_title(round_index: int, elapsed_ms: float, finalized:
         "text": {
             "tag": "lark_md",
             "content": content,
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         },
     }
 
@@ -503,7 +539,7 @@ def _build_tool_step_detail(step: dict) -> dict | None:
             "tag": "plain_text",
             "content": detail,
             "text_color": "grey",
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         },
     }
 
@@ -536,7 +572,7 @@ def _build_reasoning_body_detail(body: str) -> dict | None:
         "text": {
             "tag": "lark_md",
             "content": wrapped,
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         },
     }
 
@@ -567,7 +603,7 @@ def _build_tool_step_output(step: dict) -> dict | None:
         "text": {
             "tag": "lark_md",
             "content": "\n".join(lines),
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         },
     }
 
@@ -630,7 +666,7 @@ def _build_error_panel(error_message: str, *, is_aborted: bool = False, expanded
     markdown_el: dict[str, Any] = {
         "tag": "markdown",
         "content": body_content,
-        "text_size": "notation",
+        "text_size": AUX_TEXT_SIZE_TOKEN,
     }
     if body_i18n is not None:
         markdown_el["i18n_content"] = body_i18n
@@ -642,7 +678,7 @@ def _build_error_panel(error_message: str, *, is_aborted: bool = False, expanded
             "content": en_label,
             "i18n_content": _i18n(en_label, zh_label),
             "text_color": "red" if not is_aborted else "orange",
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         },
         elements=[markdown_el],
         vertical_spacing="8px",
@@ -668,7 +704,7 @@ def _build_background_review_panel(messages: list[str], *, expanded: bool = True
             "content": en_title,
             "i18n_content": _i18n(en_title, zh_title),
             "text_color": "grey",
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         },
         elements=children,
     )
@@ -717,7 +753,7 @@ def _build_footer_elements(
             "tag": "markdown",
             "content": en_content,
             "i18n_content": _i18n(en_content, zh_content),
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         },
     ]
 
@@ -918,6 +954,18 @@ def _render_footer_field(
                 return f"Cost {en_val.format(val.lstrip('$'))}", f"费用 {zh_val.format(val.lstrip('$'))}"
             return en_val.format(val.lstrip('$')), zh_val.format(val.lstrip('$'))
         return None, None
+
+    if name == "reasoning":
+        # v2.0.19：推理等级（display.show_reasoning: true 且 reasoning_effort 有效时
+        # 由 Config.footer_reasoning_level 供值）。英文行显示官方等级原值，
+        # 中文行映射常用等级；未知等级双语显示原值（不猜测语义）。
+        v = str(data.get("reasoning_effort") or "").strip()
+        if not v:
+            return None, None
+        zh_val = _REASONING_LEVEL_ZH.get(v, v)
+        if show_label:
+            return f"Reasoning {v}", f"思考 {zh_val}"
+        return v, zh_val
 
     return None, None
 

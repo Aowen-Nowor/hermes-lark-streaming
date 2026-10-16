@@ -1,5 +1,53 @@
 # Changelog
 
+## v2.0.19 (2026-10-16)
+
+**footer reasoning 等级字段 + 卡片自定义字号（card_style.text_size）+ 三项用户需求可行性定案。**
+
+### 用户三需求处置（本轮取证→实施闭环）
+
+| 需求 | 处置 |
+|---|---|
+| 1a. footer 对齐 V1 字段（cost/compression_exhausted/cache/tokens/context/api_calls/history_offset） | **架构不可达，按用户原则放弃**：V1 数据源 = patch gateway run_agent 完成点截获 turn result + agent 实例属性（v1.8.1 patching/gateway.py:434）；v2.0.18 已取证 V2 官方契约 `send_stream_frame` 仅传文本、官方 hook `post_llm_call` payload 无 usage、v0.22.2 result 亦不含 input/output_tokens 等。渲染层 6 字段框架保留（tokens/cache/cost 未来数据通道开放后自动生效） |
+| 1b. footer 显示推理等级 | **已实施**（见下） |
+| 2. 卡片复制 | **平台能力边界，零代码**：飞书卡片 JSON 2.0 无文本可选中/复制配置（官方组件文档全文核实）；「原样复制」最接近的转发 `enable_forward` 官方默认 true（V2 卡未关闭） |
+| 3. 卡片字体大小适配 | **已实施**（见下） |
+
+### footer reasoning 字段
+
+- 配置语义：`display.show_reasoning: true`（hermes config.yaml）且 `agent.reasoning_effort` 解析出有效等级时，页脚 `reasoning` 字段显示等级
+- 等级值经官方解析器 `hermes_constants.resolve_reasoning_config`（per-model override > 全局，与 agent 行为一致）；未配置/禁用/非 hermes 环境 → 字段自动省略
+- 默认字段自动追加 `reasoning`（用户未显式配置 `footer.fields` 时）；显式配置时不干预，可在 fields 列表自行添加 `"reasoning"`
+- 渲染：英文行显示官方等级原值（minimal/low/medium/high/xhigh/max/ultra），中文行映射（极简/低/中/高/极高/最高/极致）；未知等级双语显示原值
+- 已知边界：`/reasoning` 运行时命令改会话级值，footer 读 config.yaml 全局值（帧契约无会话元数据）
+
+### 卡片自定义字号（card_style.text_size）
+
+- 官方机制（飞书卡片 2.0 文档）：`config.style.text_size` 定义自定义字号对象（`{default, pc, mobile}` 三档，老客户端兜底/桌面/移动），组件 `text_size` 引用 token 名；值域 13 档（heading-0 30px ~ x-small 10px），非法值回落 normal
+- 插件配置（`feishu_streaming` 节）：
+
+```yaml
+card_style:
+  text_size:
+    answer:            # 正文（answer 元素）
+      default: normal  # 老客户端兜底（14px）
+      pc: normal       # 桌面端
+      mobile: normal   # 移动端（如 "x-large" 20px 提升手机可读性）
+    aux:               # 辅助行（面板思考/工具行/警告/页脚）
+      default: notation
+      pc: notation
+      mobile: notation
+```
+
+- token 名固定 `cus-ans`（answer）/`cus-aux`（辅助行），三档值由配置供；默认与 v2.0.18 及之前的 `normal_v2`/`notation` 观感对齐
+- **真飞书探针定案（s157/s157b，2026-10-16）**：CardKit 实体卡接受 `config.style.text_size`；元素引用自定义 token 合法（含 `cardkit_stream_element` 流式更新与 `batch_update` add_elements 通道——字号在骨架期设置，流式只更新 content，全程保持）；样张卡已发 E2E 测试群供移动端肉眼对照
+- 覆盖面：回合卡（answer/面板行/轮次标题/工具行/警告行/页脚/折叠提示/面板收口重建）+ gateway 内部消息卡状态行
+
+### 测试
+
+- 新增 `tests/e2e/test_v219_footer_reasoning_font.py` 28 用例（footer_reasoning_level 数据层 8/footer_fields 追加 4/渲染层 6/card_text_sizes 3/style 注入与 token 引用 5/finalize 页脚接线 2）；存量 3 处 notation 断言更新为 aux token
+- 全量 672/672（v2.0.18 基线 644 + 28）
+
 ## v2.0.18 (2026-10-16)
 
 **hermes-agent v0.22.2 兼容性验证（零代码缺陷定案）+ V1 清理二次复审收尾 + PM 依赖声明。** 纯文档/manifest 版本，无代码逻辑变化。

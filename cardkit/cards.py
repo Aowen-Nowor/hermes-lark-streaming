@@ -10,12 +10,14 @@ from .elements import (
     ANSWER_ELEMENT_ID,
     STREAMING_ELEMENT_ID,
     UNIFIED_PANEL_ELEMENT_ID,
+    AUX_TEXT_SIZE_TOKEN,
     _build_footer_elements,
     _build_reasoning_body_detail,
     _build_reasoning_round_title,
     _build_tool_step_detail,
     _build_tool_step_title,
     _build_unified_panel_placeholder,
+    _card_text_style_config,
     _collapsible_panel,
     _count_tag_objects,
     _loading_element,
@@ -242,7 +244,7 @@ def _build_notice_row(icon_token: str, body: str) -> dict[str, Any]:
             "tag": "plain_text",
             "content": body,
             "text_color": color,
-            "text_size": "notation",
+            "text_size": AUX_TEXT_SIZE_TOKEN,
         },
     }
 
@@ -291,7 +293,7 @@ def _enforce_card_element_limit(
         if isinstance(child.get("content"), str) and "已折叠" in child["content"]:
             hint_idx = i
             break
-    _HINT_TEMPLATE = {"tag": "markdown", "content": "⚡ 还有 0 项已折叠", "text_size": "notation"}
+    _HINT_TEMPLATE = {"tag": "markdown", "content": "⚡ 还有 0 项已折叠", "text_size": AUX_TEXT_SIZE_TOKEN}
     _HINT_TAG_COUNT = _count_tag_objects(_HINT_TEMPLATE)  # typically 1
     if hint_idx is None:
         total += _HINT_TAG_COUNT  # Reserve exact space for the new collapse hint
@@ -337,7 +339,7 @@ def _enforce_card_element_limit(
             children.insert(0, {
                 "tag": "markdown",
                 "content": f"⚡ 还有 {trimmed_count} 项已折叠",
-                "text_size": "notation",
+                "text_size": AUX_TEXT_SIZE_TOKEN,
             })
 
     # Update panel children in the card
@@ -407,6 +409,8 @@ def build_streaming_card_v2(
                 "print_step": {"default": print_step},
                 "print_strategy": print_strategy,
             },
+            # v2.0.19：自定义字号 token（s157 探针定案 CardKit 接受 config.style）。
+            **_card_text_style_config(),
             "locales": _LOCALES,
             "summary": {
                 "content": _T["processing"][0],

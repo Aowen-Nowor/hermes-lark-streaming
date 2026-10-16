@@ -28,6 +28,8 @@ _T: dict[str, tuple[str, str]] = {
     "error_panel": ("Error", "错误信息"),
     "interrupt_panel": ("Interrupted", "中断信息"),
     "compression_exhausted": ("⚠ Context Full", "⚠ 上下文已满"),
+    # v2.0.19 footer reasoning 等级字段（display.show_reasoning: true 时随 footer_fields 启用）
+    "reasoning": ("Reasoning {}", "思考 {}"),
     "cache": ("Cache {}", "缓存 {}"),
     "bg_review_panel": ("Review", "审查"),
     "partial_continues": ("Continues in next message", "内容未完，继续在下一条消息"),

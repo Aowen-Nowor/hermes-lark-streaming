@@ -25,6 +25,7 @@ import asyncio
 
 import pytest
 from hermes_lark_streaming.cardkit.cards import _render_status_children
+from hermes_lark_streaming.cardkit.elements import AUX_TEXT_SIZE_TOKEN
 from hermes_lark_streaming.cardkit.tool_icons import (
     _NOTICE_ICONS,
     _TOOL_ICONS,
@@ -131,7 +132,7 @@ class TestNoticeRows:
         assert rows[0]["icon"]["token"] == "time_outlined"
         assert rows[0]["icon"]["color"] == "grey"
         assert rows[0]["text"]["text_color"] == "grey"
-        assert rows[0]["text"]["text_size"] == "notation"
+        assert rows[0]["text"]["text_size"] == AUX_TEXT_SIZE_TOKEN
         assert "rate-limiting requests" in rows[0]["text"]["content"]
         assert "⏱" not in rows[0]["text"]["content"]
 

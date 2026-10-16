@@ -118,6 +118,55 @@ class Config:
         return fields
 
     @property
+    def footer_reasoning_level(self) -> str:
+        """v2.0.19：footer 推理等级显示值（"" = 不显示）.
+
+        语义（用户需求）：``display.show_reasoning: true`` 且
+        ``agent.reasoning_effort`` 解析出有效等级时，footer 的 ``reasoning``
+        字段显示等级。等级值用官方解析器 ``hermes_constants.resolve_reasoning_config``
+        （per-model override > 全局，与 agent 行为一致）；非 hermes 环境
+        （如测试沙箱）import 失败 → ``""``。
+        未配置/禁用/等级为空 → ``""``（显示层自动跳过该字段）。
+        """
+        raw = self._load()
+        display = raw.get("display")
+        if not (isinstance(display, dict) and _to_bool(display.get("show_reasoning", False))):
+            return ""
+        try:
+            from hermes_constants import resolve_reasoning_config
+        except ImportError:
+            return ""
+        rc = resolve_reasoning_config(raw, "")
+        if not isinstance(rc, dict) or not rc.get("enabled"):
+            return ""
+        return str(rc.get("effort") or "").strip()
+
+    @property
+    def card_text_sizes(self) -> dict[str, dict[str, str]]:
+        """v2.0.19：``card_style.text_size`` 自定义字号（answer/aux 两组，各 default/pc/mobile 三档）.
+
+        值域为飞书卡片 2.0 官方 13 档 token（heading-0 30px ~ x-small 10px），
+        非法值由飞书客户端回落 normal。默认 answer=normal（14px）、
+        aux=notation（12px）——与 v2.0.18 及之前的 normal_v2/notation 观感对齐。
+        """
+        sec = self._plugin_sec()
+        style = sec.get("card_style")
+        if not isinstance(style, dict):
+            style = {}
+        ts = style.get("text_size")
+        if not isinstance(ts, dict):
+            ts = {}
+        out: dict[str, dict[str, str]] = {}
+        for key, defaults in (
+            ("answer", {"default": "normal", "pc": "normal", "mobile": "normal"}),
+            ("aux", {"default": "notation", "pc": "notation", "mobile": "notation"}),
+        ):
+            group = ts.get(key)
+            group = group if isinstance(group, dict) else {}
+            out[key] = {slot: str(group.get(slot, dv) or dv) for slot, dv in defaults.items()}
+        return out
+
+    @property
     def footer_show_label(self) -> bool:
         sec = self._plugin_sec()
         footer = sec.get("footer", {})
@@ -149,9 +198,13 @@ class Config:
         sec = self._plugin_sec()
         return _to_bool(sec.get("oneshot_cards", True), default=True)
 
-    @staticmethod
-    def _default_footer_fields() -> list[list[str]]:
-        return [["status", "elapsed", "model", "cost", "compression_exhausted"]]
+    def _default_footer_fields(self) -> list[list[str]]:
+        # v2.0.19：display.show_reasoning: true 且 reasoning_effort 有效时，默认字段
+        # 自动追加 reasoning；用户显式配置 footer.fields 时不干预（自行添加 "reasoning"）。
+        base = ["status", "elapsed", "model", "cost", "compression_exhausted"]
+        if self.footer_reasoning_level:
+            base.append("reasoning")
+        return [base]
 
     @property
     def env_app_id(self) -> str:
