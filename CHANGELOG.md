@@ -1,5 +1,50 @@
 # Changelog
 
+## v2.0.18 (2026-10-16)
+
+**hermes-agent v0.22.2 兼容性验证（零代码缺陷定案）+ V1 清理二次复审收尾 + PM 依赖声明。** 纯文档/manifest 版本，无代码逻辑变化。
+
+### 背景
+
+用户三项指令：①V1 遗留代码再审（Task 24 后二次复审）；②hermes agent 新版本（v0.22.2，2026-10-15 发布，"The Threshold Release" v0.22.0 起 ~6,080 PRs / 源码 −34%）兼容性检查；③三项流式体验问题（推理不流式 / 工具调用闪现正文后被覆盖 / 流式一段一段卡顿）。
+
+### 兼容性验证（服务器 /tmp/hermes-agent-0.22.2 解压 diff + 实测 import）
+
+| 接口面 | 结论 |
+|---|---|
+| `FeishuAdapter` 基类（导入期绑定） | 方法/类集合零变化；diff 全部为类型注解现代化（`Dict`→`dict`/`List`→`list`）+ 等价重写（`setattr`→直接赋值、`asyncio.TimeoutError`→`TimeoutError`）+ 3 个新增模块级 helper（不影响类接口） |
+| native streaming 契约 | `stream_consumer_transport.py` / `stream_consumer.py` 符号集合零变化；`_compose_frame_content` 复合帧格式函数体逐字节一致（`"\n\n---\n".join(p for p in (answer, progress) if p)`） |
+| reasoning hook 契约 | `plugin_stream_hooks.py` / `stream_delivery.py` 符号零变化（`on_stream_delta kind="reasoning"` + `_fire_reasoning_delta` + `<think>` inline fallback 全保留） |
+| cron / relay / 子代理通知 | `turn_response_intake.py` / `scheduler_delivery.py` / `delegate_tool_progress.py` 符号零变化 |
+| 插件注册协议 | `gateway/platform_registry.py` 零变化；主 import 路径 `plugins.platforms.feishu.adapter` 在 v0.22.2 源码实测 import OK（官方已删 `hermes.*` 兼容导入层，但插件三候选首路径即主路径，不受影响） |
+| Python / 依赖 | `requires-python = ">=3.11,<3.15"` 不变（服务器 3.14 在区间内） |
+
+**官方 release notes 相关项**：feishu 平台零变更提及；「Plugins declare Python dependencies — conflicts are refused, updates disable a plugin that no longer fits」（PM 契约收紧）→ 本版补声明（见下）。**升级建议**：v0.22.2 接口面全兼容可升级，但建议独立变更窗口（大版本 + PM 机制变化），不与本插件 UX 迭代混车。
+
+| 类型 | 变更 | 说明 |
+|---|---|---|
+| 兼容 | `plugin.yaml` 补 `python_dependencies`（PEP 508） | `lark-oapi>=1.6.4` / `PyYAML>=6.0`，与 pyproject `[project].dependencies` 逐字同步——v0.22.x PM 统一解析插件依赖，v2.0.13 部署事故（PM 环境漂移缺 yaml）的机制化收尾 |
+| 清理 | `docs/API.md` 删 4 行幽灵配置键 | `panel_expanded` / `flush_interval_ms` / `max_tool_steps` / `max_reasoning_rounds`——v2.0.17 已删的 V1 死键，文档表漏同步（Task 24 复审遗漏项） |
+| 文档 | README 徽章 | tests 649→644（Task 24 后实际数）；hermes-agent ≤0.21→≤0.22（本轮验证） |
+
+### V1 清理二次复审定案（Task 24 后交叉验证）
+
+代码层**零残留**（AST 扫描 + 12 属性防回引测试有效）；新发现仅文档层 2 处（上表 API.md 幽灵行 + README 徽章过时）；`scripts/notify_feishu.py` 虽 v1.x 血统但被 `.github/workflows/sync-from-gitee.yml:206` 活跃引用（CI 通知组件），保留；`aowen/__init__.py` 为 /aowen 命令活跃 metrics 层，保留；`card_ttl_sec` 为存活键（`card_duration_sec` 属性的底层键名，历史命名遗留），非幽灵。
+
+### 三项流式体验问题定案（插件层零缺陷，根因全部在上游模型层）
+
+取证：agent.log 回合级时间线（2026-10-16 10:30-10:32「不用检查cron，可以看看系统状态」回合）+ hermes 源码链路追踪 + 拆分器本地复现 + 429/fallback 统计。
+
+| 问题 | 定案 |
+|---|---|
+| 3.1 推理思考首次出现后停住、末尾一并输出 | **根因 = 429 → fallback `sensenova-6.8-flash-lite`（`reasoning_config resolved: None`，无 `reasoning_content` 流）**。面板思考行双通道：①`reasoning_feed`（`on_stream_delta kind="reasoning"`，1.5s/400 字符节流流式）——fallback 模型零事件；②网关 `_relay_thinking`（turn_response_intake.py:115，响应边界一次性 ≤500 字 `💬` 中继）——本就是响应级非流式。429 缓解后 deepseek 回合思考流自动恢复流式。插件侧机制健全无缺陷 |
+| 3.2 工具调用先入面板、又在 answer 闪现、后被覆盖 | **根因 = 模型在 content 中复述工具调用/输出 + cumulative 快照重写（官方 native 设计）**。逐链排除插件缺陷：拆分器对官方复合帧（`_compose_frame_content` 有 `if p` 空段过滤，progress 段全为 emoji 前缀工具行/💬行）拆分正确（本地复现 5 场景验证）；「覆盖」= cumulative 快照语义（真实 delta 到达重写正文）+ `_absorb_status_lines` 的 `_is_answer_duplicate` 仅滤新行设计。fallback 模型行为差异放大体感 |
+| 3.3 流式一段一段卡顿 | **根因 = 上游生成节奏**。实测该回合：fallback 模型 3 次 API 调用各 19.4-24.4s（610/755 tokens ≈ 25-39 tok/s）+ 工具轮次间隔 + 429 时 60s 冷却。native 通道官方「every delta immediately」（stream_consumer.py:735-737，无 edit_interval 限速），插件零节流 |
+
+**共同上游根因与建议**（用户决策项，本轮不动）：429 风暴（tpm/rpm limit，回合首帧即 429，60s 冷却后成功）→ `auxiliary.background_review.max_input_tokens` 可调（每回合后台 review fork 消耗大量 tokens，实测 96K 量级，<=0 禁用）；fallback 链 `sensenova-6.8-flash-lite` 慢且无 reasoning，可评估更优 fallback 型号。
+
+---
+
 ## v2.0.17 (2026-10-14)
 
 **多卡片事故 P0 根治（stream_element 空 content 守卫）+ V1 遗留代码全仓清理（用户指令「保持整个 V2 项目代码干净无冗余」）。**

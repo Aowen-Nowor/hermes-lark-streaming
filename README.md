@@ -4,11 +4,11 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.17-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.18-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
-[![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.21-grey)](https://github.com/NousResearch/hermes-agent)
+[![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.22-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
-[![tests](https://img.shields.io/badge/tests-649%20passed-brightgreen)](#测试与-e2e)
+[![tests](https://img.shields.io/badge/tests-644%20passed-brightgreen)](#测试与-e2e)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
 *回答打字机流式呈现 · 工具与思考实时进面板 · 澄清问题变成可点击卡片 · 全程零 monkey-patch*
