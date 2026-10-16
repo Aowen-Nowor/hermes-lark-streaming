@@ -20,7 +20,6 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-
 from hermes_lark_streaming.cardkit.cards import build_streaming_card_v2
 from hermes_lark_streaming.cardkit.elements import (
     ANSWER_ELEMENT_ID,
@@ -30,9 +29,8 @@ from hermes_lark_streaming.cardkit.elements import (
     _render_footer_field,
 )
 from hermes_lark_streaming.cardkit.special import build_gateway_card
-from hermes_lark_streaming.config import Config
-
 from hermes_lark_streaming.composer.engine import FrameComposer
+from hermes_lark_streaming.config import Config
 
 from .test_v213_native_streaming import _FullClient
 
