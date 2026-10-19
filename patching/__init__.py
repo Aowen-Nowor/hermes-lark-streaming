@@ -112,6 +112,43 @@ _gateway_cards_lock = threading.Lock()
 
 _gw_runner_patched: bool = False
 
+# ── Process-level idempotency (v2.0.1) ──────────────────────────────────────
+# Hermes' plugin loader can import this package more than once in a single
+# process: a slow or timed-out load is retried, and every retry re-imports the
+# plugin and calls register() again. Module-level flags (_gw_runner_patched, the
+# ``apply_patches._applied`` attribute) die with the discarded module object, so
+# a second load re-wraps the SAME Hermes classes — the message pipeline then
+# runs once per wrapper and the user sees one streaming card per load.
+# The marker therefore lives on Hermes' own modules, which survive our reloads.
+_HLS_MARKER = "_hls_runtime_patches_applied"
+_HLS_ANCHOR_MODULES = (
+    "gateway.run",
+    "hermes_cli.plugins",
+    "agent.conversation_loop",
+    "run_agent",
+)
+
+
+def _anchor_modules() -> list:
+    """Hermes modules of the running process, used to store reload-proof markers."""
+    return [
+        mod for mod in (sys.modules.get(name) for name in _HLS_ANCHOR_MODULES)
+        if mod is not None
+    ]
+
+
+def patches_already_applied() -> bool:
+    """True when this process already carries a set of HLS runtime patches."""
+    return any(getattr(mod, _HLS_MARKER, False) for mod in _anchor_modules())
+
+
+def _mark_patches_applied() -> None:
+    for mod in _anchor_modules():
+        try:
+            setattr(mod, _HLS_MARKER, True)
+        except Exception:  # noqa: BLE001 — a module that forbids attributes is not fatal
+            pass
+
 # v1.8.3 (P0): deferred-targets poller state — patch targets that were not
 # yet loaded (non-blocking resolution) at register time get re-applied by
 # _poll_deferred_targets() until complete. See _maybe_start_deferred_poller.
@@ -391,6 +428,16 @@ def apply_patches() -> None:
     """Apply all runtime monkey patches to ``GatewayRunner`` and ``AIAgent``."""
     if getattr(apply_patches, "_applied", False):
         return
+    if patches_already_applied():
+        # v2.0.1: the plugin was imported again in this process (loader retry).
+        # Module-level flags died with the old module; the live patches did not.
+        # Re-applying here would stack a second wrapper on every message.
+        apply_patches._applied = True  # type: ignore[attr-defined]
+        _logger.info(
+            "HLS: runtime patches already active in this process — "
+            "skipping duplicate apply_patches() (plugin re-loaded)"
+        )
+        return
     apply_patches._applied = True  # type: ignore[attr-defined]
 
     _logger.info("hermes-lark-streaming v%s: apply_patches() starting", __version__)
@@ -559,6 +606,10 @@ def apply_patches() -> None:
         need_agent=compat.aiagent_class is None,
         need_hook=not create_adapter_hooked,
     )
+
+    # v2.0.1: record the fact on Hermes' own modules (reload-proof) so a second
+    # import of this plugin in the same process refuses to re-patch.
+    _mark_patches_applied()
 
 def _apply_feishu_adapter_patches(FeishuAdapter, *, is_repatch: bool = False) -> bool:
     """Apply all FeishuAdapter method patches to the given class."""

@@ -196,6 +196,24 @@ def _cleanup_config() -> None:
 
 def register(ctx: "PluginContext") -> None:
     """Register hermes-lark-streaming as a Hermes plugin (applies runtime patches)."""
+    # v2.0.1: Hermes' plugin loader retries a slow / timed-out load, re-importing
+    # this package in the same process. The runtime patches from the first load are
+    # still live (they sit on Hermes' own classes), so a second registration stacks
+    # another wrapper on the message pipeline — the user-visible symptom is one
+    # extra streaming card per retry. Refuse to register twice per process.
+    try:
+        from ..patching import patches_already_applied
+
+        if patches_already_applied():
+            _logger.info(
+                "hermes-lark-streaming v%s: already registered in this process — "
+                "skipping duplicate registration",
+                __version__,
+            )
+            return
+    except Exception:
+        _logger.debug("hermes-lark-streaming: idempotency probe failed", exc_info=True)
+
     # v1.8.0 (P1-1): 依赖健康检测先于一切补丁——07-21 型断连的日志指纹
     # 必须出现在 patch 输出之前，方便运维按时间线定位。
     try:

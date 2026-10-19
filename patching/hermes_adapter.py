@@ -104,7 +104,8 @@ class HermesCompat:
         # 顺序很关键：真身（hermes_plugins.feishu_platform.adapter）优先，确保
         # 如果 deferred loader 已触发，我们能拿到 gateway 实际使用的 class object。
         _feishu_import_paths = [
-            "hermes_plugins.feishu_platform.adapter",  # Hermes v0.17+ (gateway runtime 真身)
+            "hermes_plugins.platforms__feishu.adapter",  # Hermes v0.22+ (platform plugins moved under plugins/platforms/)
+            "hermes_plugins.feishu_platform.adapter",  # Hermes v0.17–v0.21 (gateway runtime 真身)
             "plugins.platforms.feishu.adapter",        # Source path (替身，always available)
             "gateway.platforms.feishu",                # Legacy path (Hermes < v0.17)
         ]
