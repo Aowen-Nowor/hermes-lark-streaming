@@ -188,9 +188,9 @@ class FrameComposer:
             self._gc()
             try:
                 if cls.channel == CH_STREAM:
-                    return await self._on_stream(chat_id, content)
+                    return await self._on_stream(chat_id, content, reply_to=reply_to)
                 if cls.channel == CH_PROGRESS:
-                    return await self._on_progress(chat_id, cls)
+                    return await self._on_progress(chat_id, cls, reply_to=reply_to)
                 if cls.channel == CH_INTERIM:
                     return await self._on_interim(chat_id, content, cls)
                 if cls.channel == CH_FINAL:
@@ -386,6 +386,7 @@ class FrameComposer:
         *,
         finalize: bool = False,
         turn_id: str | None = None,
+        reply_to: str | None = None,
     ) -> bool:
         """hermes native streaming 帧（adapter.send_stream_frame 委托入口）.
 
@@ -430,7 +431,7 @@ class FrameComposer:
                     if st is None:
                         # 终帧无活跃卡（上轮已封/状态被清理）：建卡再封——
                         # 快照即终值，内容永不丢红线。
-                        await self._create_card(chat_id, answer)
+                        await self._create_card(chat_id, answer, reply_to=reply_to)
                         st = self._states.get(chat_id)
                         if st is None:  # pragma: no cover — create 失败已抛异常
                             return False
@@ -440,7 +441,7 @@ class FrameComposer:
                 if st is None:
                     # 种子帧/首内容帧：建卡（暂存行并入首卡面板；answer 空则
                     # 只建骨架不写 answer 元素——_create_card 内已处理）。
-                    await self._create_card(chat_id, answer)
+                    await self._create_card(chat_id, answer, reply_to=reply_to)
                 else:
                     st.answer_text = answer
                     await self._stream_answer(st)
@@ -468,16 +469,16 @@ class FrameComposer:
         st.line_times = new_times[-12:]
         await self._patch_status(st)
 
-    async def _on_stream(self, chat_id: str, content: str) -> SendResult | None:
+    async def _on_stream(self, chat_id: str, content: str, *, reply_to: str | None = None) -> SendResult | None:
         st = self.active_state(chat_id)
         if st is None:
-            return await self._create_card(chat_id, content)
+            return await self._create_card(chat_id, content, reply_to=reply_to)
         # 已有活跃卡片：hermes 分段发送 → 追加段落
         st.answer_text = (st.answer_text + "\n\n" + content).strip()
         await self._stream_answer(st)
         return SendResult(success=True, message_id=st.card_message_id)
 
-    async def _create_card(self, chat_id: str, content: str) -> SendResult | None:
+    async def _create_card(self, chat_id: str, content: str, *, reply_to: str | None = None) -> SendResult | None:
         client = self._get_client()
         if client is None:
             return None
@@ -505,7 +506,25 @@ class FrameComposer:
             status_times=[time.monotonic()] * len(pending),
         )
         card_id = await client.cardkit_create(card)
-        message_id = await client.send_card_by_id_to_chat(chat_id, card_id)
+        # v2.0.22：卡片回复引用触发消息（用户验收：私聊/群聊都不知回复哪条）。
+        # V1 全程 reply 发卡（_reply_anchor_for_event）；V2 曾丢弃 reply_to 直发。
+        # hermes 官方默认锚点 = 触发消息 message_id（base.py:180），cron/后台
+        # 投递锚点是合成 task_id（非 om_）→ reply API 必败（99992354，V1
+        # issue #18-3 铁证）→ 非 om_ 直发。reply 失败（消息被删/非法）降级
+        # 直发——内容永不丢红线。流式更新按 card_id 走，与消息发送方式无关。
+        anchor = (reply_to or "").strip()
+        message_id: str | None = None
+        if anchor.startswith("om_"):
+            try:
+                message_id = await client.reply_card_by_id(anchor, card_id)
+            except Exception:
+                _logger.warning(
+                    "composer: reply card failed (anchor=%s) — fallback to direct send",
+                    anchor[:20], exc_info=True,
+                )
+                message_id = None
+        if not message_id:
+            message_id = await client.send_card_by_id_to_chat(chat_id, card_id)
         # 复用占位/上一 turn 状态对象（保留注册表连续性），升级为活跃卡片。
         # 注意必须重置终态旗标：同 chat 连续 turn 时 prev 可能是上一 turn 的
         # finalized 状态，不重置会导致第 2 turn active_state 恒 None（重复建卡）。
@@ -570,7 +589,7 @@ class FrameComposer:
             what="stream:answer",
         )
 
-    async def _on_progress(self, chat_id: str, cls: ClassifyResult) -> SendResult | None:
+    async def _on_progress(self, chat_id: str, cls: ClassifyResult, *, reply_to: str | None = None) -> SendResult | None:
         st = self.active_state(chat_id)
         raw = (cls.raw_content or "").strip()
         if st is None:
@@ -589,7 +608,7 @@ class FrameComposer:
             # 留空待流式。仍不回传 message_id：防网关把返回 id 当作进度气泡
             # anchor 反复 edit（v2.0.1 事故预防）。
             try:
-                await self._create_card(chat_id, "")
+                await self._create_card(chat_id, "", reply_to=reply_to)
             except Exception:  # 建卡失败维持暂存语义（TTL 兜底），不阻断
                 _logger.debug(
                     "composer: early card creation failed — staged pending only chat=%s",

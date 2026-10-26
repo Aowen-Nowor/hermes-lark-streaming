@@ -74,6 +74,10 @@ gateway:
 | 长文无标记 | 无标记且 ≥200 字 | 一次性静态卡（send_message 工具族长文），v2.0.14 |
 | 普通消息 | 无标记（<200 字） | 原生路径（继承行为） |
 
+**回复引用（v2.0.22）**：建卡投递时 `reply_to` 锚点为 `om_` 前缀 → 卡片以飞书原生 reply 形态引用触发消息（`reply_card_by_id`，hermes 官方 `_reply_anchor_for_event` 默认锚点 = 触发消息 message_id，私聊/群聊自动生效）；锚点非 `om_`（cron/后台合成 task_id，reply API 必败 99992354）或 reply 失败 → 降级直发（内容永不丢）。流式更新按 card_id 走，与消息发送方式无关。
+
+**连续 terminal 调用（v2.0.22）**：hermes 对 back-to-back terminal 调用省略重复 header（裸围栏块）；面板渲染将裸块归属 terminal，每次调用渲染独立带图标步骤行（`Terminal (xxx ms)`，耗时 = 官方 post_tool_call 钩子实测）。
+
 ## 6. 指令
 
 | 指令 | 说明 |

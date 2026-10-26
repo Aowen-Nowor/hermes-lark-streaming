@@ -197,7 +197,15 @@ def parse_progress_line(content: str) -> tuple[str, str, str]:
             if header:
                 kind, tool, _clean = _parse_single_line(header.splitlines()[0].strip())
                 return ("tool" if kind == "unknown" else kind, tool, text)
-            return "tool", "", text
+            # v2.0.22：裸围栏块（无 header）归属 terminal。铁证：hermes
+            # _progress_terminal_blocks（gateway/run_turn_runner.py:243）仅
+            # terminal 工具产围栏代码块；连续 terminal 调用省略重复 header
+            # （官方注释 back-to-back calls drop the repeated header）→ 生产
+            # 中裸围栏块 100% 是 terminal。此前 tool="" → 渲染无头灰字行、
+            # 耗时钩子（_feed_tool_duration 按工具名匹配）挂不上丢失——用户
+            # 验收「Terminal 为何分两段/命令为何重复」的困惑根源：看不出
+            # 每个裸块是一次独立调用。归属后渲染带图标步骤行 + 耗时可挂。
+            return "tool", "terminal", text
         return _parse_single_line(text)
     except Exception:  # 解析纯装饰，绝不影响渲染（BLE 未启用，noqa 会触发 RUF100）
         _logger.debug("parse_progress_line failed for %r", (content or "")[:50], exc_info=True)

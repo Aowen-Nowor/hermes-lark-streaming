@@ -65,8 +65,12 @@ class TestRealFormats:
         assert "```" in clean  # 保留原文供渲染层取命令
 
     def test_parse_bare_block(self):
-        kind, tool, _ = parse_progress_line(REAL_BARE_BLOCK)
-        assert kind == "tool" and tool == ""  # 裸块：命令行，无工具名
+        # v2.0.22：裸块归属 terminal（hermes _progress_terminal_blocks 仅
+        # terminal 产围栏块；连续调用省略 header）——渲染带图标步骤行、
+        # 耗时钩子可挂载（此前 tool="" 无头灰字、耗时丢失）。
+        kind, tool, clean = parse_progress_line(REAL_BARE_BLOCK)
+        assert (kind, tool) == ("tool", "terminal")
+        assert "```" in clean  # 保留原文供渲染层取命令
 
     def test_parse_verb_lines_zh(self):
         assert parse_progress_line(REAL_VERB_ZH_SEARCH)[:2] == ("tool", "web_search")
@@ -189,10 +193,14 @@ class TestRenderRealFormats:
         assert "💻" not in joined and "```" not in joined
 
     def test_bare_block_renders_command_only(self):
+        # v2.0.22：裸块归属 terminal → 渲染 Terminal 步骤行 + 命令缩进灰字
+        # （此前无头裸灰字——用户看不出是又一次独立调用、耗时挂不上）。
         els = _render_status_children([REAL_BARE_BLOCK])
         pairs = _div_texts(els)
-        assert len(els) == 1 and els[0]["tag"] == "div"
-        assert pairs[0][1] == "second_command --now"
+        assert len(els) == 2 and els[0]["tag"] == "div" and els[1]["tag"] == "div"
+        assert pairs[0] == ("code_outlined", "<font color='green'>**Terminal**</font>")
+        assert pairs[1][1] == "second_command --now"
+        assert els[1]["margin"] == "0px 0px 0px 22px"
 
     def test_verb_line_renders_mapped_tool(self):
         els = _render_status_children([REAL_VERB_ZH_SEARCH])

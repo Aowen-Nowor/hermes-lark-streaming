@@ -451,6 +451,9 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             return await self._composer.handle_stream_frame(
                 chat, text or "", finalize=finalize,
                 turn_id=str(kwargs.get("turn_id") or "") or None,
+                # v2.0.22：种子帧锚点（官方契约种子帧带 reply_to）→ 建卡引用
+                # 触发消息（用户验收：卡片回复没引用是哪条消息）。
+                reply_to=(reply_to or "").strip() or None,
             )
         except Exception:  # 降级红线：native 帧失败回落（BLE 未启用，noqa 触发 RUF100）
             _logger.warning(

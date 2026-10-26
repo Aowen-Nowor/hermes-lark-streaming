@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.0.22 (2026-10-26)
+
+**卡片回复引用触发消息（私聊/群聊）+ 连续 terminal 调用渲染为独立步骤行，702 用例全绿。**
+
+### 背景（用户验收 2026-10-26）
+
+1. **「卡片回复的时候，没有引用是哪条消息」**（私聊和群里两个场景）——V1 全程以触发消息为锚 reply 发卡（`_reply_anchor_for_event`）；V2 的 `composer.handle_send`/`handle_stream_frame` 收下 `reply_to` 后**未接线**，建卡一律 `send_card_by_id_to_chat` 直发，用户看不出卡片在回应哪条提问。
+2. **「Terminal 为何有两段，且有重复 echo」**——取证（2026-10-26 15:07 回合日志）：agent **真实调用了 4 次 terminal**（0.17s/0.60s/1.00s/6.60s，面板 169ms/596ms 与日志精确吻合），**不是显示重复**：前两次调用的脚本各自包含 uptime 命令（先快查、再跑大脚本时又写了一遍，模型行为）；「分两段」= 每次 tool call 一个步骤（hermes 官方语义，耗时来自官方 post_tool_call 钩子实测，V1 同款）。取证同时暴露真缺陷：hermes 对**连续 terminal 调用省略重复 header**（`_progress_terminal_blocks` 官方注释 back-to-back calls drop the repeated header）→ V2 把无头裸围栏块渲染成**无图标灰字行**且**耗时钩子挂不上**（`_feed_tool_duration` 按工具名匹配，裸块 tool=""）——用户看不出每个裸块是一次独立调用，正是困惑根源。
+
+### 变更
+
+| 位置 | 变更 |
+|------|------|
+| composer/engine.py | **reply_to 全链路接线**：`handle_send` 传入 `_on_stream`/`_on_progress`（early-create 占位卡同享）；`handle_stream_frame` 签名加 `reply_to`（种子帧/终帧建卡点透传）；`_create_card(chat_id, content, *, reply_to=None)` 投递分支：**`om_` 锚点 → `reply_card_by_id` 引用回复**；非 `om_`（cron/后台合成 task_id，reply API 必败 99992354，V1 issue #18-3 铁证）或 reply 失败（消息被删等）→ **降级直发**（内容永不丢红线）。流式更新按 card_id 走，与消息发送方式无关（V1 已验证并存） |
+| plugin/adapter.py | `send_stream_frame` 把官方种子帧 `reply_to` 透传给 composer |
+| cardkit/progline.py | `parse_progress_line` 裸围栏块归属 `terminal`（铁证：hermes `_progress_terminal_blocks` 仅 terminal 工具产围栏代码块）→ 渲染带 `code_outlined` 图标的 Terminal 步骤行 + 命令缩进灰字，耗时钩子可挂载 |
+
+### 效果
+
+- 私聊/群聊：卡片消息**引用触发提问**（飞书原生 reply 视觉），多人群聊一眼看出在回应谁；cron/后台投递仍直发（锚点非 om_）
+- 连续 terminal 调用面板：每次调用一个带图标步骤行（`Terminal (169 ms)` / `Terminal (596 ms)` / `Terminal (1.0 s)` / `Terminal (6.6 s)`），命令归属一目了然，耗时不再丢失
+
+### 测试
+
+`tests/e2e/test_v222_reply_and_terminal.py` 新增 11 用例（om_ 锚点引用/非 om_ 直发/reply 失败降级直发/progress 占位卡引用/native 种子帧引用/终帧无卡引用/无锚直发/裸块归属 parse/带头块不变/裸块耗时挂载/连续裸块渲染独立步骤行）；存量 `test_v206_real_formats.py` 2 处裸块断言同步（v2.0.22 有意变更）。全量 **702 passed**（691 基线 + 11 新增）。ruff 155 与基线持平。
+
+### 配置兼容
+
+零新配置。`reply_to` 由 hermes 官方自动携带（`_reply_anchor_for_event` 默认锚点 = 触发消息 message_id），无需用户配置；不希望引用的场景（如 cron）hermes 本就不传 om_ 锚点，行为不变。
+
 ## v2.0.21 (2026-10-16)
 
 **卡片全生命周期 UX 多轮审计修复——3×P1（跑马灯永挂族）+ 5×P2 + 死代码清理（−640 行），691 用例全绿。**

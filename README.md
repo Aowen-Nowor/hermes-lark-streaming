@@ -4,11 +4,11 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.21-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.22-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.22-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
-[![tests](https://img.shields.io/badge/tests-691%20passed-brightgreen)](#测试与-e2e)
+[![tests](https://img.shields.io/badge/tests-702%20passed-brightgreen)](#测试与-e2e)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
 *回答打字机流式呈现 · 工具与思考实时进面板 · 澄清问题变成可点击卡片 · 全程零 monkey-patch*
@@ -46,6 +46,10 @@ hermes 内置飞书平台的**增强版**：适配器完整继承内置 `FeishuA
 - 折叠面板轮次三色（V1 对齐）：流式进行中思考轮橙色、已完成绿、定稿收口全绿；警告族通报行（⚠️/🚨）橙色醒目，其余通报行保持灰
 - Terminal/shell 工具行 `code_outlined` 代码图标（原齿轮）；cron 卡头部去图标（job_id 溯源页脚保留）
 
+**回复引用与调用步骤（v2.0.22）**
+- **卡片回复引用触发消息**（私聊/群聊都生效）：卡片以飞书原生 reply 形态回应你的提问，群聊一眼看出在回应谁；cron/后台投递（无 om_ 锚点）仍直发，reply 失败自动降级直发（内容永不丢）
+- **连续 terminal 调用渲染为独立步骤行**：每次工具调用一个带图标步骤（`Terminal (169 ms)`），命令归属一目了然、耗时不再丢失（hermes 连续调用省略 header 的裸块归属 terminal）
+
 **交互卡片**
 - 澄清请求渲染为按钮/输入卡片，点击即回复，三态反馈（选择 → 已提交 → 已确认），操作者授权校验 fail-closed
 - `/aowen help · status · monitor` 运行状态指令
@@ -76,6 +80,8 @@ FrameComposer（per-chat 串行状态机 · CardTurnState）
 辅助回灌通道（同为官方协议）：`on_stream_delta` 观察者钩子 → 思考隐藏流入面板；`post_tool_call` 生命周期钩子 → 单工具耗时。
 
 ## 快速开始
+
+> 🤖 **AI agent 部署？** 请读 [`SKILL.md`](SKILL.md)——面向 agent 的完整安装/启动/健康验证/升级回滚手册（含网关启动三要点、健康五项检查、已知环境坑速查表）。人类读者继续往下即可。
 
 ```bash
 # 1. 复制到 hermes 插件目录
