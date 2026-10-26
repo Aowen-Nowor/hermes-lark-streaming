@@ -100,7 +100,11 @@ class Config:
 
     @property
     def card_duration_sec(self) -> int:
-        return _to_int(self._plugin_sec().get("card_ttl_sec", 600), default=600)
+        # v2.0.21（审计 R4）：下限钟制 60s——负值/极小值会让 engine._gc 的
+        # 「未定稿状态空闲超 TTL 回收」对活跃回合恒真（idle > ttl 恒成立），
+        # 状态表即时蒸发 → 下帧建新卡（断卡/双卡，gateway19 事故同族）。
+        # print_step 1~10 钉制同款先例；上游配置异常不应炸主流程。
+        return max(60, _to_int(self._plugin_sec().get("card_ttl_sec", 600), default=600))
 
     @property
     def footer_fields(self) -> list[list[str]]:
@@ -115,7 +119,21 @@ class Config:
             return self._default_footer_fields()
         if fields and isinstance(fields[0], str):
             return [fields]
-        return fields
+        # v2.0.21（审计 R8）：畸形行校验——fields 必须是 [[str, ...], ...]。
+        # 此前 dict/嵌套畸形原样透传 → 渲染层对非列表行静默产出空行、未知
+        # 字段名静默 None，footer 行消失无任何日志。现在逐行校验：畸形行
+        # 剧除 + warning 留痕，全畸形回落默认字段（不空 footer）。
+        cleaned: list[list[str]] = []
+        for row in fields:
+            if (
+                isinstance(row, list)
+                and bool(row)
+                and all(isinstance(f, str) and f.strip() for f in row)
+            ):
+                cleaned.append([str(f) for f in row])
+            else:
+                _logger.warning("HLS: config footer.fields invalid row %r dropped", row)
+        return cleaned or self._default_footer_fields()
 
     @property
     def footer_reasoning_level(self) -> str:
@@ -205,9 +223,13 @@ class Config:
         return _to_bool(sec.get("oneshot_cards", True), default=True)
 
     def _default_footer_fields(self) -> list[list[str]]:
-        # v2.0.19：display.show_reasoning: true 且 reasoning_effort 有效时，默认字段
-        # 自动追加 reasoning；用户显式配置 footer.fields 时不干预（自行添加 "reasoning"）。
-        base = ["status", "elapsed", "model", "cost", "compression_exhausted"]
+        # v2.0.21（审计 R10）：与 finalize._DEFAULT_FOOTER_FIELDS 对齐为同一
+        # 事实源 [status/elapsed/model(+reasoning)]。此前默认表多列
+        # cost/compression_exhausted——两字段在 V2 契约下数据不可达（Task 26
+        # 定案：官方 hook/帧契约均无 usage 数据），渲染层永远静默跳过，收录
+        # 在默认表只误导显式配置用户；渲染层仍保留两字段分支（未来数据通道
+        # 开放自动生效）。
+        base = ["status", "elapsed", "model"]
         if self.footer_reasoning_level:
             base.append("reasoning")
         return [base]

@@ -54,9 +54,9 @@ gateway:
 | `oneshot_cards` | bool | `true` | 回合外正式投递一次性卡（v2.0.14）：cron 投递族（metadata `job_id`）→ build_cron_card 标题+溯源页脚；回合外 final（notify 无活跃卡）与 ≥200 字无标记长文 → build_gateway_card 静态卡；`false` 全部落回原生路径（v2.0.13 行为） |
 | `print_strategy` | str | `"delay"` | 打字机策略（透传 CardKit streaming_config） |
 | `print_step` | int | `4` | 打字机步长 |
-| `card_ttl_sec` | int | `600` | 卡片会话 TTL（秒），超时自动回收 |
+| `card_ttl_sec` | int | `600` | 卡片会话 TTL（秒），超时自动回收；v2.0.21 下限钳制 60s（负值/极小值会让活跃回合状态被 GC——断卡事故同族） |
 | `footer.show_label` | bool | `false` | footer 标签显示 |
-| `footer.fields` | list | 见说明 | 页脚字段行（`[["status","elapsed","model"]]` 语法，V1 兼容单层列表）；支持字段 `status/elapsed/model/cost/tokens/cache/reasoning`（无值字段自动省略）。`reasoning`（v2.0.19）= 推理等级，需 hermes config `display.show_reasoning: true` 且 `agent.reasoning_effort` 有效（经官方解析器 `resolve_reasoning_config`）；默认字段在条件满足时自动追加，显式配置时不干预 |
+| `footer.fields` | list | 见说明 | 页脚字段行（`[["status","elapsed","model"]]` 语法，V1 兼容单层列表）；支持字段 `status/elapsed/model/cost/tokens/cache/reasoning`（无值字段自动省略；v2.0.21 畸形行剔除 + warning + 全畸形回落默认；默认表为 `status/elapsed/model(+reasoning)`——cost/tokens/cache 等在 V2 契约下数据不可达，配置了也自动省略）。`reasoning`（v2.0.19）= 推理等级，需 hermes config `display.show_reasoning: true` 且 `agent.reasoning_effort` 有效（经官方解析器 `resolve_reasoning_config`）；默认字段在条件满足时自动追加，显式配置时不干预 |
 | `card_style.text_size.answer` | map | 未配置（零注入） | v2.0.20 正文（answer 元素）字号，完全 opt-in：配置后按 `{default, pc, mobile}` 三档生效，未写的组/档位回落 v2.0.18 字面值（answer→`normal_v2`、aux→`notation`）；值域官方 13 档 token（heading-0/heading-1/…/normal/notation/xxxx-large/…/x-small），非法值回落 normal。落卡为 `config.style.text_size.cus-ans`（s157 真飞书探针定案 CardKit 接受）；未配置时不注入 `config.style`，payload 与 v2.0.18 逐字段一致 |
 | `card_style.text_size.aux` | map | 未配置（零注入） | v2.0.20 辅助行字号（面板思考/工具行/警告/页脚/折叠提示），同上三档结构，未写档位回落 `notation`，落卡 token `cus-aux` |
 

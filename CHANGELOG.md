@@ -1,5 +1,55 @@
 # Changelog
 
+## v2.0.21 (2026-10-16)
+
+**卡片全生命周期 UX 多轮审计修复——3×P1（跑马灯永挂族）+ 5×P2 + 死代码清理（−640 行），691 用例全绿。**
+
+### 审计方法与范围
+
+用户指令「整个卡片生命周期内都要保证用户体验」。第一轮主干走读 8 文件（engine/finalize/cards/elements/adapter/classify/special/client）+ 外围 8 模块并行扫描（guard/clarify/reasoning_feed/tool_timing/i18n/md/progline/seq/tool_icons/reader），每个发现带行号证据；第二轮前置取证（hermes 源码 send_message_tool.py:549 metadata 无 notify 实证、引用计数定案死代码族、progline.py:24 上游截首行定案 R13 不修）；第三轮实施+回归+部署+E2E。
+
+### 修复清单
+
+| # | 级别 | 位置 | 问题与修复 |
+|---|------|------|-----------|
+| R1 | P1 | composer/engine.py | **send_message 短 emoji 通知 → 跑马灯永挂卡**。链路：send_message 工具族 metadata 无 `notify`（hermes send_message_tool.py:549 实证）→ `_upgrade_plain_to_progress` 升格 → 无活跃卡 early-create 占位卡（v2.0.4 s70 回流语义）→ 回合外投递永等不到 answer/finalize 帧 → spinner 永挂。修复：**孤儿卡看门狗**——`loop.call_later(120s)` 到期复查，静默达标且未终态 → 复用 `finalize_card` 优雅落定（footer+关流式，空 answer 合法终态）+ 状态退役；活跃回合（进度气泡/native tick 周期快照持续刷新 last_activity，429 冷却 60s < 120s）到期不达标自动重新武装，不误伤 |
+| R2 | P1 | plugin/clarify.py:192 | **线程 fallback 协程永不执行**——`Thread(target=lambda: _do())` 只创建协程不 await，断连窗口期（adapter._loop None/停转，hermes adapter.py:1311/1566）点澄清卡=假确认永久挂起。修复：核心动作 `resolve_gateway_clarify` 同步执行（线程内直跑），确认卡更新 asyncio.run 尽力而为 |
+| R3 | P1 | composer/finalize.py:268 | **close_streaming 失败上抛** → degrade → 跑马灯永挂（幂等短路）或原生重发全文（重复消息）。修复：装饰性化（对齐 _seal_footer 语义，失败仅 warning） |
+| R4 | P2 | config/reader.py | `card_ttl_sec` 负值无钳制 → engine._gc 对活跃回合恒真（断卡/双卡事故同族）。修复：下限钳制 60s（print_step 钳制同款先例） |
+| R5 | P2 | cardkit/md.py | 未闭合围栏内 `#` 行被标题降级误改写（cron/gateway 卡）。修复：`_demote_headings_outside_fences` 逐行围栏状态机 |
+| R6 | P2 | cardkit/md.py | `_split_long_text` 切点可落围栏中间（跨块不闭合）。修复：候选切点围栏闭合校验 |
+| R7 | P2 | plugin/clarify.py | 重启/过期后点澄清卡零反馈。修复：`_expired_response` 提示卡 + 前置 known 检查 |
+| R8 | P2 | config/reader.py | `footer.fields` 畸形行静默消失。修复：逐行校验 + warning 留痕 + 全畸形回落默认 |
+| R10 | P3 | config/reader.py | 两处 footer 默认字段对齐为 `status/elapsed/model(+reasoning)`——cost/compression_exhausted 在 V2 契约下数据不可达（Task 26 定案），默认表不再收录；渲染层字段分支保留（未来数据通道开放自动生效） |
+| R12 | P3 | plugin/reasoning_feed.py | 思考行冻结上限 2000 截断无标记。修复：「……（已截断）」标记写回缓冲（预留 12 字符位避免渲染层二次截断；冻结后重发幂等） |
+
+### 举一反三（审计连带发现）
+
+- **lark-oapi 回调类路径迁移**：新版（≥1.7.x）把 `CallBackCard/P2CardActionTriggerResponse` 从 `lark_oapi.api.cardkit.v1` 迁移到 `lark_oapi.event.callback.model.p2_card_action_trigger`——旧路径 ImportError 时澄清卡回调静默退化为空响应。修复：`_load_response_classes` 多候选路径（含 AttributeError 接住「模块在类已迁走」）
+- **看门狗架构**：刻意用 `loop.call_later` 而非 `ensure_future(task+sleep)`——task 会被 `asyncio.gather(*all_tasks())` 类调用方捕获（测试 _settle 实证挂死），长睡 task 在 time.monotonic 被接管环境下 timer 永不到期；timer 句柄不在 all_tasks() 中，到期才建 task
+
+### 死代码清理（R9，V1 残留族，运行时零引用 AST 定案）
+
+删除 `build_panel_header` / `build_panel_children` / `build_unified_panel` / `_truncate_reasoning` / `_build_tool_step_elements` / `_build_tool_step_output` / `_format_code_block` / `_longest_backtick_run` / `_build_error_panel` / `_build_background_review_panel` / `build_preservative_seal_actions`（elements.py，V1 面板组装器/错误面板/保留式封卡——V2 走 `_render_status_children` + finalize 四步）+ i18n 死词条 16 个（collapse_*/truncated_suffix/error_panel/interrupt_*/bg_review_panel/partial_continues/processing_prefix/thought/thinking_panel/thought_for/done/reasoning）+ 对应测试。新增防回引测试（删除符号断言 hasattr False）。保留决策：`_extract_images_from_markdown`（图片 markdown 功能位，观察项）、`_loading_hint_element`（v2.0.17 保留决策）、`feishu/guard.py`（有独立测试冻结，接线与否待用户决策）。
+
+### 观察项（记录不实施）
+
+- answer 正文 `![alt](img_xxx)` 图片 markdown 不渲染为 img 元素（V1 有此能力，V2 流式路径未接线；hermes 图片走 media 通道，answer 正文 img 极罕见）
+- send_message 超长消息 chunk 分块 + 首块 emoji 开头：首块建卡（120s 后看门狗落定）、续块原生 post（半卡半文）——升格机制固有误吸收面，看门狗已把最坏后果从「永挂」降为「120s 落定」
+- progline 围栏内缩进丢失：上游 `多行命令截首行`（progline.py:24）使路径不可达，防御性修复不实施
+
+### 测试与质量门禁
+
+- 新增 `tests/e2e/test_v221_lifecycle_ux.py` 29 用例（看门狗落定/skip/due 分支 ×7、clarify 过期卡 ×3 + 同步 fallback ×1、finalize close 非致命 ×1、Config 钳制/校验/对齐 ×7、md 围栏 ×5、reasoning 截断 ×3、常量 ×2）
+- 全量 **691 passed**（v2.0.20 基线 674 + 32 新增 − 15 死代码测试删除）；ruff 155 < 基线 162（净减 7）
+- 插曲：v207 `_settle()` 的 `gather(*all_tasks())` 捕获长睡 watchdog task（全局 time.monotonic 被 patch 成常量 → timer 永不到期）→ 全量挂死 38%——促成 call_later 架构定案（实现侧根治优于测试侧绕行）
+
+### 配置兼容
+
+- `card_ttl_sec` 负值/0/小值 → 钳制 60s（此前负值会炸状态表；正常配置零影响）
+- `footer.fields` 畸形行剔除 + warning（此前静默消失）；未配置时默认表少两列不可达字段（渲染结果零变化）
+- 其余配置零变化；`card_style.text_size` 语义不变（v2.0.20 opt-in）
+
 ## v2.0.20 (2026-10-16)
 
 **卡片自定义字号改完全 opt-in——默认零注入，payload 逐字段还原 v2.0.18（用户反馈手机端字号观感变大）。**

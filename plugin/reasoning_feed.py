@@ -160,6 +160,17 @@ def _flush_locked(chat: str, buf: dict[str, Any], now: float, *, final: bool = F
     text = (buf.get("text") or "").strip()
     if not text or text == buf.get("sent"):
         return
+    # v2.0.21（审计 R12）：冻结上限截断标记——缓冲达 _MAX_LINE_CHARS 时思考行
+    # 句尾戛然而止（对照 cards._truncate_reasoning_body 的「……（已截断）」）。
+    # 预留 12 字符标记位：输出恒 < 渲染层 _REASONING_DISPLAY_LIMIT(2000)，
+    # 不会触发二次截断把标记切掉。标记只在首达上限时改变输出一次；冻结后
+    # 重发同文本（带标记）被合并器幂等跳过，不产生额外 cardkit_update；
+    # 带标记版与上一条无标记版保持前缀关系（合并器原地替换 ✓）。
+    if len(buf.get("text") or "") >= _MAX_LINE_CHARS and "……（已截断）" not in text:
+        text = text[:_MAX_LINE_CHARS - 12].rstrip() + "……（已截断）"
+        # 标记写回缓冲：否则 sent（带标记）与 buf["text"]（原始）永久不同，
+        # 冻结后每次 flush 都重投（合并器虽幂等跳过，flush 层白跑）。
+        buf["text"] = text
     raw = f"\U0001f4ac {text}"  # 💬 —— engine 按 thinking 通道合并（增长原地替换）
     delivered = False
     for composer in _composers():

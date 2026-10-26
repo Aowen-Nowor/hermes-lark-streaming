@@ -59,12 +59,26 @@ def _cleanup(cid: str) -> None:
 
 # ── SDK 回调响应构建 ────────────────────────────────────────────────────────
 def _load_response_classes() -> tuple[Any, Any]:
-    try:
-        from lark_oapi.api.cardkit.v1 import CallBackCard, P2CardActionTriggerResponse
+    """多候选路径加载 SDK 回调响应类（跨版本防御）.
 
-        return P2CardActionTriggerResponse, CallBackCard
-    except ImportError:
-        return None, None
+    v2.0.21 审计发现：lark-oapi 新版（≥1.7.x）把 CallBackCard/
+    P2CardActionTriggerResponse 从 ``lark_oapi.api.cardkit.v1`` 迁移到
+    ``lark_oapi.event.callback.model.p2_card_action_trigger``——旧路径
+    ImportError 时回调卡片静默退化为空响应（_empty_response），用户点击
+    零反馈。多候选依序尝试，全部失败才退化。
+    """
+    candidates = (
+        "lark_oapi.api.cardkit.v1",
+        "lark_oapi.event.callback.model.p2_card_action_trigger",
+    )
+    for mod_path in candidates:
+        try:
+            mod = __import__(mod_path, fromlist=("CallBackCard", "P2CardActionTriggerResponse"))
+            return mod.P2CardActionTriggerResponse, mod.CallBackCard
+        except (ImportError, AttributeError):
+            # AttributeError：模块存在但类已迁走（1.7.x 实测——旧路径模块仍可导入）
+            continue
+    return None, None
 
 
 def _empty_response() -> Any:
@@ -72,6 +86,50 @@ def _empty_response() -> Any:
     if P2CardActionTriggerResponse is None:
         return None
     return P2CardActionTriggerResponse()
+
+
+def _expired_response() -> Any:
+    """v2.0.21：过期/未知 clarify_id 点击的回调卡片（替代静默空响应）.
+
+    触发面：网关进程重启（选择记录全内存，重启即丢）/ TTL 300s 过期被
+    prune / 记录被新 clarify 覆盖。此前返回 _empty_response() —— 用户点击
+    选项/重试/提交后卡片无任何反馈，只能干等（P2 审计 R7）。现回一张
+    「已过期」提示卡，明确引导重新发起提问。
+    """
+    P2CardActionTriggerResponse, CallBackCard = _load_response_classes()
+    if P2CardActionTriggerResponse is None or CallBackCard is None:
+        return _empty_response()
+    from ..cardkit.i18n import _LOCALES, _T, _i18n
+
+    en_text, zh_text = _T["clarify_expired"]
+    card_data = {
+        "schema": "2.0",
+        "config": {"locales": _LOCALES},
+        "body": {
+            "elements": [
+                {
+                    "tag": "div",
+                    "icon": {
+                        "tag": "standard_icon",
+                        "token": "time_outlined",
+                        "size": "20px 20px",
+                        "color": "grey",
+                    },
+                    "text": {
+                        "tag": "lark_md",
+                        "content": en_text,
+                        "i18n_content": _i18n(en_text, zh_text),
+                    },
+                },
+            ],
+        },
+    }
+    response = P2CardActionTriggerResponse()
+    card = CallBackCard()
+    card.type = "raw"
+    card.data = card_data
+    response.card = card
+    return response
 
 
 def _submitted_card_response(selected_text: str, q: str, cid: str) -> Any:
@@ -185,11 +243,36 @@ def _resolve_async(adapter: Any, clarify_id: str, value: str, client_getter: Cal
             return
         except Exception:
             _logger.warning("clarify: threadsafe scheduling failed — sync fallback", exc_info=True)
-    # 同步 fallback：后台线程执行（避免阻塞 SDK 回调线程）
+    # 同步 fallback：后台线程执行（避免阻塞 SDK 回调线程）。
+    # v2.0.21 修复（审计 R2）：_do 是协程函数——原写法
+    # ``Thread(target=lambda: _do())`` 只创建协程对象、从不 await（协程永不
+    # 执行 + RuntimeWarning），且 ``get_running_loop().create_task`` 在 SDK
+    # 回调线程通常无 running loop（RuntimeError 路径才是常态）。触发面：
+    # adapter._loop 为 None/已停转（hermes 内置 adapter.py:1311 初始 None、
+    # :1566 disconnect 清空）的断连窗口期点击卡片 → 用户看到「已提交」但
+    # resolve_gateway_clarify 永不运行 → agent 永不恢复，点重试同死。
+    # 修复：核心动作 resolve_gateway_clarify 是同步调用，线程内直接执行
+    # （agent 恢复不依赖事件循环）；服务端确认卡更新（async 网络调用）
+    # asyncio.run 独立 loop 尽力而为——失败仅告警（lark client 连接池绑定
+    # 主 loop 时可能拒绝，核心目标已达成，卡片停在 soft-lock 态可接受）。
+    def _run_sync_fallback() -> None:
+        try:
+            resolve_gateway_clarify(clarify_id, value)
+        except Exception:
+            _logger.warning("clarify: resolve failed for %s", clarify_id[:12], exc_info=True)
+            return
+        try:
+            asyncio.run(_schedule_confirm_card(client_getter=client_getter, cid=clarify_id))
+        except Exception:
+            _logger.warning(
+                "clarify: confirm card update failed (sync fallback) cid=%s",
+                clarify_id[:12], exc_info=True,
+            )
+
     try:
         asyncio.get_running_loop().create_task(_do())
     except RuntimeError:
-        threading.Thread(target=lambda: _do(), name="hls-clarify-resolve", daemon=True).start()
+        threading.Thread(target=_run_sync_fallback, name="hls-clarify-resolve", daemon=True).start()
 
 
 async def _schedule_confirm_card(*, client_getter: Callable[[], Any], cid: str) -> None:
@@ -221,7 +304,7 @@ async def _schedule_confirm_card(*, client_getter: Callable[[], Any], cid: str) 
 
 
 def handle_clarify_card_action(adapter: Any, client_getter: Callable[[], Any], data: Any) -> Any:
-    """clarify 卡片动作回调主入口。返回 SDK 回调响应（空响应/已提交卡）。"""
+    """clarify 卡片动作回调主入口。返回 SDK 回调响应（空响应/已提交卡/过期卡）。"""
     event = getattr(data, "event", None)
     action_value = getattr(getattr(event, "action", None), "value", {}) or {}
     clarify_action = action_value.get("hermes_clarify_action") if isinstance(action_value, dict) else ""
@@ -232,9 +315,16 @@ def handle_clarify_card_action(adapter: Any, client_getter: Callable[[], Any], d
     if not _authorized(adapter, data):
         return _empty_response()
 
+    # v2.0.21（审计 R7）：未知/过期 clarify_id 统一回「已过期」提示卡。
+    # 此前 choices 为空（重启/TTL 过期）时各分支返回 _empty_response()，
+    # 用户点击零反馈。timestamp 无记录 = 记录已被 prune/清理 = 过期。
+    prune_expired()
     with _clarify_lock:
+        known = clarify_id in _clarify_timestamps
         question = _clarify_questions.get(clarify_id, "")
         choices_list = list(_clarify_choices.get(clarify_id, []))
+    if not known:
+        return _expired_response()
 
     # ── retry_submit：重发上次选择 ──
     if clarify_action == "retry_submit":

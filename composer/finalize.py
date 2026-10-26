@@ -31,6 +31,9 @@ from ..cardkit.seq import call_with_seq_recovery
 _logger = logging.getLogger("hermes_lark_streaming.composer")
 
 # 默认页脚字段（V1 对齐；拿不到数据的字段由渲染层自动跳过）。
+# v2.0.21（审计 R10）：与 config/reader.py _default_footer_fields 对齐为同一
+# 事实源 [status/elapsed/model]——本常量仅在 Config 不可用时兜底（engine.
+# _footer_fields 异常路径），生产路径恒走 Config 默认（reasoning 条件追加）。
 _DEFAULT_FOOTER_FIELDS: list[list[str]] = [["status", "elapsed", "model"]]
 
 
@@ -266,12 +269,23 @@ async def finalize_card(
                 str(state.card_id)[:12], exc_info=True,
             )
     state.seq += 1
-    await call_with_seq_recovery(
-        state,
-        lambda seq: client.cardkit_close_streaming(
-            state.card_id, sequence=seq, summary=_summary_of(state)),
-        what="finalize:close",
-    )
+    # v2.0.21（审计 R3）：关流式装饰性化——此前失败上抛 → _degrade → 卡片
+    # 通道退役 + 官方回落路径要么被幂等守卫短路（跑马灯永挂：流式模式未关，
+    # spinner 持续转），要么原生重发全文（重复消息）。此刻答案已流完送达、
+    # 页脚已落卡，关流式失败的最坏后果 = 卡片留在流式态，对齐
+    # _seal_footer/_reseal_panel「装饰性步骤失败仅 warning 绝不上抛」语义。
+    try:
+        await call_with_seq_recovery(
+            state,
+            lambda seq: client.cardkit_close_streaming(
+                state.card_id, sequence=seq, summary=_summary_of(state)),
+            what="finalize:close",
+        )
+    except Exception:
+        _logger.warning(
+            "composer: close_streaming skipped (non-fatal) card=%s",
+            str(state.card_id)[:12], exc_info=True,
+        )
     _logger.debug(
         "composer: card finalized card=%s elapsed=%.1fs status_lines=%d",
         state.card_id[:12], time.monotonic() - state.created_at, len(state.status_lines),

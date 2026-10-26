@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from hermes_lark_streaming.cardkit import (
     _LOADING_HINT_ELEMENT_ID,
-    _build_error_panel,
     _build_footer_elements,
     _compact,
     _count_tag_objects,
@@ -13,9 +12,7 @@ from hermes_lark_streaming.cardkit import (
     _extract_images_from_markdown,
     _format_elapsed,
     _loading_hint_element,
-    _longest_backtick_run,
     _render_footer_field,
-    build_preservative_seal_actions,
     build_streaming_card_v2,
 )
 from hermes_lark_streaming.cardkit.md import (
@@ -25,8 +22,6 @@ from hermes_lark_streaming.cardkit.md import (
     _strip_invalid_image_keys,
     optimize_markdown_style,
 )
-
-import pytest
 
 # --- Markdown 优化 ---
 
@@ -314,38 +309,6 @@ class TestBuildFooterElements:
         assert "💭" not in result[1]["content"]
 
 
-# --- 错误面板 ---
-
-
-class TestBuildErrorPanel:
-    def test_error_panel_structure(self) -> None:
-        panel = _build_error_panel("something went wrong")
-        assert panel["tag"] == "collapsible_panel"
-        assert "Error" in panel["header"]["title"]["content"]
-        assert panel["border"]["color"] == "red"
-        assert panel["expanded"] is True
-
-    def test_aborted_panel_structure(self) -> None:
-        panel = _build_error_panel("stopped by user", is_aborted=True)
-        assert panel["tag"] == "collapsible_panel"
-        assert "Interrupted" in panel["header"]["title"]["content"]
-        assert panel["border"]["color"] == "orange"
-
-    def test_error_message_in_elements(self) -> None:
-        panel = _build_error_panel("my error detail")
-        inner = panel["elements"][0]
-        assert inner["tag"] == "markdown"
-        assert "my error detail" in inner["content"]
-
-    def test_expanded_default_true(self) -> None:
-        panel = _build_error_panel("err")
-        assert panel["expanded"] is True
-
-    def test_custom_expanded(self) -> None:
-        panel = _build_error_panel("err", expanded=False)
-        assert panel["expanded"] is False
-
-
 # --- 数字格式化 ---
 
 
@@ -387,17 +350,6 @@ class TestEscapeMd:
 
     def test_plain_text_unchanged(self) -> None:
         assert _escape_md("hello world") == "hello world"
-
-
-class TestLongestBacktickRun:
-    def test_no_backticks(self) -> None:
-        assert _longest_backtick_run("no backticks") == 0
-
-    def test_single(self) -> None:
-        assert _longest_backtick_run("a `b` c") == 1
-
-    def test_triple(self) -> None:
-        assert _longest_backtick_run("```code```") == 3
 
 
 # --- 完整卡片构建 ---
@@ -735,21 +687,20 @@ class TestExtractImagesFromMarkdown:
 
 
 class TestBackgroundReviewPanel:
-    """后台审查面板测试."""
+    """后台审查面板测试（v2.0.21 已随死代码清理删除——占位防回引）。"""
 
-    def test_build_background_review_panel(self) -> None:
-        """构建后台审查面板."""
-        from hermes_lark_streaming.cardkit import _build_background_review_panel
-        panel = _build_background_review_panel(["检查完成", "更新记忆"])
-        assert panel["tag"] == "collapsible_panel"
-        assert len(panel["elements"]) == 2
+    def test_dead_symbols_removed(self) -> None:
+        """v2.0.21 死代码清理：V1 seal/panel 组装器运行时零引用已删（防回引）。"""
+        from hermes_lark_streaming.cardkit import elements
 
-    def test_build_background_review_panel_empty(self) -> None:
-        """空消息列表的面板."""
-        from hermes_lark_streaming.cardkit import _build_background_review_panel
-        panel = _build_background_review_panel([])
-        assert panel["tag"] == "collapsible_panel"
-        assert len(panel["elements"]) == 1  # placeholder
+        for sym in (
+            "build_panel_header", "build_panel_children", "build_unified_panel",
+            "_truncate_reasoning", "_build_tool_step_elements", "_build_tool_step_output",
+            "_format_code_block", "_longest_backtick_run", "_build_error_panel",
+            "_build_background_review_panel", "build_preservative_seal_actions",
+        ):
+            assert not hasattr(elements, sym), sym
+
 
 class TestLoadingHintElement:
     """_loading_hint_element() 占位元素结构测试."""
@@ -786,46 +737,6 @@ class TestLoadingHintElement:
         card = build_streaming_card_v2(include_loading_hint=False)
         element_ids = [e.get("element_id") for e in card["body"]["elements"]]
         assert _LOADING_HINT_ELEMENT_ID not in element_ids
-
-
-class TestPreservativeSealActionsDeleteHint:
-    """build_preservative_seal_actions() 包含删除占位提示的 action."""
-
-    def test_partial_seal_deletes_loading_hint(self) -> None:
-        actions = build_preservative_seal_actions(partial=True)
-        delete_actions = [
-            a for a in actions
-            if a["action"] == "delete_elements"
-            and a["params"]["element_ids"] == [_LOADING_HINT_ELEMENT_ID]
-        ]
-        assert len(delete_actions) == 1
-
-    def test_full_seal_deletes_loading_hint(self) -> None:
-        actions = build_preservative_seal_actions(
-            footer_data={},
-            footer_fields=[["status"]],
-        )
-        delete_actions = [
-            a for a in actions
-            if a["action"] == "delete_elements"
-            and a["params"]["element_ids"] == [_LOADING_HINT_ELEMENT_ID]
-        ]
-        assert len(delete_actions) == 1
-
-    def test_delete_hint_before_delete_loading_icon(self) -> None:
-        """占位提示删除在 loading icon 删除之前（顺序重要）."""
-        actions = build_preservative_seal_actions(partial=True)
-        delete_ids = [
-            id
-            for a in actions
-            if a["action"] == "delete_elements"
-            for id in a["params"]["element_ids"]
-        ]
-        assert _LOADING_HINT_ELEMENT_ID in delete_ids
-        assert "loading_icon" in delete_ids
-        hint_idx = delete_ids.index(_LOADING_HINT_ELEMENT_ID)
-        loading_idx = delete_ids.index("loading_icon")
-        assert hint_idx < loading_idx
 
 
 # --- Bug #3 regression: summary i18n_content ---

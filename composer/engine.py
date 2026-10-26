@@ -40,6 +40,11 @@ from .classify import (
 
 _logger = logging.getLogger("hermes_lark_streaming.composer")
 
+# v2.0.21（审计 R1）：孤儿卡看门狗静默阈值。120s = 429 冷却 60s 的 2 倍裕度；
+# 正常回合工具执行期网关进度气泡/native interim tick 持续重发快照刷新
+# last_activity，不会误伤（详见 _watchdog docstring）。
+_WATCHDOG_IDLE_SEC = 120.0
+
 try:  # hermes 运行时存在；导入失败时 composer 退化为纯直通（tests / 无 hermes 环境）
     from gateway.platforms.base import SendResult  # type: ignore
 except Exception:  # noqa: BLE001 — hermes 缺失时兜底（tests/独立使用）  # pragma: no cover
@@ -535,6 +540,8 @@ class FrameComposer:
             "composer: card created chat=%s card=%s msg=%s status_lines=%d",
             chat_id, card_id, st.card_message_id, len(pending),
         )
+        # v2.0.21（审计 R1）：孤儿卡看门狗（跑马灯永挂根治，见 _watchdog）。
+        self._spawn_watchdog(chat_id)
         return SendResult(success=True, message_id=st.card_message_id)
 
     async def _patch_answer(self, st: CardTurnState, content: str) -> SendResult:
@@ -688,6 +695,99 @@ class FrameComposer:
             "composer: card channel degraded for chat=%s at %s — falling back to native text: %s",
             chat_id, where, exc,
         )
+
+    # ── 孤儿卡看门狗（v2.0.21，审计 R1）───────────────────────────────────
+    def _spawn_watchdog(self, chat_id: str) -> None:
+        """建卡后武装看门狗定时器（见 _watchdog_due；重复武装无害——复查挡）.
+
+        实现说明：用 ``loop.call_later`` 而非 ``ensure_future(task+sleep)``
+        ——task 会被 ``asyncio.gather(*all_tasks())`` 类调用方（如测试
+        _settle / 生产中的任务等待）捕获，120s 长睡 task 既拖慢等待者又
+        可能永不到期（time.monotonic 被接管的环境）；timer 句柄不在
+        all_tasks() 中，到期才建 task，任意时刻每 chat 至多一个 pending
+        timer，loop 关闭时自动丢弃。
+        """
+        self._arm_watchdog(chat_id)
+
+    def _arm_watchdog(self, chat_id: str) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_later(_WATCHDOG_IDLE_SEC, self._watchdog_due, chat_id)
+        except RuntimeError:  # loop 已停转（跨线程窗口）
+            pass
+        except Exception:
+            _logger.debug("composer: watchdog arm failed chat=%s", chat_id, exc_info=True)
+
+    def _watchdog_due(self, chat_id: str) -> None:
+        """定时器到期回调（loop 线程）：静默达标 → 落定；仍活跃 → 重新武装."""
+        try:
+            st = self._states.get(chat_id)
+            if st is None or st.finalized or st.degraded:
+                return
+            if time.monotonic() - st.last_activity >= _WATCHDOG_IDLE_SEC:
+                asyncio.ensure_future(self._watchdog_seal(chat_id))
+            else:
+                # 回合仍活跃（tick/快照帧持续刷新 last_activity）——再等一个周期
+                self._arm_watchdog(chat_id)
+        except Exception:
+            _logger.debug("composer: watchdog due failed chat=%s", chat_id, exc_info=True)
+
+    async def _watchdog_seal(self, chat_id: str) -> None:
+        """静默孤儿卡优雅落定（跑马灯永挂根治，v2.0.21 审计 R1）.
+
+        背景（2026-10-16 全生命周期审计取证）：send_message 工具族主动投递
+        emoji 开头 ≤300 字短通知（hermes tools/send_message_tool.py:549-556
+        metadata 无 notify 标记）→ _upgrade_plain_to_progress 升格
+        CH_PROGRESS → _on_progress 无活跃卡 early-create 占位卡（v2.0.4 s70
+        回流）——该卡永远等不到 answer/finalize 帧（回合外投递无流式回合），
+        spinner 永挂直到用户删卡。
+
+        不误伤正常回合：工具执行期网关进度气泡（accumulate 模式 edit_interval
+        周期快照）/native interim tick 持续重发刷新 last_activity；429 冷却
+        60s < 阈值；到期回调静默不达标时重新武装。
+
+        触发（静默 ≥120s 且未终态）：复用 finalize_card 优雅落定（footer+
+        关流式；空 answer 合法终态），状态置 degraded+finalized——后续帧若
+        真到来：native 路径 active_state None → 建新卡承载（内容永不丢），
+        edit 灰度路径 super().edit_message 官方原生 PATCH 兑底。装饰性
+        API 失败仅 debug（卡片留在流式态，不重试不上抛）。
+        """
+        try:
+            async with self._chat_lock(chat_id):
+                st = self._states.get(chat_id)
+                if st is None or st.finalized or st.degraded:
+                    return
+                if time.monotonic() - st.last_activity < _WATCHDOG_IDLE_SEC:
+                    return  # 双保险：ensure_future 窗口内回合恢复活跃
+                st.degraded = True
+                st.finalized = True
+                client = self._get_client()
+                if client is None:
+                    return
+                try:
+                    from .finalize import finalize_card
+
+                    await finalize_card(
+                        client, st, answer_element_id=_answer_element_id(),
+                        footer_fields=self._footer_fields(),
+                        footer_show_label=self._footer_show_label(),
+                        panel_title=_panel_title(st.status_lines, elapsed_ms=_turn_elapsed_ms(st)),
+                        panel_expanded=self._panel_expanded(),
+                    )
+                except Exception:
+                    _logger.debug(
+                        "composer: watchdog seal (api) skipped card=%s",
+                        str(st.card_id)[:12], exc_info=True,
+                    )
+                _logger.warning(
+                    "composer: watchdog sealed idle card chat=%s card=%s idle>=%.0fs "
+                    "(no finalize frame — likely out-of-turn notice)",
+                    chat_id[:12], str(st.card_id)[:12], _WATCHDOG_IDLE_SEC,
+                )
+        except Exception:
+            _logger.debug("composer: watchdog failed chat=%s", chat_id, exc_info=True)
 
     # ── 清理 ────────────────────────────────────────────────────────────
     def forget(self, chat_id: str) -> None:

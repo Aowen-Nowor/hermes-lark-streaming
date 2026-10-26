@@ -1,7 +1,7 @@
 name: feishu-streaming-platform
 label: Feishu / Lark (Streaming Cards)
 kind: platform
-version: "2.0.20"
+version: "2.0.21"
 # v2.0.18：声明 Python 依赖（PEP 508）——hermes v0.22.x PM 契约收紧（"conflicts
 # are refused, updates disable a plugin that no longer fits"），声明后由 PM 随
 # 核心环境统一解析（v2.0.13 部署事故——PM 环境漂移缺 yaml——的机制化收尾）。
