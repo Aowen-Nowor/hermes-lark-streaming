@@ -131,7 +131,7 @@ export FEISHU_E2E_APP_ID=cli_xxx FEISHU_E2E_APP_SECRET=xxx FEISHU_E2E_CHAT_ID=oc
 **升级**（已有安装，拉新版本）：
 ```bash
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.23       # 按版本 checkout tag（勿依赖默认分支，见第 6 节）
+git fetch --tags && git checkout v2.0.24       # 按版本 checkout tag（勿依赖默认分支，见第 6 节）
 <VENV_PYTHON> -m py_compile $(git diff --name-only HEAD@{1} HEAD | grep '\.py$')  # 语法门禁
 find . -name __pycache__ -type d -prune -exec rm -rf {} +   # 清缓存（热替换旧字节码必做）
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
@@ -167,7 +167,7 @@ grep -E "^version" ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
 ```bash
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.23    # 或 git pull origin refactor/v2.0.0
+git fetch --tags && git checkout v2.0.24    # 或 git pull origin refactor/v2.0.0
 ```
 
 > V1 的 `controller/ patching/ state/ flush/` 子包在 V2 已删除，git checkout 会自动清掉工作区副本；**解压/复制部署的用户必须手动删除这些旧目录**（连同 V1 的 `docs/AGENT_GUIDE.md`），不要让两代代码同目录共存。
@@ -231,3 +231,4 @@ find ~/.hermes/plugins/hermes-lark-streaming -name __pycache__ -type d -prune -e
 | 密码 SSH 登不上 | 服务器 sshd 加固为仅公钥 | 用密钥认证（paramiko `pkey=` / `ssh -i`） |
 | 改了代码行为不变 | `__pycache__` 旧字节码 | 清缓存重启（第 5 节命令） |
 | 回合卡片引用不了消息 | 锚点非 `om_` 前缀（cron/后台合成 id） | 属预期：非 om_ 直发（reply API 必败 99992354） |
+| 点澄清卡按钮提示「该应用尚未配置卡片回调」 | 飞书开放平台未订阅卡片回调（非插件缺陷，插件与内核回调链路已就绪） | 开发者后台 → 事件与回调 → 卡片交互回调 → 选「使用长连接接收回调」保存即生效；勿选 webhook（无公网回调端点） |

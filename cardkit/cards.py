@@ -373,14 +373,19 @@ def build_streaming_card_v2(
     """
     elements: list[dict] = []
 
-    # ── Unified panel placeholder (linear mode — single panel for reasoning+tools) ──
-    if include_unified_panel:
+    # ── Unified panel (linear mode — single panel for reasoning+tools) ──
+    # v2.0.24（用户反馈：无思考/工具调用时出现空 "agent loop" 折叠面板）：
+    # 面板懒渲染——仅 status_lines 非空时才随卡片渲染。纯 answer 回合建卡
+    # 不再挂空壳面板（v2.0.13 的「定稿时删空壳」从主清理路径退居防御性
+    # 保险：正常路径不再产生空面板）。首个状态行到达时由 composer._patch_status
+    # 全量更新（cardkit_update = card_json 全量替换）补插面板——真飞书 s172
+    # 探针实证「更新时新增元素」合法（含流式卡建卡时未声明的元素）。
+    if include_unified_panel and status_lines:
         panel = _build_unified_panel_placeholder(expanded=streaming_panel_expanded)
         _apply_panel_title(panel, panel_title)
-        if status_lines:
-            panel["elements"] = _render_status_children(
-                status_lines, durations=status_durations, line_times=status_times,
-                turn_state=turn_state)
+        panel["elements"] = _render_status_children(
+            status_lines, durations=status_durations, line_times=status_times,
+            turn_state=turn_state)
         elements.append(panel)
 
     # ── Streaming answer element ──

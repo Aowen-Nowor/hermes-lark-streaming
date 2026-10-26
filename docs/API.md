@@ -78,6 +78,8 @@ gateway:
 
 **连续 terminal 调用（v2.0.22）**：hermes 对 back-to-back terminal 调用省略重复 header（裸围栏块）；面板渲染将裸块归属 terminal，每次调用渲染独立带图标步骤行（`Terminal (xxx ms)`，耗时 = 官方 post_tool_call 钩子实测）。
 
+**Agent Loop 面板懒渲染（v2.0.24）**：仅状态行非空时渲染面板——纯 answer 回合建卡不挂空壳面板；首个状态行到达时由 `_patch_status` 全量更新（`cardkit_update` = card_json 全量替换）补插面板。`panel_on_card` 旗标以建/更卡产物实测赋值，finalize 空面板删除分支据此门控（正常路径不再发 `delete_elements`）。
+
 ## 6. 指令
 
 | 指令 | 说明 |

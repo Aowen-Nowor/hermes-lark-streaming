@@ -336,7 +336,13 @@ class _RecordingClient(_FullClient):
 
 
 class TestEmptyPanelRemoval:
-    async def test_finalize_without_status_lines_deletes_panel(self):
+    async def test_pure_answer_turn_never_creates_panel(self):
+        """v2.0.24 懒渲染：纯 answer 回合建卡即无面板，finalize 无需删除.
+
+        v2.0.13 语义（建卡挂空壳 → finalize 删除）已被 v2.0.24 取代：
+        面板仅 status_lines 非空时渲染，纯 answer 回合从创建到定稿都不存在
+        面板元素，也不再发起 delete_elements 调用。
+        """
         client = _RecordingClient()
         comp = _make_composer(client)
         chat = "oc_empty_panel"
@@ -344,7 +350,13 @@ class TestEmptyPanelRemoval:
         await comp.handle_stream_frame(chat, "纯答案", finalize=True)
         st = comp._states[chat]
         assert st.status_lines == []
-        delete_calls = [
+        assert st.panel_on_card is False
+        # 建卡产物（唯一一张卡）无面板
+        assert not any(
+            e.get("element_id") == UNIFIED_PANEL_ELEMENT_ID
+            for e in client.cards["1"]["card"]["body"]["elements"]
+        )
+        panel_deletes = [
             actions for actions in client.batch_actions
             if any(
                 a.get("action") == "delete_elements"
@@ -352,7 +364,32 @@ class TestEmptyPanelRemoval:
                 for a in actions
             )
         ]
-        assert delete_calls, "空面板必须在 finalize 时被删除"
+        assert not panel_deletes, "从未有过面板的卡不应发起 delete_elements"
+
+    async def test_flag_mismatch_defensive_delete(self):
+        """防御性保险：旗标/内容错位（面板在卡上但行已空）仍删除空壳.
+
+        v2.0.24 正常路径不可达（status_lines 只增不减）；保留 v2.0.13
+        清理语义作为旗标-内容错位时的最后防线。
+        """
+        client = _RecordingClient()
+        comp = _make_composer(client)
+        chat = "oc_flag_mismatch"
+        await comp.handle_stream_frame(chat, "", finalize=False)
+        st = comp._states[chat]
+        # 人为构造错位：面板在卡上、状态行清空（模拟异常路径）
+        st.panel_on_card = True
+        st.status_lines = []
+        await comp._finalize(st, "定稿")
+        panel_deletes = [
+            actions for actions in client.batch_actions
+            if any(
+                a.get("action") == "delete_elements"
+                and UNIFIED_PANEL_ELEMENT_ID in (a.get("params", {}).get("element_ids", []))
+                for a in actions
+            )
+        ]
+        assert panel_deletes, "旗标错位时防御性删除必须生效"
 
     async def test_finalize_with_status_lines_keeps_panel(self):
         client = _RecordingClient()

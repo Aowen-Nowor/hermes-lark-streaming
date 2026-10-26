@@ -85,6 +85,12 @@ class CardTurnState:
     finalized: bool = False
     degraded: bool = False             # 卡片 API 失败 → 本 turn 走原生
     pending_status: list[str] = field(default_factory=list)  # 卡片建立前的 progress 暂存
+    # v2.0.24 面板懒渲染：当前卡片 JSON 上是否存在 agent loop 面板。
+    # 真值源 = 每次 build_card 产物实测（_card_has_panel），不靠推断——
+    # 建卡时无状态行则无面板（用户反馈：纯 answer 回合空面板体验差），
+    # 首个状态行到达时 _patch_status 全量更新补插。finalize 空面板删除
+    # 分支据此跳过对从未有过面板的卡发起 delete_elements。
+    panel_on_card: bool = False
 
 
 class FrameComposer:
@@ -505,6 +511,7 @@ class FrameComposer:
             status_durations=dict(st.tool_durations),
             status_times=[time.monotonic()] * len(pending),
         )
+        st.panel_on_card = _card_has_panel(card)
         card_id = await client.cardkit_create(card)
         # v2.0.22：卡片回复引用触发消息（用户验收：私聊/群聊都不知回复哪条）。
         # V1 全程 reply 发卡（_reply_anchor_for_event）；V2 曾丢弃 reply_to 直发。
@@ -669,6 +676,9 @@ class FrameComposer:
             status_durations=dict(st.tool_durations),
             status_times=list(st.line_times),
         )
+        # v2.0.24：首个状态行到达时全量更新补插面板（懒渲染，s172 实证）；
+        # 此处 status_lines 恒非空（调用点均已过 merge 非空门），面板必在。
+        st.panel_on_card = _card_has_panel(card)
         st.seq += 1
         st.last_activity = time.monotonic()
         await call_with_seq_recovery(
@@ -1020,6 +1030,25 @@ def _reconcile_line_times(
     except Exception:  # noqa: BLE001 — 耗时纯装饰，失败退化为全 now
         now = time.monotonic()
         return [now] * len(new)
+
+
+def _card_has_panel(card: dict[str, Any]) -> bool:
+    """实测卡片 JSON 是否含 unified panel 元素（v2.0.24 懒渲染真值源）.
+
+    以建/更卡产物为准而非调用参数推断——工厂参数（include_unified_panel）
+    或未来渲染变更不影响本判定。永不抛异常。
+    """
+    try:
+        body = card.get("body") or {}
+        elements = body.get("elements") or card.get("elements") or []
+        from ..cardkit.elements import UNIFIED_PANEL_ELEMENT_ID
+
+        return any(
+            isinstance(el, dict) and el.get("element_id") == UNIFIED_PANEL_ELEMENT_ID
+            for el in elements
+        )
+    except Exception:  # noqa: BLE001 — 追踪是装饰性状态，绝不影响主流程
+        return False
 
 
 def _panel_title(status_lines: list[str], *, elapsed_ms: float = 0.0) -> str:

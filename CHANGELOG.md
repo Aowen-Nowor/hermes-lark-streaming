@@ -1,5 +1,41 @@
 # Changelog
 
+## v2.0.24 (2026-10-26)
+
+**Agent Loop 面板懒渲染（空面板根治）+ Clarify 卡片回调配置指引（控制台配置项，非代码缺陷），718 用例全绿。**
+
+### 背景（用户反馈 2026-10-26）
+
+1. **「agent loop 折叠面板在卡片出现时就会出现，有时候并没有思考推理、或者工具调用，会出现空的折叠面板」**——取证定案：`cards.py build_streaming_card_v2` 无条件渲染面板骨架（v2.0.13 注释自述「流式期作卡片先现视觉锚」，仅 finalize 时删除空壳——Task 18 P1-A 只处理了终态残留）；纯 answer 回合空 "agent loop" 面板从建卡挂到定稿全程可见。
+2. **「Clarify 交互卡片测试提示：该应用尚未配置卡片回调，一键完成配置后即可使用」**——取证定案：**非插件缺陷**。hermes 官方适配器已注册 `register_p2_card_action_trigger`（plugins/platforms/feishu/adapter.py:1438 → :2210 → 插件 `_handle_card_action_event` → `handle_clarify_card_action`），插件链路完备；该提示 = 飞书开放平台侧应用未订阅卡片回调（控制台配置项，代码侧无可修复面）。处置 = 配置指引（README FAQ + SKILL 坑表）+ s172-E 点击探针卡验收。
+
+### 变更
+
+| 位置 | 变更 |
+|------|------|
+| cardkit/cards.py | 面板懒渲染：`build_streaming_card_v2` 仅 `status_lines` 非空时渲染面板（纯 answer 回合建卡不挂空壳；`include_unified_panel` 语义不变） |
+| composer/engine.py | `CardTurnState.panel_on_card` 旗标（真值源 = 建/更卡产物实测 `_card_has_panel`，不靠调用参数推断——工厂参数或未来渲染变更不影响判定）；`_create_card`/`_patch_status` 赋值——首个状态行到达时经全量更新补插面板（`cardkit_update` = card_json 全量替换，s172-A/B/C 真飞书探针实证「更新时新增建卡未声明元素」合法） |
+| composer/finalize.py | 空面板删除分支加 `panel_on_card` 门控：正常路径不再对从未有过面板的卡发起 `delete_elements`（省 API + 免 debug 日志噪声）；v2.0.13 清理语义降居防御性保险（旗标/内容错位仍删，测试锁定） |
+| tests/test_v224_lazy_panel.py | 新增 9 用例：`_card_has_panel` 助手 4（body/无面板/畸形不抛/扁平兼容）+ 引擎懒渲染 4（send 纯 answer 全程无面板+零删除 / seed→首个状态行补插→定稿保留 / early-create 暂存行首卡即有货 / 看门狗 seal 纯 answer 不删）+ 旗标不变量 1 |
+| tests/test_cardkit.py | 3 处断言同步懒渲染语义（面板存在性用例补 `status_lines`）+ 新增「无状态行无面板」用例 |
+| tests/e2e/test_v213_native_streaming.py | Task 18 P1-A 空面板测试重写为 v2.0.24 语义：①纯 answer 回合从建卡到定稿无面板+零删除调用 ②旗标错位防御性删除保留（新增）；有行保留面板用例不变 |
+| tests/e2e/test_v209_audit_fixes.py | 幂等计数 3→2（panel-del 不再触发；幂等守卫核心断言不变） |
+| README.md / SKILL.md / docs/API.md | 卡片交互回调配置指引（FAQ + 坑表 + 出站契约懒渲染语义）；badge 2.0.24 / tests 718；checkout 示例版本号同步 |
+
+### 配置指引：卡片交互回调（Clarify 按钮可点的前提，无需改代码）
+
+开发者后台 → 应用 → **事件与回调** → **卡片交互回调** → 编辑 → 选择「**使用长连接接收回调**」→ 保存。免公网、免重启网关（ws 长连接已常驻订阅，SDK 侧 `p2_card_action_trigger` 处理器已注册）。**勿选 webhook 模式**——网关不提供公网回调端点。配置后点击澄清卡按钮：有效澄清 → 正常解析选择；过期/未知 → v2.0.21 R7「已过期」提示卡（反馈闭环）。
+
+### 测试
+
+718 passed（707 基线 + 11 净增：v224 新增 9 + cardkit 懒渲染 1 + v213 重写净增 1）；ruff 155 基线持平；py_compile 全过。部署前 s172 真飞书探针定案机制可行性（建卡无面板 → 全量更新补插面板 → 二次更新改行 → 关流式，四步全过）。
+
+### 用户验收项
+
+① 纯 answer 快问快答：卡片从出现到定稿全程无 agent loop 面板；② 工具/思考回合：卡片先现（只有 answer + spinner）→ 首个进度行到达（约 1s 内）面板带内容出现（动态标题 agent loop · N 轮 · M 个工具 · X.Xs）；③ 控制台配置卡片回调后：澄清卡按钮可点，选过期的澄清 → 「已过期」提示卡。
+
+---
+
 ## v2.0.23 (2026-10-26)
 
 **真飞书 E2E 用例现代化（11 场景 + 版本水印动态化）+ V1→V2 迁移文档（README/SKILL），707 用例全绿。产品代码零变更。**

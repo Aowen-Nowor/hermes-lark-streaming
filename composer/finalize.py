@@ -235,9 +235,15 @@ async def finalize_card(
     # created status_lines=0 → finalized status_lines=0）卡上遗留 "agent loop"
     # 空面板头（cards.py 无条件渲染面板骨架——流式期作「卡片先现」视觉锚，终态
     # 后无内容即成空壳）。有面板行的卡片承载过程记录，保留。
+    # v2.0.24（用户反馈）：面板懒渲染（cards.py 仅 status_lines 非空时渲染）——
+    # 纯 answer 回合建卡即无面板，本分支从「主清理路径」退居防御性保险：
+    # panel_on_card=True 且行空（理论不可达的旗标/内容错位）才发起删除，
+    # 正常路径不再对从未有过面板的卡发 delete_elements（省 API + 免日志噪声）。
     # v2.0.16：有面板行时先做收口重渲染（流式「进行中橙」→ 定稿「已完成绿」），
     # 与空面板删除互斥；两者均为装饰性步骤：失败仅 debug/warning，不上抛阻断定稿。
-    if not (getattr(state, "status_lines", None) or []):
+    if not (getattr(state, "status_lines", None) or []) and getattr(
+        state, "panel_on_card", False
+    ):
         try:
             from ..cardkit.elements import UNIFIED_PANEL_ELEMENT_ID
 

@@ -363,21 +363,34 @@ class TestBuildStreamingCardV2:
         assert card["body"]["elements"]
 
     def test_with_unified_panel(self) -> None:
-        """With include_unified_panel=True (default), unified panel is present."""
+        """status_lines 非空时 unified panel 存在（v2.0.24 懒渲染：无行不渲染面板）."""
         from hermes_lark_streaming.cardkit import UNIFIED_PANEL_ELEMENT_ID
-        card = build_streaming_card_v2(tool_steps=[_STEP_RUNNING], elapsed_ms=100)
+        card = build_streaming_card_v2(
+            tool_steps=[_STEP_RUNNING], elapsed_ms=100,
+            status_lines=["🔍 Searching..."])
         assert any(e.get("element_id") == UNIFIED_PANEL_ELEMENT_ID for e in card["body"]["elements"])
+
+    def test_no_status_lines_no_panel(self) -> None:
+        """v2.0.24 懒渲染：无状态行（纯 answer 回合）建卡不挂空壳面板."""
+        from hermes_lark_streaming.cardkit import UNIFIED_PANEL_ELEMENT_ID
+        card = build_streaming_card_v2(answer_text="纯答案")
+        assert not any(
+            e.get("element_id") == UNIFIED_PANEL_ELEMENT_ID
+            for e in card["body"]["elements"]
+        )
 
     def test_unified_panel_expanded(self) -> None:
         """Unified panel placeholder respects streaming_panel_expanded."""
         from hermes_lark_streaming.cardkit import UNIFIED_PANEL_ELEMENT_ID
-        card = build_streaming_card_v2(streaming_panel_expanded=True)
+        card = build_streaming_card_v2(
+            streaming_panel_expanded=True, status_lines=["🔍 Searching..."])
         panel = next(e for e in card["body"]["elements"] if e.get("element_id") == UNIFIED_PANEL_ELEMENT_ID)
         assert panel["expanded"] is True
 
     def test_unified_panel_collapsed(self) -> None:
         from hermes_lark_streaming.cardkit import UNIFIED_PANEL_ELEMENT_ID
-        card = build_streaming_card_v2(streaming_panel_expanded=False)
+        card = build_streaming_card_v2(
+            streaming_panel_expanded=False, status_lines=["🔍 Searching..."])
         panel = next(e for e in card["body"]["elements"] if e.get("element_id") == UNIFIED_PANEL_ELEMENT_ID)
         assert panel["expanded"] is False
 

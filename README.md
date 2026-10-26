@@ -4,11 +4,11 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.23-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.24-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.22-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
-[![tests](https://img.shields.io/badge/tests-707%20passed-brightgreen)](#测试与-e2e)
+[![tests](https://img.shields.io/badge/tests-718%20passed-brightgreen)](#测试与-e2e)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
 *回答打字机流式呈现 · 工具与思考实时进面板 · 澄清问题变成可点击卡片 · 全程零 monkey-patch*
@@ -142,7 +142,7 @@ V1（1.8.x 及更早，钩子拦截形态）与 V2 **共用同一个插件目录
 ```bash
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.23
+git fetch --tags && git checkout v2.0.24
 git status --short   # 确认无残留：V1 的 controller/ patching/ state/ flush/ 应已消失
 ```
 
@@ -247,6 +247,9 @@ A: 出站帧协议（metadata 标记）与适配器接口都是官方协议；�
 
 **Q: 卡片渲染失败会怎样？**
 A: 当前回合立即降级为原生文本消息（降级红线），后续帧继续原生直到下一回合。日志保留完整原因（`composer: card channel degraded …`）。
+
+**Q: 点澄清卡按钮提示「该应用尚未配置卡片回调」？**
+A: 这是飞书开放平台侧的应用配置项，不是插件缺陷（插件与 hermes 内核的回调处理链路已就绪）。到[开发者后台](https://open.feishu.cn) → 你的应用 → 事件与回调 → 卡片交互回调 → 编辑 → 选择「**使用长连接接收回调**」→ 保存即生效（免公网、免重启网关）。注意勿选 webhook 模式（网关不提供公网回调端点）。
 
 ## 更新日志
 
