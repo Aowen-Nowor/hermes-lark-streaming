@@ -1,5 +1,40 @@
 # Changelog
 
+## v2.0.23 (2026-10-26)
+
+**真飞书 E2E 用例现代化（11 场景 + 版本水印动态化）+ V1→V2 迁移文档（README/SKILL），707 用例全绿。产品代码零变更。**
+
+### 背景（用户验收 2026-10-26）
+
+1. **「E2E 真飞书测试，有很多用例老旧了，需要更新」**——三处实锤：①脚本四处版本水印硬编码停留在 v2.0.0/v2.0.5/v2.0.13（connect 文案/answer 卡片正文/full 与 native 卡片尾注），群里看到旧版本号观感即"老旧"；②v2.0.22 的 reply 引用只存在于一次性探针 s170，未进正式场景表；③full 场景 progress 帧全是带头行，未覆盖 v2.0.22 裸围栏块→独立步骤行（Task 29 修复面）。
+2. **「s170 探针消息没包含在卡片内，是卡片外的文本消息」**——机制定案（非缺陷）：飞书 reply 的锚点本来就是一条独立聊天消息（真实流程 = 用户的提问），卡片以回复关系挂引用线，**锚点内容不进卡片体**，V1/V2 同款语义。测试设计整改：锚点文案自解释 + reply 场景复用 connect 场景消息作锚点（连跑零额外噪音）+ 私聊双验证。
+3. **「V1 用户怎么升级到 V2？更新到 README 和 skill」**——迁移路径取证定案：同目录换代码 + 三处配置；发现真陷阱：**仓库默认分支 github_sync 仍为 V1 1.8.4**（`git ls-remote --symref origin HEAD` 权威核实），`git clone` 不带分支参数 / `hermes plugins update` 都拿不到 V2——已写入 README/SKILL 并给出 tag checkout 方案。
+4. 顺手修正 SKILL.md lark-oapi floor 笔误（1.4.24 → 1.6.4，plugin.yaml 唯一事实源）。
+
+### 变更
+
+| 位置 | 变更 |
+|------|------|
+| scripts/e2e_v2.py | ①版本水印动态化：`_V` 取自 plugin.yaml 单一事实源，connect/answer/full/native 四处文案 + argparse 描述全量插值；②**新增 `reply` 场景（第 11 个）**：群聊 om_ 锚点 → reply 形态发卡（复用 connect 锚点，单独跑时自发自解释锚点）+ 私聊双验证（`FEISHU_E2E_DM_CHAT_ID`，未配置 SKIP 不计失败）+ 伪锚点降级直发（内容不丢红线；**降级用例前清 composer 状态**——首轮真飞书实测未清时 send 帧并入 ② 活跃卡、返回旧 message_id，fallback 分支落空；清后实测 ⑤ 新 message_id ≠ ②，分支真实触发）；③full 场景补 v2.0.22 裸围栏块帧（hermes 连续 terminal 调用省略 header 的真实产物）→ 断言独立步骤行归属与面板行数（3→4→5）；④锚点登记机制 `ANCHORS`（connect→reply 跨场景零噪音）；⑤头部用法/场景表/锚点语义说明重写 |
+| README.md | 新增「从 V1（1.x）升级」章节（人类视角：前提/换代码/三处配置表/重启验证/回滚）；badge 2.0.23/tests 707；git 安装默认分支陷阱警示；E2E 11 场景说明 |
+| SKILL.md | 新增第 6 节「从 V1（1.x）升级到 V2（一次性迁移）」：6.0 安装方式甄别 + 默认分支陷阱、6.1 前置核查表（hermes≥0.22/lark-oapi≥1.6.4/Python）、6.2 换代码（V1 子包残留清理）、6.3 三处配置（注册名改名/平台二选一/配置节兼容映射+9 死键清单）、6.4 依赖与重启验证、6.5 行为差异速查表（六维度）、6.6 迁移失败速查表；1.1 clone 补 `-b refactor/v2.0.0`；1.2 floor 修正；E2E 节 11 场景 + DM 变量；坑表新增「装完发现是 V1」行 |
+| tests/test_v223_e2e_refresh.py | 新增 5 用例锁定脚本结构防回归：场景注册表完整性（11 场景+分发表不漏）/版本水印动态化（旧硬编码归零 + `_V` 与 plugin.yaml 一致）/锚点登记机制/full 裸块帧存在/reply 三路径（群聊+DM+降级） |
+
+### V1→V2 迁移要点（完整步骤见 README「从 V1（1.x）升级」/ SKILL.md 第 6 节）
+
+- **换代码**：同一目录 `git fetch --tags && git checkout v2.0.23`；**勿用 `hermes plugins update`**（拉默认分支 github_sync = 仍是 V1 1.8.4）；V1 的 `controller/ patching/ state/ flush/` 子包 checkout 自动清除，解压部署用户需手动删
+- **三处配置**：①`plugins.enabled`：`hermes-lark-streaming` → `feishu-streaming-platform`（目录名 path key 兼容旧条目，规范做法改名）②平台二选一：`feishu: enabled: false` + `feishu-streaming: enabled: true`（凭证平移，防双回复）③配置节 `hermes_lark_streaming` → `feishu_streaming`（不改也自动兼容——reader 惰性回读旧节名；V1 的 9 个死键零副作用可删）
+- **硬前提**：hermes-agent ≥ v0.22（V1 常见 v0.21 需先升本体，V2 启动 fail-fast 明确报失配点）；lark-oapi ≥ 1.6.4（V1 1.8.0 起同 floor）
+- **回滚**：`git checkout v1.8.4` + 平台段/注册名改回 + 重启，即回 V1（V2 无任何运行时残留）
+
+### 测试
+
+全量 **707 passed**（702 基线 + 5 新增）。ruff 与基线持平。真飞书验收：`--scenario full,reply`（群聊；配 `FEISHU_E2E_DM_CHAT_ID` 时含私聊）。
+
+### 配置兼容
+
+零新配置、零行为变更（产品代码未动；本轮全部变更位于 scripts/e2e_v2.py + 文档 + 测试）。已部署用户只需同步脚本与文档文件，无需重启网关（E2E 脚本独立于网关进程运行）。
+
 ## v2.0.22 (2026-10-26)
 
 **卡片回复引用触发消息（私聊/群聊）+ 连续 terminal 调用渲染为独立步骤行，702 用例全绿。**

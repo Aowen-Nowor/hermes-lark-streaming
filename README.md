@@ -4,11 +4,11 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.22-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.23-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.22-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
-[![tests](https://img.shields.io/badge/tests-702%20passed-brightgreen)](#测试与-e2e)
+[![tests](https://img.shields.io/badge/tests-707%20passed-brightgreen)](#测试与-e2e)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
 *回答打字机流式呈现 · 工具与思考实时进面板 · 澄清问题变成可点击卡片 · 全程零 monkey-patch*
@@ -81,7 +81,9 @@ FrameComposer（per-chat 串行状态机 · CardTurnState）
 
 ## 快速开始
 
-> 🤖 **AI agent 部署？** 请读 [`SKILL.md`](SKILL.md)——面向 agent 的完整安装/启动/健康验证/升级回滚手册（含网关启动三要点、健康五项检查、已知环境坑速查表）。人类读者继续往下即可。
+> 🤖 **AI agent 部署？** 请读 [`SKILL.md`](SKILL.md)——面向 agent 的完整安装/启动/健康验证/V1→V2 迁移/升级回滚手册（含网关启动三要点、健康五项检查、V1 迁移三处配置、已知环境坑速查表）。人类读者继续往下即可。
+
+> ⚠ **git 安装必须带分支参数**：仓库默认分支 `github_sync` 仍是 V1（1.8.4）。V2 只在 `refactor/v2.0.0` 分支与 `v2.0.x` tag 上：`git clone -b refactor/v2.0.0 <REPO_URL>`；老用户 **勿用 `hermes plugins update` 升 V2**（它拉默认分支，拿不到 V2）。
 
 ```bash
 # 1. 复制到 hermes 插件目录
@@ -129,6 +131,33 @@ plugins:
 
 重启网关，日志出现 `✓ feishu-streaming connected` 即生效。**回滚**：平台名改回 `feishu`。
 
+## 从 V1（1.x）升级
+
+V1（1.8.x 及更早，钩子拦截形态）与 V2 **共用同一个插件目录** `~/.hermes/plugins/hermes-lark-streaming/`，升级 = 换代码 + 三处配置 + 重启，约 5 分钟。agent 可执行的完整步骤（含两种安装路径的甄别、迁移失败速查）见 [`SKILL.md`](SKILL.md) 第 6 节。
+
+**① 前提**：hermes-agent **≥ v0.22**（V1 常见 v0.21，先升 hermes 本体）；lark-oapi ≥ 1.6.4（V1 1.8.0 起同 floor，一般零动作）。
+
+**② 换代码**（停网关后）——不要用 `hermes plugins update`（默认分支仍是 V1）：
+
+```bash
+pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
+cd ~/.hermes/plugins/hermes-lark-streaming
+git fetch --tags && git checkout v2.0.23
+git status --short   # 确认无残留：V1 的 controller/ patching/ state/ flush/ 应已消失
+```
+
+**③ config.yaml 三处改动**
+
+| # | 位置 | V1 | V2 |
+|---|---|---|---|
+| ① | `plugins.enabled` | `- hermes-lark-streaming` | `- feishu-streaming-platform` |
+| ② | `platforms` | 只开着原生 `feishu` | `feishu: enabled: false` + 新增 `feishu-streaming: enabled: true`（凭证平移；**二选一，防双回复**） |
+| ③ | 配置节 | `hermes_lark_streaming:` | 改名 `feishu_streaming:`（**不改也自动兼容**；V1 的 9 个死键留着零副作用，可顺手删） |
+
+**④ 重启验证**：清 `__pycache__` → 启动网关 → 日志健康五项（[`SKILL.md`](SKILL.md) 第 3 节）→ 群聊与私聊各发一句话，卡片应**引用你的提问**（v2.0.22+）并流式打字。
+
+**回滚**：`git checkout v1.8.4` + 表中 ②③ 改回 + 重启，即回 V1（V2 无任何运行时残留）。
+
 ## 配置
 
 插件配置节 `feishu_streaming`（V1 的 `hermes_lark_streaming` 节自动迁移）：
@@ -170,7 +199,7 @@ hermes-lark-streaming/
 ├── feishu/                   # FeishuClient（CardKit REST + 瞬态重试）
 ├── config/                   # 配置读取（config.yaml → Config）
 ├── aowen/                    # /aowen 指令
-├── tests/                    # 674 用例（单元 + e2e mock 全链路）
+├── tests/                    # 707 用例（单元 + e2e mock 全链路）
 ├── scripts/                  # e2e_v2 真飞书验收 / smoke_v2 冒烟 / release 工具
 ├── docs/                     # API.md
 ├── assets/screenshots/       # 实景截图
@@ -196,13 +225,14 @@ python -m pytest tests/
 # 冒烟（无飞书凭证）
 python scripts/smoke_v2.py
 
-# 真飞书 E2E（10 场景：connect / answer / progress / interim / full / burst / native / clarify / plain / oneshot）
+# 真飞书 E2E（11 场景：connect / answer / progress / interim / full / burst / native / clarify / plain / oneshot / reply）
 export FEISHU_E2E_APP_ID=cli_xxx FEISHU_E2E_APP_SECRET=xxx FEISHU_E2E_CHAT_ID=oc_xxx
 python scripts/e2e_v2.py --scenario all
 ```
 
 `burst` 场景即 v2.0.11 修复的验收：并发帧 gather 投递，断言恒为单卡片。
 `oneshot` 场景即 v2.0.14 修复的验收：cron 投递一次性定稿卡（官方包装头解析 + 标题行 + job_id 溯源页脚）。
+`reply` 场景即 v2.0.22 修复的验收：om_ 锚点 → 卡片以 reply 形态引用（群聊必验；`FEISHU_E2E_DM_CHAT_ID` 可选配私聊双验证）+ 伪锚点降级直发；full 场景含 v2.0.22 连续 terminal 裸围栏块独立步骤行归属。版本水印自动跟随 plugin.yaml，无硬编码。
 
 ## FAQ
 
