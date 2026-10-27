@@ -1,5 +1,13 @@
 # 更新日志
 
+## v2.0.28（2026-10-27）
+
+| 类型 | 变更 |
+|------|------|
+| 变更 | 分支模型定案（用户确认）：默认分支保持 `github_sync` 不变；V2 在 `refactor/v2.0.0` 开发，由维护者手动同步到 `github_sync` 后触发双平台工作流（与 V1 流程一致） |
+| 变更 | Gitee 发版流水线触发分支 refactor/v2.0.0 → github_sync（回调 v2.0.27 改动）；create_release.py `target_commitish` 默认值与 Release 描述 CHANGELOG 链接同步回指 `github_sync` |
+| 文档 | README CI 章节补充分支模型说明；README/SKILL 安装警示改为「默认分支在手动同步 V2 之前仍为 V1」的时效表述 |
+
 ## v2.0.27（2026-10-27）
 
 | 类型 | 变更 |

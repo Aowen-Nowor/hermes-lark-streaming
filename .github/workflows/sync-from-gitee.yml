@@ -4,7 +4,7 @@ name: Sync from Gitee
 #
 # v2.0.27 变更：
 #   - 镜像策略：remote-to-remote 强制对齐（Gitee 唯一事实源，零 merge commit）；
-#     同时镜像 refactor/v2.0.0（V2 开发分支）与 github_sync（V1 冻结分支）+ 全部 tag。
+#     同时镜像 refactor/v2.0.0（V2 开发分支）与 github_sync（默认分支，V2 由用户手动同步）+ 全部 tag。
 #     （V1 版只同步 github_sync——那是 V1 默认分支，V2 发布后 GitHub 永远停在 1.8.x。）
 #   - 测试：全量 pytest（Python 3.14 对齐 hermes 官方），含 mock e2e；真飞书 E2E 不在 CI 跑
 #     （限流/凭据面，验收走服务器 scripts/e2e_v2.py）。

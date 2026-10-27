@@ -28,8 +28,8 @@ description: 指导 AI agent 在 Linux 服务器上完成 hermes-lark-streaming 
 ```bash
 mkdir -p ~/.hermes/plugins
 # 方式 A：git clone（推荐，便于升级/回滚）——⚠ 必须带 -b 分支参数：
-#   仓库默认分支 github_sync 仍是 V1（1.8.4 standalone）！不带 -b 会把
-#   V2 用户装成 V1。V2 只在 refactor/v2.0.0 分支与 v2.0.x tag 上。
+#   默认分支 github_sync 在手动同步 V2 之前仍是 V1（1.8.4 standalone）！
+#   不带 -b 会把 V2 用户装成 V1。V2 只在 refactor/v2.0.0 分支与 v2.0.x tag 上。
 git clone -b refactor/v2.0.0 <REPO_URL> ~/.hermes/plugins/hermes-lark-streaming
 # 方式 B：已有代码包 → 解压/复制到上述路径
 ```
@@ -131,7 +131,7 @@ export FEISHU_E2E_APP_ID=cli_xxx FEISHU_E2E_APP_SECRET=xxx FEISHU_E2E_CHAT_ID=oc
 **升级**（已有安装，拉新版本）：
 ```bash
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.27       # 按版本 checkout tag（勿依赖默认分支，见第 6 节）
+git fetch --tags && git checkout v2.0.28       # 按版本 checkout tag（勿依赖默认分支，见第 6 节）
 <VENV_PYTHON> -m py_compile $(git diff --name-only HEAD@{1} HEAD | grep '\.py$')  # 语法门禁
 find . -name __pycache__ -type d -prune -exec rm -rf {} +   # 清缓存（热替换旧字节码必做）
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
@@ -152,7 +152,7 @@ grep -E "^version" ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
 ```
 - **CLI 安装**（V1 README 的 `hermes plugins install <git url>`）：目录可能带 `.git`（可直接 checkout），也可能被 PM 复制（无 .git → 走方式 B 重新 clone 覆盖）
 - **手动放置**：直接 git 操作即可
-- ⚠ **不要用 `hermes plugins update hermes-lark-streaming` 升 V2**：它拉仓库**默认分支 github_sync（仍为 V1 1.8.4）**，永远拿不到 V2。V2 只在 `refactor/v2.0.0` 分支与 `v2.0.x` tag 上。
+- ⚠ **手动同步完成前不要用 `hermes plugins update hermes-lark-streaming` 升 V2**：它拉仓库**默认分支 github_sync（同步 V2 之前仍为 V1 1.8.4）**，拿不到 V2。V2 只在 `refactor/v2.0.0` 分支与 `v2.0.x` tag 上。
 
 ### 6.1 前置核查（V1 特有差异）
 
@@ -167,7 +167,7 @@ grep -E "^version" ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
 ```bash
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.27    # 或 git pull origin refactor/v2.0.0
+git fetch --tags && git checkout v2.0.28    # 或 git pull origin refactor/v2.0.0
 ```
 
 > V1 的 `controller/ patching/ state/ flush/` 子包在 V2 已删除，git checkout 会自动清掉工作区副本；**解压/复制部署的用户必须手动删除这些旧目录**（连同 V1 的 `docs/AGENT_GUIDE.md`），不要让两代代码同目录共存。
@@ -226,7 +226,7 @@ find ~/.hermes/plugins/hermes-lark-streaming -name __pycache__ -type d -prune -e
 | 启动即退、无日志 | `~/.hermes/gateway.lock` 残留 | 删锁重启 |
 | SSH 断开后进程消失 | 未用 `setsid` 脱离会话 | 用第 2 节原样命令 |
 | 插件加载了但 API 全 404/attribute error | lark-oapi < 1.4.24（无 async cardkit） | 升级 lark-oapi |
-| **装完发现是 V1（kind: standalone / 有 patching/ 目录）** | **clone 未带 `-b refactor/v2.0.0`，默认分支 github_sync 仍是 V1** | 删目录按第 1.1 节带分支重装；V1 用户升级见第 6 节 |
+| **装完发现是 V1（kind: standalone / 有 patching/ 目录）** | **clone 未带 `-b refactor/v2.0.0`，默认分支 github_sync 同步前仍是 V1** | 删目录按第 1.1 节带分支重装；V1 用户升级见第 6 节 |
 | 卡片建出来了但旧观感/字号不对 | `card_style` 配置残留（v2.0.20+ 完全 opt-in） | 删掉该配置段并重启，或按 README 配置 |
 | 密码 SSH 登不上 | 服务器 sshd 加固为仅公钥 | 用密钥认证（paramiko `pkey=` / `ssh -i`） |
 | 改了代码行为不变 | `__pycache__` 旧字节码 | 清缓存重启（第 5 节命令） |

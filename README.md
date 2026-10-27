@@ -4,7 +4,7 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.27-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.28-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.22-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
@@ -64,7 +64,7 @@ FrameComposer（per-chat 串行状态机 · CardTurnState）
 
 > 🤖 **AI agent 部署？** 请读 [`docs/SKILL.md`](docs/SKILL.md)——面向 agent 的完整安装/启动/健康验证/V1→V2 迁移/升级回滚手册（网关启动三要点、健康五项检查、已知环境坑速查表）。
 
-> ⚠ **git 安装必须带分支参数**：仓库默认分支 `github_sync` 仍是 V1（1.8.4）。V2 只在 `refactor/v2.0.0` 分支与 `v2.0.x` tag 上：`git clone -b refactor/v2.0.0 <REPO_URL>`；老用户 **勿用 `hermes plugins update` 升 V2**（它拉默认分支，拿不到 V2）。
+> ⚠ **git 安装必须带分支参数**：默认分支 `github_sync` 在手动同步 V2 之前仍是 V1（1.8.4）。V2 只在 `refactor/v2.0.0` 分支与 `v2.0.x` tag 上：`git clone -b refactor/v2.0.0 <REPO_URL>`；同步完成前 **勿用 `hermes plugins update` 升 V2**（它拉默认分支，拿不到 V2）。
 
 ```bash
 # 1. 复制到 hermes 插件目录
@@ -118,7 +118,7 @@ V1（1.8.x 及更早，钩子拦截形态）与 V2 **共用同一个插件目录
 ```bash
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.27
+git fetch --tags && git checkout v2.0.28
 git status --short   # 确认无残留：V1 的 controller/ patching/ state/ flush/ 应已消失
 ```
 
@@ -193,14 +193,14 @@ python scripts/e2e_v2.py --scenario all
 
 ## CI 与工作流
 
-Gitee 为主仓库，GitHub 为同步备份（双向均自动通知飞书）。
+Gitee 为主仓库，GitHub 为同步备份（双向均自动通知飞书）。分支模型：默认分支 `github_sync` 保持不变，V2 在 `refactor/v2.0.0` 开发、由维护者手动同步到 `github_sync` 后触发 Gitee 发版流水线（与 V1 流程一致）。
 
 | 工作流 | 平台 | 触发 | 作用 |
 |--------|------|------|------|
 | `sync-from-gitee.yml` | GitHub Actions | 每小时 | Gitee → GitHub 全分支+tag 强制镜像（`refactor/v2.0.0` + `github_sync`）；变更时跑全量测试；新版本自动创建 GitHub Release；**Gitee PR/Issue 增量摘要 → 飞书** |
 | `feishu-notify.yml` | GitHub Actions | PR/Issue 事件 | GitHub 新 PR/Issue（开/重开/关）实时推送飞书卡片 |
 | `hermes-release-watch.yml` | GitHub Actions | 每日 | hermes-agent 上游发新版 → 飞书提醒（人工跑 E2E 验证继承面后再升级生产） |
-| `.workflow/release-pipeline.yml` | Gitee Go | push 到 `refactor/v2.0.0` | 自动创建 Gitee Release（tag = plugin.yaml 版本） |
+| `.workflow/release-pipeline.yml` | Gitee Go | push 到 `github_sync`（V2 手动同步后触发） | 自动创建 Gitee Release（tag = plugin.yaml 版本） |
 
 **所需仓库 Secrets**（GitHub 仓库 Settings → Secrets and variables → Actions；Gitee Go 在流水线参数设置）：
 

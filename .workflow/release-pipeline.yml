@@ -6,9 +6,9 @@ triggers:
   push:
     branches:
       precise:
-        # v2.0.27: V2 开发分支（版本发布 push 目标）。
-        # 原 github_sync 为 V1 冻结分支，V2 时代永不更新导致流水线闲置。
-        - refactor/v2.0.0
+        # 默认分支（用户定案保持不变）。V2 在 refactor/v2.0.0 开发，
+        # 由用户手动同步到 github_sync 后触发本流水线（与 V1 发版流程一致）。
+        - github_sync
 variables:
   global:
     - OWNER
