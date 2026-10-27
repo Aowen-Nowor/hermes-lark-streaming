@@ -27,8 +27,7 @@ description: 指导 AI agent 在 Linux 服务器上完成 hermes-lark-streaming 
 
 ```bash
 mkdir -p ~/.hermes/plugins
-# 方式 A：git clone（推荐，便于升级/回滚）——默认分支 github_sync 即 V2 正式版
-#   （refactor/v2.0.0 为维护者开发分支，勿用于安装）
+# 方式 A：git clone（推荐，便于升级/回滚）
 git clone <REPO_URL> ~/.hermes/plugins/hermes-lark-streaming
 # 方式 B：已有代码包 → 解压/复制到上述路径
 ```
@@ -121,14 +120,14 @@ export FEISHU_E2E_APP_ID=cli_xxx FEISHU_E2E_APP_SECRET=xxx FEISHU_E2E_CHAT_ID=oc
 
 `full` 场景覆盖：建卡前暂存 → 首帧建卡 → 面板行 → 流式更新 → 定稿页脚。全场景 11 个：connect / answer / progress / interim / full / burst / native / clarify / plain / oneshot / **reply**（群聊引用 + 私聊 `FEISHU_E2E_DM_CHAT_ID` 双验证 + 伪锚点降级；与 connect 连跑零噪音：`--scenario connect,reply`）。版本水印自动跟随 plugin.yaml。
 
-人工观察验收：私聊 @ 机器人发一句话——卡片应引用提问（v2.0.22+）、流式打字、面板出现工具/思考行、页脚落定。
+人工观察验收：私聊 @ 机器人发一句话——卡片应引用提问、流式打字、面板出现工具/思考行、页脚落定。
 
 ## 5. 升级与回滚
 
 **升级**（已有安装，拉新版本）：
 ```bash
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.29       # 按版本 checkout tag；或 hermes plugins update（主分支已同步新版后）
+git fetch --tags && git checkout v2.0.29       # 按版本 checkout tag；或 hermes plugins update
 <VENV_PYTHON> -m py_compile $(git diff --name-only HEAD@{1} HEAD | grep '\.py$')  # 语法门禁
 find . -name __pycache__ -type d -prune -exec rm -rf {} +   # 清缓存（热替换旧字节码必做）
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
@@ -149,7 +148,7 @@ grep -E "^version" ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
 ```
 - **CLI 安装**（V1 README 的 `hermes plugins install <git url>`）：目录可能带 `.git`（可直接 checkout），也可能被 PM 复制（无 .git → 走方式 B 重新 clone 覆盖）
 - **手动放置**：直接 git 操作即可
-- `hermes plugins update hermes-lark-streaming` 拉取默认分支=主分支（维护者同步 V2 后即正式版）；若执行后 plugin.yaml 仍是 1.8.x，说明主分支尚未同步 V2（V2 未上线），改用 checkout tag（6.2）
+- `hermes plugins update hermes-lark-streaming` 自动拉取最新发布版；若执行后 plugin.yaml 仍是 1.8.x，说明 V2 尚未发布，改用 checkout tag（6.2）
 
 ### 6.1 前置核查（V1 特有差异）
 
@@ -164,7 +163,7 @@ grep -E "^version" ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
 ```bash
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.29    # 或 hermes plugins update（主分支已同步 V2 后）
+git fetch --tags && git checkout v2.0.29    # 或 hermes plugins update
 ```
 
 > V1 的 `controller/ patching/ state/ flush/` 子包在 V2 已删除，git checkout 会自动清掉工作区副本；**解压/复制部署的用户必须手动删除这些旧目录**（连同 V1 的 `docs/AGENT_GUIDE.md`），不要让两代代码同目录共存。
@@ -202,8 +201,8 @@ find ~/.hermes/plugins/hermes-lark-streaming -name __pycache__ -type d -prune -e
 |---|---|---|
 | 实现形态 | 钩子 + 运行时拦截（patching/ 六 wrapper） | 官方 register_platform 协议，零 monkey-patch |
 | 平台占用 | 借道原生 feishu 平台 | 独立平台名 feishu-streaming（原生可关可留） |
-| 配置注入 | 往 config.yaml 注入配置节 + plugins.enabled 条目 | 零注入（v2.0.20 起全部 opt-in） |
-| 引用回复 | 无（卡片直发） | 卡片 reply 引用触发消息（v2.0.22，私聊/群聊；cron/后台无 om_ 锚点自动直发） |
+| 配置注入 | 往 config.yaml 注入配置节 + plugins.enabled 条目 | 零注入（全部 opt-in） |
+| 引用回复 | 无（卡片直发） | 卡片 reply 引用触发消息（私聊/群聊；cron/后台无 om_ 锚点自动直发） |
 | hermes 版本面 | v0.21.x 可用 | 需 v0.22+（启动 fail-fast 探测会明确报失配点） |
 | 回滚 | — | `git checkout v1.8.4` + 平台段改回 feishu + plugins.enabled 改回旧名 → 重启即回 V1 |
 
@@ -223,10 +222,10 @@ find ~/.hermes/plugins/hermes-lark-streaming -name __pycache__ -type d -prune -e
 | 启动即退、无日志 | `~/.hermes/gateway.lock` 残留 | 删锁重启 |
 | SSH 断开后进程消失 | 未用 `setsid` 脱离会话 | 用第 2 节原样命令 |
 | 插件加载了但 API 全 404/attribute error | lark-oapi < 1.4.24（无 async cardkit） | 升级 lark-oapi |
-| **装完发现是 V1（kind: standalone / 有 patching/ 目录）** | **主分支尚未同步 V2（V2 未上线）** | 确认维护者已同步主分支后按第 1.1 节重装；V1 用户升级见第 6 节 |
-| 卡片建出来了但旧观感/字号不对 | `card_style` 配置残留（v2.0.20+ 完全 opt-in） | 删掉该配置段并重启，或按 README 配置 |
+| **装完发现是 V1（kind: standalone / 有 patching/ 目录）** | 安装源不是 V2 正式版 | 按第 5 节 checkout v2.0.29 tag 后重启；V1 用户升级见第 6 节 |
+| 卡片建出来了但旧观感/字号不对 | `card_style` 配置残留（完全 opt-in） | 删掉该配置段并重启，或按 README 配置 |
 | 密码 SSH 登不上 | 服务器 sshd 加固为仅公钥 | 用密钥认证（paramiko `pkey=` / `ssh -i`） |
 | 改了代码行为不变 | `__pycache__` 旧字节码 | 清缓存重启（第 5 节命令） |
 | 回合卡片引用不了消息 | 锚点非 `om_` 前缀（cron/后台合成 id） | 属预期：非 om_ 直发（reply API 必败 99992354） |
 | 点澄清卡按钮提示「该应用尚未配置卡片回调」 | 飞书开放平台未订阅卡片回调（非插件缺陷，插件与内核回调链路已就绪） | 开发者后台 → 事件与回调 → 卡片交互回调 → 选「使用长连接接收回调」保存即生效；勿选 webhook（无公网回调端点） |
-| clarify 等待期卡片直接「已完成」/回调后另开新卡 | `clarify_suspend_sec` 被设为 0（v2.0.26 暂停语义关闭） | 删掉该配置或设 ≥1（默认 1.2s）后重启；v2.0.25 及以下无此能力，升级见第 6 节 |
+| clarify 等待期卡片直接「已完成」/回调后另开新卡 | `clarify_suspend_sec` 被设为 0（暂停语义关闭） | 删掉该配置或设 ≥1（默认 1.2s）后重启 |
