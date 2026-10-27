@@ -27,16 +27,15 @@ description: 指导 AI agent 在 Linux 服务器上完成 hermes-lark-streaming 
 
 ```bash
 mkdir -p ~/.hermes/plugins
-# 方式 A：git clone（推荐，便于升级/回滚）——⚠ 必须带 -b 分支参数：
-#   默认分支 github_sync 在手动同步 V2 之前仍是 V1（1.8.4 standalone）！
-#   不带 -b 会把 V2 用户装成 V1。V2 只在 refactor/v2.0.0 分支与 v2.0.x tag 上。
-git clone -b refactor/v2.0.0 <REPO_URL> ~/.hermes/plugins/hermes-lark-streaming
+# 方式 A：git clone（推荐，便于升级/回滚）——默认分支 github_sync 即 V2 正式版
+#   （refactor/v2.0.0 为维护者开发分支，勿用于安装）
+git clone <REPO_URL> ~/.hermes/plugins/hermes-lark-streaming
 # 方式 B：已有代码包 → 解压/复制到上述路径
 ```
 
 ### 1.2 依赖安装
 
-插件依赖 `lark-oapi >= 1.6.4`（双硬 floor：1.4.0 无 async cardkit 方法集 `acreate/acontent/abatch_update/asettings`，1.6.4 才有 extra_ua_tags；与 plugin.yaml `python_dependencies` 逐字同步）+ `PyYAML >= 6.0`。装进 **hermes 运行所用的同一个 venv**：
+插件依赖 `lark-oapi >= 1.6.4` + `PyYAML >= 6.0`（floor 缘由见 plugin.yaml `python_dependencies` 注释，逐字同步）。装进 **hermes 运行所用的同一个 venv**：
 
 ```bash
 # 找到 hermes 的 venv（常见位置：hermes-agent 仓库内 venv/ 或专用环境目录）
@@ -120,18 +119,16 @@ export FEISHU_E2E_APP_ID=cli_xxx FEISHU_E2E_APP_SECRET=xxx FEISHU_E2E_CHAT_ID=oc
 <VENV_PYTHON> scripts/e2e_v2.py --scenario full   # 10 断言，全 PASS 退出码 0
 ```
 
-`full` 场景覆盖：建卡前暂存 → 首帧建卡 → 面板行（含 v2.0.22 连续 terminal 裸围栏块独立步骤行）→ 流式更新 → 定稿页脚。
+`full` 场景覆盖：建卡前暂存 → 首帧建卡 → 面板行 → 流式更新 → 定稿页脚。全场景 11 个：connect / answer / progress / interim / full / burst / native / clarify / plain / oneshot / **reply**（群聊引用 + 私聊 `FEISHU_E2E_DM_CHAT_ID` 双验证 + 伪锚点降级；与 connect 连跑零噪音：`--scenario connect,reply`）。版本水印自动跟随 plugin.yaml。
 
-全场景 11 个：connect / answer / progress / interim / full / burst / native / clarify / plain / oneshot / **reply**（v2.0.22 引用验收：群聊必验 + 私聊经 `FEISHU_E2E_DM_CHAT_ID` 双验证 + 伪锚点降级；与 connect 连跑时复用其消息作锚点零额外噪音：`--scenario connect,reply`）。版本水印自动跟随 plugin.yaml，无硬编码。
-
-私聊场景验收：把 `FEISHU_E2E_DM_CHAT_ID` 设为机器人与用户的 P2P 会话 id（`oc_` 开头，可从网关日志 `Inbound dm message ... chat_id=` 取得），reply 场景会在私聊里重复引用验证；或在私聊里 @ 机器人发一句话，观察卡片是否：引用你的提问消息（v2.0.22+）、流式打字、面板出现工具/思考行、页脚落定。
+人工观察验收：私聊 @ 机器人发一句话——卡片应引用提问（v2.0.22+）、流式打字、面板出现工具/思考行、页脚落定。
 
 ## 5. 升级与回滚
 
 **升级**（已有安装，拉新版本）：
 ```bash
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.28       # 按版本 checkout tag（勿依赖默认分支，见第 6 节）
+git fetch --tags && git checkout v2.0.29       # 按版本 checkout tag；或 hermes plugins update（主分支已同步新版后）
 <VENV_PYTHON> -m py_compile $(git diff --name-only HEAD@{1} HEAD | grep '\.py$')  # 语法门禁
 find . -name __pycache__ -type d -prune -exec rm -rf {} +   # 清缓存（热替换旧字节码必做）
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
@@ -152,7 +149,7 @@ grep -E "^version" ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
 ```
 - **CLI 安装**（V1 README 的 `hermes plugins install <git url>`）：目录可能带 `.git`（可直接 checkout），也可能被 PM 复制（无 .git → 走方式 B 重新 clone 覆盖）
 - **手动放置**：直接 git 操作即可
-- ⚠ **手动同步完成前不要用 `hermes plugins update hermes-lark-streaming` 升 V2**：它拉仓库**默认分支 github_sync（同步 V2 之前仍为 V1 1.8.4）**，拿不到 V2。V2 只在 `refactor/v2.0.0` 分支与 `v2.0.x` tag 上。
+- `hermes plugins update hermes-lark-streaming` 拉取默认分支=主分支（维护者同步 V2 后即正式版）；若执行后 plugin.yaml 仍是 1.8.x，说明主分支尚未同步 V2（V2 未上线），改用 checkout tag（6.2）
 
 ### 6.1 前置核查（V1 特有差异）
 
@@ -167,7 +164,7 @@ grep -E "^version" ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
 ```bash
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.28    # 或 git pull origin refactor/v2.0.0
+git fetch --tags && git checkout v2.0.29    # 或 hermes plugins update（主分支已同步 V2 后）
 ```
 
 > V1 的 `controller/ patching/ state/ flush/` 子包在 V2 已删除，git checkout 会自动清掉工作区副本；**解压/复制部署的用户必须手动删除这些旧目录**（连同 V1 的 `docs/AGENT_GUIDE.md`），不要让两代代码同目录共存。
@@ -226,7 +223,7 @@ find ~/.hermes/plugins/hermes-lark-streaming -name __pycache__ -type d -prune -e
 | 启动即退、无日志 | `~/.hermes/gateway.lock` 残留 | 删锁重启 |
 | SSH 断开后进程消失 | 未用 `setsid` 脱离会话 | 用第 2 节原样命令 |
 | 插件加载了但 API 全 404/attribute error | lark-oapi < 1.4.24（无 async cardkit） | 升级 lark-oapi |
-| **装完发现是 V1（kind: standalone / 有 patching/ 目录）** | **clone 未带 `-b refactor/v2.0.0`，默认分支 github_sync 同步前仍是 V1** | 删目录按第 1.1 节带分支重装；V1 用户升级见第 6 节 |
+| **装完发现是 V1（kind: standalone / 有 patching/ 目录）** | **主分支尚未同步 V2（V2 未上线）** | 确认维护者已同步主分支后按第 1.1 节重装；V1 用户升级见第 6 节 |
 | 卡片建出来了但旧观感/字号不对 | `card_style` 配置残留（v2.0.20+ 完全 opt-in） | 删掉该配置段并重启，或按 README 配置 |
 | 密码 SSH 登不上 | 服务器 sshd 加固为仅公钥 | 用密钥认证（paramiko `pkey=` / `ssh -i`） |
 | 改了代码行为不变 | `__pycache__` 旧字节码 | 清缓存重启（第 5 节命令） |

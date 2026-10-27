@@ -55,15 +55,13 @@ gateway:
 | 长文无标记 | 无标记且 ≥200 字 | 一次性静态卡（send_message 工具族长文） |
 | 普通消息 | 无标记（<200 字） | 原生路径（继承行为） |
 
-**回复引用（v2.0.22）**：建卡投递时 `reply_to` 锚点为 `om_` 前缀 → 卡片以飞书原生 reply 形态引用触发消息（`reply_card_by_id`，hermes 官方 `_reply_anchor_for_event` 默认锚点 = 触发消息 message_id，私聊/群聊自动生效）；锚点非 `om_`（cron/后台合成 task_id，reply API 必败 99992354）或 reply 失败 → 降级直发（内容永不丢）。流式更新按 card_id 走，与消息发送方式无关。
-
-**连续 terminal 调用（v2.0.22）**：hermes 对 back-to-back terminal 调用省略重复 header（裸围栏块）；面板渲染将裸块归属 terminal，每次调用渲染独立带图标步骤行（`Terminal (xxx ms)`，耗时 = 官方 post_tool_call 钩子实测）。
-
-**Agent Loop 面板懒渲染（v2.0.24）**：仅状态行非空时渲染面板——纯 answer 回合建卡不挂空壳面板；首个状态行到达时由 `_patch_status` 全量更新（`cardkit_update` = card_json 全量替换）补插面板。`panel_on_card` 旗标以建/更卡产物实测赋值，finalize 空面板删除分支据此门控。
-
-**Native 帧通道归属判定（v2.0.25）**：native 帧不携带 interim/composite 标记（官方 transport 仅 text/finalize/chat/reply/turn），`_split_native_composite` 以**行语法扫描**判定——💬 思考块（含续行）/ 围栏命令块 / 通知轨前缀行 / 具名工具行（emoji+可解析工具名，含紧随的缩进命令体行）全部合法才视为进度帧，answer 正文行（表格、非 emoji 小节、非缩进段落）任一不合法即整帧按 answer 处理；官方流式光标 ` ▉`（`DEFAULT_STREAMING_CURSOR`）重组前剥除。误杀方向安全：真进度行落入正文一闪而过，官方 overlay 下一帧即清空，内容永不丢。
-
-**Clarify 暂停/恢复（v2.0.26）**：hermes 在 clarify 交互前强制 finalize 当前流（`run_turn_runner.py:1404`，WeCom 气泡模型语义），回调后 re-seed 重开新流——边界 finalize 与真回合终态到达 composer 时参数一致（text, finalize=True），唯一可靠区分 = 边界后必紧跟 `send_clarify`（同一事件循环 <200ms）。引擎将 finalize 帧挂入**暂停窗口**（`clarify_suspend_sec`，默认 1.2s，0=关闭）：窗口内 `suspend_for_clarify` 确认边界 → 卡保持流式态 + 面板暂停行（⏸ clarify_wait），回调后 seed/delta「新段内累积快照」与 `resume_base` 段拼接，**同一张卡**续流至真回合终态落定（一次澄清回合一张卡）；窗口到期无 send_clarify → `_pause_expire` 真落定。暂停/窗口期豁免看门狗 seal 与 GC idle 回收（hermes clarify 硬超时 3600s 保证终态必达）；turn_id 变化的帧对暂停卡先真落定再建新卡（防跨回合串卡）。hermes clarify 占位文案（💬 开头单行 ≤40 字符）不落正文/面板。
+| 机制（版本） | 行为 |
+|---|---|
+| 回复引用（v2.0.22） | 建卡时 `reply_to` 锚点为 `om_` 前缀 → 飞书原生 reply 形态引用触发消息（hermes 官方 `_reply_anchor_for_event` 默认锚点，私聊/群聊自动生效）；锚点非 `om_`（cron/后台合成 id，reply API 必败 99992354）或 reply 失败 → 降级直发（内容永不丢）；流式更新按 card_id 走，与消息发送方式无关 |
+| 连续 terminal 调用（v2.0.22） | hermes 对 back-to-back terminal 省略重复 header（裸围栏块）→ 裸块归属 terminal，每次调用渲染独立带图标步骤行（`Terminal (xxx ms)`，耗时 = 官方 post_tool_call 钩子实测） |
+| 面板懒渲染（v2.0.24） | 仅状态行非空时渲染面板——纯 answer 回合建卡不挂空壳；首个状态行到达由 `_patch_status` 全量更新补插（`cardkit_update` = card_json 全量替换）；`panel_on_card` 旗标以建/更卡产物实测赋值，finalize 空面板删除分支据此门控 |
+| native 帧归属判定（v2.0.25） | native 帧不携带 interim/composite 标记（官方 transport 仅 text/finalize/chat/reply/turn），`_split_native_composite` **行语法扫描**：💬 思考块（含续行）/ 围栏命令块 / 通知轨前缀行 / 具名工具行（emoji+可解析工具名，含紧随缩进命令体行）全部合法才视为进度帧，answer 正文行（表格、非 emoji 小节、非缩进段落）任一不合法即整帧按 answer；官方流式光标 ` ▉` 重组前剥除。误杀方向安全：真进度行落入正文一闪而过，官方 overlay 下一帧即清空，内容永不丢 |
+| clarify 暂停/恢复（v2.0.26） | hermes 在 clarify 交互前强制 finalize 当前流（WeCom 气泡模型语义）、回调后 re-seed 重开新流——边界 finalize 与真回合终态参数一致（text, finalize=True），唯一可靠区分 = 边界后必紧跟 `send_clarify`（同一事件循环 <200ms）。finalize 帧挂**暂停窗口**（`clarify_suspend_sec` 默认 1.2s，0=关闭）：`suspend_for_clarify` 确认边界 → 卡保持流式态 + 面板暂停行（⏸ clarify_wait），回调后「新段内累积快照」与 `resume_base` 段拼接，**同一张卡**续流至真回合终态（一次澄清回合一张卡）；窗口到期无确认 → `_pause_expire` 真落定。暂停/窗口期豁免看门狗 seal 与 GC idle 回收（hermes clarify 硬超时 3600s 保证终态必达）；turn_id 变化的帧对暂停卡先真落定再建新卡（防跨回合串卡）；hermes 占位文案（💬 开头单行 ≤40 字符）不落正文/面板 |
 
 ## 5. 指令
 

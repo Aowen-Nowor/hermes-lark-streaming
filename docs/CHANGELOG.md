@@ -1,5 +1,12 @@
 # 更新日志
 
+## v2.0.29（2026-10-27）
+
+| 类型 | 变更 |
+|------|------|
+| 变更 | 分支语义定案（用户确认）：`github_sync` = 主分支 = **V2 正式版**（同步即上线），`refactor/v2.0.0` 仅为维护者开发分支——安装/升级指引全面回归主分支与 `hermes plugins update` 正式路径（纠正 v2.0.27/28 过渡期表述） |
+| 文档 | README 再精简（新增分支模型表，配置/FAQ/升级收敛）；SKILL 精简并同步分支语义；API.md 出站契约段表格化；CHANGELOG 清理服务器环境/探针编号等与项目无关细节 |
+
 ## v2.0.28（2026-10-27）
 
 | 类型 | 变更 |
@@ -52,7 +59,7 @@
 | 类型 | 变更 |
 |------|------|
 | 变更 | 真飞书 E2E 现代化：版本水印动态化（跟随 plugin.yaml 单一事实源）；新增 reply 场景（第 11 个：群聊引用 + 私聊 `FEISHU_E2E_DM_CHAT_ID` 双验证 + 伪锚点降级直发）；full 场景补 v2.0.22 裸围栏块帧；产品代码零变更 |
-| 定案 | s170 探针消息为「卡片外独立文本」属机制正解：飞书 reply 锚点本就是一条独立消息，锚点内容不进卡片体——测试设计整改为锚点自解释 + connect/reply 连跑零噪音 |
+| 定案 | 探针消息为「卡片外独立文本」属机制正解：飞书 reply 锚点本就是一条独立消息，锚点内容不进卡片体——测试设计整改为锚点自解释 + connect/reply 连跑零噪音 |
 | 文档 | README 新增「从 V1（1.x）升级」章节；SKILL 新增第 6 节 V1→V2 迁移（安装方式甄别/前置核查/三处配置/行为差异速查/迁移失败速查）；**仓库默认分支 github_sync 仍为 V1 1.8.4** 陷阱警示（clone 不带 `-b refactor/v2.0.0` 会装成 V1） |
 | 测试 | 新增 test_v223_e2e_refresh.py 5 用例锁定脚本结构，全量 707 passed |
 
@@ -89,7 +96,7 @@
 | 类型 | 变更 |
 |------|------|
 | 新增 | footer `reasoning` 推理等级字段：`display.show_reasoning: true` 且 `agent.reasoning_effort` 有效时默认自动追加（经官方解析器 `resolve_reasoning_config`；显式配置 footer.fields 时不干预） |
-| 新增 | 卡片自定义字号 `card_style.text_size`（官方 `config.style.text_size` 三档 token 机制，token 名 `cus-ans`/`cus-aux`；s157 真飞书探针定案 CardKit 接受） |
+| 新增 | 卡片自定义字号 `card_style.text_size`（官方 `config.style.text_size` 三档 token 机制，token 名 `cus-ans`/`cus-aux`；真飞书探针定案 CardKit 接受） |
 | 定案 | footer 成本族字段（cost/tokens/cache）V2 官方契约数据不可达，渲染框架保留待数据通道开放；卡片复制 = 飞书平台能力边界（`enable_forward` 官方默认开启，零代码） |
 | 测试 | 新增 28 用例，全量 672 passed |
 
@@ -97,7 +104,7 @@
 
 | 类型 | 变更 |
 |------|------|
-| 兼容 | hermes-agent v0.22.2 兼容性验证零代码缺陷定案：适配器基类/native streaming 契约/reasoning hooks/cron 投递/平台注册协议全部零变化（服务器解压 diff + 实测 import） |
+| 兼容 | hermes-agent v0.22.2 兼容性验证零代码缺陷定案：适配器基类/native streaming 契约/reasoning hooks/cron 投递/平台注册协议全部零变化（实测 import 验证） |
 | 兼容 | plugin.yaml 补 `python_dependencies`（PEP 508）声明——v0.22.x PM「conflicts are refused」契约收紧的机制化收尾（v2.0.13 部署事故闭环） |
 | 清理 | docs/API.md 删 4 行幽灵配置键（v2.0.17 已删死键的文档漏同步）；badge tests 修正为 644 |
 
@@ -105,7 +112,7 @@
 
 | 类型 | 变更 |
 |------|------|
-| 修复 | P0「一个问题拆 3 张卡」：流首帧模型 content 尚空 → `cardkit_stream_element` 报 99992402 → 连锁降级建卡（s152 真飞书探针二分定案：stream_element content 必填非空）——`_stream_answer` 与 `finalize_card` 两处空串守卫（累积快照语义下空 = 无新内容，跳过无损） |
+| 修复 | P0「一个问题拆 3 张卡」：流首帧模型 content 尚空 → `cardkit_stream_element` 报 99992402 → 连锁降级建卡（真飞书探针二分定案：stream_element content 必填非空）——`_stream_answer` 与 `finalize_card` 两处空串守卫（累积快照语义下空 = 无新内容，跳过无损） |
 | 清理 | V1 遗留全仓清理（用户指令「代码干净无冗余」）：死函数×5 + 死配置属性×12（连带孤儿机制）+ 展示死键 + 死测试×28 + 幽灵文件（tests/integration/ 仅剩 __pycache__、无引用截图），AST 全仓交叉引用扫描定案 + 12 属性防回引测试 |
 | 测试 | 全量 644 passed |
 
@@ -114,7 +121,7 @@
 | 类型 | 变更 |
 |------|------|
 | 修复 | 面板视觉四项（用户截图验收）：Terminal/shell 工具行齿轮 → `code_outlined`；流式期最后一组思考轮橙色、定稿收口重渲染全绿（红色不实施——帧流无失败数据源不伪造，失败语义由 ⚠️ 橙色警告行承载）；⚠️/🚨 警告族通报行橙色醒目；cron 卡头部去图标 |
-| 定案 | 官方 batch_update 无 update_elements action（s146 真飞书探针，code=10002）→ 面板收口采用 delete+add 同批次重建 |
+| 定案 | 官方 batch_update 无 update_elements action（真飞书探针，code=10002）→ 面板收口采用 delete+add 同批次重建 |
 
 ## v2.0.15（2026-10-13）
 
@@ -205,4 +212,4 @@
 |------|------|
 | 变更 | **架构重构：standalone 补丁插件 → 正规 platform 插件（零 monkey-patch）**：`FeishuStreamingAdapter` 继承内置 `FeishuAdapter`（能力零损失），新增 composer 帧重组引擎（官方 metadata 四通道分类 → CardKit 生命周期，失败自动降级原生文本永不丢消息）；clarify 卡片闭环正式化；删 `patching/`、`controller/`；平台名 `feishu-streaming` 与原生 `feishu` 二选一，随时回滚 |
 | 修复 | 真飞书 E2E 验证随修五处真实缺陷：建卡前占位状态未排除（整 turn 降级）、`_create_card` 丢弃 pending_status（首卡面板恒空）、clarify 相对导入越界（生产澄清卡必静默失效）、`type()` 重建类借用方法 `__class__` cell 指向旧基类（改为导入期绑定真实基类）、tests/e2e V2 移植 |
-| 验证 | 云服务器（Ubuntu 26.04 / Python 3.14 / hermes v0.21.6）真飞书 E2E 七场景 25+ 断言全 PASS，全量套件 585/585 |
+| 验证 | 真飞书 E2E 七场景 25+ 断言全 PASS（hermes v0.21.6 / Python 3.14），全量套件 585/585 |
