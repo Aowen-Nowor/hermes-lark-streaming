@@ -28,13 +28,13 @@ from ..cardkit.progline import split_progress_segments, strip_dedup_suffix
 from ..cardkit.seq import call_with_seq_recovery
 from .classify import (
     _EMOJI_RE,
+    _PLATFORM_NOTICE_RES,
     _THINKING_PREFIX,
     CH_FINAL,
     CH_INTERIM,
     CH_PROGRESS,
     CH_STREAM,
     ClassifyResult,
-    _is_progress_text,
     parse_progress_line,
 )
 
@@ -860,6 +860,94 @@ def _answer_element_id() -> str:
 # ``"\n\n---\n".join((accumulated, progress))``；任一段为空时 join 结果不含分隔符）。
 _NATIVE_COMPOSITE_SEP = "\n\n---\n"
 
+# hermes 官方流式光标（gateway/config.py:483 DEFAULT_STREAMING_CURSOR = " ▉"）。
+# 仅 interim tick 的 display 文本末尾追加（stream_consumer.py:_push_update:829-833）；
+# 非 interim 推送帧与 finalize 帧不带光标。纯显示装饰，重组前剥除——官方 ACK 侧
+# 同款语义（stream_consumer.py:301-302 ``acked.endswith(self.cfg.cursor)`` 剥除）。
+_NATIVE_CURSOR = " ▉"
+
+
+def _strip_native_cursor(text: str) -> str:
+    """剥掉官方流式光标尾巴（display 装饰；剥除语义与官方 ACK 侧一致）。"""
+    if text.endswith(_NATIVE_CURSOR):
+        return text[: -len(_NATIVE_CURSOR)]
+    return text
+
+
+def _is_named_tool_line(line: str) -> bool:
+    """单行是否为官方工具行：emoji 开头**且**能解析出工具名.
+
+    head 模板 ``{token} {ascii-name}`` 不含 emoji 前置条件，"hello world" 这类
+    两个英文单词的普通文本会命中 tool="world"——必须先卡 emoji（官方 progress
+    模板全部 emoji 起始）；通用 emoji 行（✅ 确认语 / 🌤️ 正文小节等）解析不出
+    工具名，同样不算工具行。
+    """
+    if not _EMOJI_RE.match(line):
+        return False
+    kind, tool, _clean = parse_progress_line(line)
+    return kind == "tool" and bool(tool)
+
+
+def _is_progress_frame_text(text: str) -> bool:
+    """整帧行语法扫描（v2.0.25 结构化校验）：官方 native 进度帧的行语法.
+
+    合法行（官方 overlay/progress 内容只有这几种，stream_consumer.py:246-254 +
+    run_turn_runner _progress_* 模板）：
+
+    1. 💬 思考块（reasoning 中继 / interim 播报）及其后续非 emoji 续行；
+    2. 围栏命令块（``` 开闭之间任意内容；连续调用省略 header 的裸围栏也算）；
+    3. 通知轨固定前缀行（⚠️ Subagent failed/timed out，hermes 硬编码）；
+    4. 具名工具行（emoji + 可解析工具名：pending / preview / head / 动词行），
+       以及**紧随其后**的缩进命令体行——无围栏多行工具行
+       （``💻 Terminal\\n<缩进命令>``，2026-10-12 14:37 实录帧）的延续；
+    5. 空行中性（思考块段落分隔，v2.0.8 语义）。
+
+    v2.0.25 事故根治（用户 2026-10-27 反馈）：旧「emoji 开头且 ≤300 即进度」
+    启发式把 ✅ 开头的 answer 累积快照整帧误判为进度 → 逐行拆进面板（cron
+    创建回合 finalize status_lines=12：任务表格+内容构成全部泄漏进折叠面板；
+    正文因下一快照自愈反而正确）。本扫描器下，answer 的正文行（表格行、
+    非 emoji 小节、非缩进段落）任一不合法即整帧出局。
+    误杀方向安全：真进度行落入正文一闪而过（官方 overlay 下一帧即清空，
+    stream_consumer.py:290-291），内容永不丢。
+    """
+    in_fence = False
+    in_thinking = False
+    prev_tool = False  # 仅对紧随的下一行有效（命令体只挂靠直接上一工具行）
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue  # 空行：块间分隔，不参与判定
+        if in_fence:
+            if stripped.startswith("```"):
+                in_fence = False
+            continue
+        if stripped.startswith("```"):
+            in_fence = True
+            in_thinking = False
+            prev_tool = False
+            continue
+        if stripped.startswith(_THINKING_PREFIX):
+            in_thinking = True
+            prev_tool = False
+            continue
+        if any(rx.match(stripped) for rx in _PLATFORM_NOTICE_RES):
+            in_thinking = False
+            prev_tool = False
+            continue
+        if _is_named_tool_line(stripped):
+            in_thinking = False
+            prev_tool = True
+            continue
+        # 非 emoji 行：思考续行 / 缩进命令体（raw 保留原始缩进）→ 合法；
+        # 其余（表格行、正文段落……）→ 整帧不是进度帧
+        if in_thinking:
+            continue
+        if prev_tool and raw[:1] in (" ", "\t"):
+            continue
+        return False
+    return True
+
 
 def _split_native_composite(text: str) -> tuple[str, list[str]]:
     """拆 hermes native 复合帧：``{answer}`` + 分隔符 + ``{工具进度行}``.
@@ -868,33 +956,41 @@ def _split_native_composite(text: str) -> tuple[str, list[str]]:
     interim tick（工具运行中）帧体为 ``answer + "\n\n---\n" + progress``；
     progress 是 ``"\n".join(_tool_progress_lines)``（项可为多行围栏块）。
 
-    拆分策略（保守优先，误拆自愈）：
-    - 无分隔符：整帧是纯正文；但 ``answer`` 为空的 interim 帧只有 progress
-      （join 的空段过滤）——整帧命中进度启发式时视为进度行（emoji 开头/💬/
-      围栏块 ≤600，极早期 delta 的误判由下一快照帧自愈）。
+    官方帧形态全集（stream_consumer.py:824-847 + stream_consumer_transport.py:373-406）：
+    种子帧 ``""``；非 interim 推送帧 = 纯 answer 累积快照（无光标无进度）；
+    interim tick 有进度行 → 复合帧、无进度行 → ``answer + 光标``、accumulated
+    为空 → progress-only 帧（后三种都带光标尾巴）；finalize 帧 = 纯 answer 全量
+    （无光标）。native 帧通道不携带任何 interim/composite 标记
+    （stream_consumer_transport.py:66-70 仅 text/finalize/chat/reply/turn），
+    通道归属只能靠帧体结构判定。
+
+    拆分策略（v2.0.25 结构化校验，保守优先）：
+    - 先剥光标尾巴（display 装饰，不参与语义判定）；
+    - 无分隔符：整帧过 ``_is_progress_frame_text`` 行语法扫描，全部行合法才整帧
+      视为进度行，否则整体是正文。旧「emoji 开头 ≤300 即进度」启发式已废弃
+      （✅ 开头的 answer 快照整帧误拆进面板，2026-10-27 事故）；
     - 有分隔符：只拆**最后一个**分隔符（正文自身可含 markdown 分隔线），
-      拆出部分经 ``split_progress_segments``（围栏块保持一体）后**逐段全部**
-      命中进度启发式才拆，否则整体视为正文。误拆由下一快照帧覆盖自愈
-      （官方 :290-291 真实 delta 到达即清空 overlay）。
+      拆出部分同样过行语法扫描才拆，否则整体视为正文。误拆由下一快照帧覆盖自愈
+      （官方 :290-291 真实 delta 到达即清空 overlay）；误杀（进度行落入正文）
+      同样由 overlay 语义自愈，内容永不丢。
 
     永不抛异常；返回 ``(answer_text, progress_lines)``。
     """
     try:
-        text = (text or "").strip()
+        text = _strip_native_cursor((text or "").strip())
         if not text:
             return "", []
         idx = text.rfind(_NATIVE_COMPOSITE_SEP)
         if idx < 0:
-            if _is_progress_text(text):
+            if _is_progress_frame_text(text):
                 return "", split_progress_segments(text) or [text]
             return text, []
         head = text[:idx].strip()
         tail = text[idx + len(_NATIVE_COMPOSITE_SEP):].strip()
         if not head or not tail:
             return text, []
-        segments = split_progress_segments(tail) or ([tail] if tail else [])
-        if segments and all(_is_progress_text(seg) for seg in segments):
-            return head, segments
+        if _is_progress_frame_text(tail):
+            return head, split_progress_segments(tail) or [tail]
         return text, []
     except Exception:  # noqa: BLE001 — 拆分纯装饰，失败整体按正文
         return (text or "", [])

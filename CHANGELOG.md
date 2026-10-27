@@ -1,5 +1,51 @@
 # Changelog
 
+## v2.0.25 (2026-10-27)
+
+**Native 通道 answer 快照误拆面板根治（行语法扫描替代 emoji 启发式）+ 官方流式光标剥除，754 用例全绿。**
+
+### 背景（用户反馈 2026-10-27 早晨）
+
+「早上对话说：天气加系统巡检吧。回复卡片的折叠面板内出现了 ▉、`|---|---|`、任务表格（名称/ID/计划/下次运行/投递/工具集）和『内容构成』小节——这应该是 answer 的内容，折叠面板不应该出现 answer，并且还是裸 MD 格式。」
+
+### 取证（三重铁证，零猜测）
+
+1. **日志**：agent.log 09:17:15 回合（「天气加系统巡检吧」，fallback 后 sensenova-6.8-flash-lite，3 次 tool_call JSON 解析失败重试后 cronjob_manage 成功）→ 09:18:00 `card finalized answer_len=393 status_lines=12`——面板 12 行，泄漏实锤。
+2. **transcript**：state.db 消息 1366（assistant）= 最终 answer 全文，**以 `✅ 定时任务已创建` 开头**（emoji!）、393 字符，内容正是用户在面板里看到的任务表格 + 内容构成。
+3. **官方源码**：native 帧 = 累积快照（stream_consumer_transport.py:373 `_native_push`）；interim tick 对 display 文本追加官方光标 ` ▉`（`DEFAULT_STREAMING_CURSOR`，gateway/config.py:483；stream_consumer.py:829-833）——面板内容以 `▉` 开头 = answer 快照带光标进了面板。
+
+### 根因（链路闭环）
+
+`_split_native_composite` 的旧启发式：无分隔符帧「emoji 开头且 ≤300 字符 → 整帧视为 progress-only interim 帧」。native answer 帧是**累积快照**——早期快照恰好 ≤300 字符且以 ✅ 开头 → 整帧被判为进度 → `split_progress_segments` 逐行拆散 → 表格行/小节行全部并入面板（`_absorb_status_lines` 只增不删）→ **面板永久污染**；正文因下一快照（>300 或非 emoji）按 answer 覆盖而自愈——「面板有 answer、正文反而正确」的错位正源于此。该缺陷自 v2.0.13（native streaming 引入）即存在，answer 以 emoji 开头才触发（内容依赖型，cron 创建回合是首个命中样本）。
+
+### 变更
+
+| 位置 | 变更 |
+|------|------|
+| composer/engine.py | 拆分器重写为**行语法扫描**（`_is_progress_frame_text`）：官方 native 进度帧行只有四类——💬 思考块（含续行）/ 围栏命令块 / 通知轨前缀行 / 具名工具行（emoji + 可解析工具名，含紧随的缩进命令体行，兼容 2026-10-12 实录的无围栏多行工具行）。answer 的正文行（表格行、非 emoji 小节、非缩进段落）任一不合法即整帧按 answer 处理。误拆自愈与误杀安全方向均由官方 overlay 语义保障（stream_consumer.py:290-291），内容永不丢 |
+| composer/engine.py | 新增 `_strip_native_cursor`：剥除官方流式光标尾巴 ` ▉`（display 装饰；官方 ACK 侧同款语义 :301-302）。修复光标粘进面板行/正文的观感问题 |
+| composer/engine.py | 新增 `_is_named_tool_line`：工具行判定限定 emoji 开头——head 模板 `{token} {ascii-name}` 无 emoji 前置，"hello world" 曾命中 tool="world" |
+| tests/e2e/test_v225_native_answer_guard.py | 新增 36 用例：事故快照逐字复原（answer/带光标/全量 393 字符）+ 扫描器正反两面（真进度行四类不误杀 / answer 行语法治漏）+ 拆分器两路径 + 引擎集成（事故帧序面板零污染 + 工具回合面板照常 + ✅ 占位终帧官方语义） |
+| tests/e2e/test_v213_native_streaming.py | 1 处合成行更新为真实 pending 格式（`🔍 early tool line` → `🔍 Searching...`；旧合成行无工具名可解析，v2.0.6 起即非真实帧格式） |
+| README / SKILL / CHANGELOG / plugin.yaml / docs/API.md | badge 2.0.25 / tests 754 / checkout 示例 / 全条目 / 出站契约补 native 帧分类语义 |
+
+### 官方语义对齐（防回归锚点）
+
+- native 帧通道**不携带** interim/composite 标记（stream_consumer_transport.py:66-70 仅 text/finalize/chat/reply/turn）——通道归属只能靠帧体结构判定；
+- 非 interim 推送帧 = 纯 answer 累积快照（无光标无进度）；interim tick 三形态（复合帧 / answer+光标 / progress-only）都带光标；finalize 帧 = 纯 answer 全量（stream_consumer.py:824-847）；
+- 工具专用回合的官方 ✅ 占位终帧（:869 `or "✅"`）按 answer 处理 → 正文 `✅`（官方语义），不再作为面板行。
+
+### 测试
+
+754 passed（v2.0.24 基线 718 + 36 新增 − 0 删除）；测试插曲×1：head 模板不要求 emoji 前置导致 "hello world" 命中 tool="world"（既有 `_parse_single_line` 宽松分支，v2.0.25 以 emoji 前置条件收敛于扫描器层，`_is_progress_text` 经典通道语义不变——v2.0.15 通知轨豁免用例不受影响）。
+
+### 已知限制
+
+- 若 answer 首行恰好形如「emoji + ASCII 工具名」且后续行全部缩进（如正文以 `💻 Terminal` 开头的缩进命令体教程），理论上仍可能被视作进度帧——此形态与官方工具行结构不可区分（通道无标记），误杀方向为进度行落入正文一闪而过，下一快照自愈，内容永不丢；
+- 429 限流（存量观察项）；服务器无自启机制（存量）。
+
+---
+
 ## v2.0.24 (2026-10-26)
 
 **Agent Loop 面板懒渲染（空面板根治）+ Clarify 卡片回调配置指引（控制台配置项，非代码缺陷），718 用例全绿。**

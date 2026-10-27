@@ -80,6 +80,8 @@ gateway:
 
 **Agent Loop 面板懒渲染（v2.0.24）**：仅状态行非空时渲染面板——纯 answer 回合建卡不挂空壳面板；首个状态行到达时由 `_patch_status` 全量更新（`cardkit_update` = card_json 全量替换）补插面板。`panel_on_card` 旗标以建/更卡产物实测赋值，finalize 空面板删除分支据此门控（正常路径不再发 `delete_elements`）。
 
+**Native 帧通道归属判定（v2.0.25）**：native 帧不携带 interim/composite 标记（官方 transport 仅 text/finalize/chat/reply/turn），`_split_native_composite` 以**行语法扫描**判定——💬 思考块（含续行）/ 围栏命令块 / 通知轨前缀行 / 具名工具行（emoji+可解析工具名，含紧随的缩进命令体行）全部合法才视为进度帧，answer 正文行（表格、非 emoji 小节、非缩进段落）任一不合法即整帧按 answer 处理（answer 累积快照以 emoji 开头时不再误拆进面板，2026-10-27 cron 回合 12 行泄漏事故根治）；官方流式光标 ` ▉`（`DEFAULT_STREAMING_CURSOR`）重组前剥除。误杀方向安全：真进度行落入正文一闪而过，官方 overlay 下一帧即清空，内容永不丢。
+
 ## 6. 指令
 
 | 指令 | 说明 |

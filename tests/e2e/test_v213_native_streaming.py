@@ -199,15 +199,18 @@ class TestHandleStreamFrame:
         assert st.answer_text == "孤儿终值"
 
     async def test_progress_before_seed_staged_into_first_card(self):
-        """进度行早于种子帧 → 暂存，建卡时并入首卡面板."""
+        """进度行早于种子帧 → 暂存，建卡时并入首卡面板.
+
+        v2.0.25：行语法扫描要求具名工具行（emoji+可解析工具名），合成行
+        同步更新为真实 pending 格式（``{emoji} {tool}...``）。"""
         client = _FullClient()
         comp = _make_composer(client)
         chat = "oc_stage"
-        await comp.handle_stream_frame(chat, "🔍 early tool line", finalize=False)
+        await comp.handle_stream_frame(chat, "🔍 Searching...", finalize=False)
         await comp.handle_stream_frame(chat, "", finalize=False)  # 种子
         st = comp.active_state(chat)
         assert st is not None
-        assert st.status_lines == ["🔍 early tool line"]
+        assert st.status_lines == ["🔍 Searching..."]
         assert client._n == 1
 
     async def test_degrade_on_client_failure_returns_false(self):
