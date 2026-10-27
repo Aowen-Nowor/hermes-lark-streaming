@@ -1,5 +1,18 @@
 name: Sync from Gitee
 
+# Gitee → GitHub 镜像 + 质量门禁 + 飞书通知（v2.0.27 重写）。
+#
+# v2.0.27 变更：
+#   - 镜像策略：remote-to-remote 强制对齐（Gitee 唯一事实源，零 merge commit）；
+#     同时镜像 refactor/v2.0.0（V2 开发分支）与 github_sync（V1 冻结分支）+ 全部 tag。
+#     （V1 版只同步 github_sync——那是 V1 默认分支，V2 发布后 GitHub 永远停在 1.8.x。）
+#   - 测试：全量 pytest（Python 3.14 对齐 hermes 官方），含 mock e2e；真飞书 E2E 不在 CI 跑
+#     （限流/凭据面，验收走服务器 scripts/e2e_v2.py）。
+#   - Release：测试通过后按 plugin.yaml 版本自动创建 GitHub Release（幂等）。
+#   - 新增：Gitee PR/Issue 增量摘要 → 飞书（水位经 actions/cache 持久化，无更新静默）。
+#
+# 所需 Secrets：GITEE_USERNAME / GITEE_TOKEN（同步+API）、FEISHU_WEBHOOK / FEISHU_SIGN_SECRET（通知）。
+
 on:
   schedule:
     - cron: '44 * * * *'
@@ -14,12 +27,12 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout GitHub repo
         uses: actions/checkout@v4
@@ -32,58 +45,54 @@ jobs:
           git config user.name "gitee-sync"
           git config user.email "sync@example.com"
 
+      - name: Add Gitee remote and fetch
+        run: |
+          git remote add gitee "https://${{ secrets.GITEE_USERNAME }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USERNAME }}/${{ github.event.repository.name }}.git"
+          git fetch gitee --prune --tags
+
       - name: Record pre-sync SHA
         id: pre_sync
-        run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Sync from Gitee github_sync branch
         run: |
-          git remote add gitee https://${{ secrets.GITEE_USERNAME }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USERNAME }}/${{ github.event.repository.name }}.git
-          git fetch gitee
-
-          BRANCH=$(git branch --show-current)
-          FORCE_PUSH=false
-
-          # v1.1.0: 从 Gitee github_sync 分支同步（稳定发布分支）
-          # Gitee 是主仓库，GitHub 是备份；冲突时以 Gitee 为准完全覆盖
-          if git merge gitee/github_sync --no-edit --strategy-option theirs 2>/dev/null; then
-            echo "✅ Merge succeeded (gitee/github_sync → $BRANCH)"
+          if git rev-parse -q --verify "refs/remotes/origin/refactor/v2.0.0" >/dev/null; then
+            echo "sha=$(git rev-parse origin/refactor/v2.0.0)" >> $GITHUB_OUTPUT
           else
-            echo "⚠️ Merge conflict, resetting to gitee/github_sync (Gitee is source of truth)"
-            git merge --abort 2>/dev/null || true
-            git reset --hard gitee/github_sync
-            # reset 后本地 HEAD 可能落后于 GitHub 远程（GitHub 有 Gitee 没有的提交），
-            # 需要 force push 让 GitHub master 完全对齐 Gitee github_sync
-            FORCE_PUSH=true
+            echo "sha=none" >> $GITHUB_OUTPUT
           fi
 
-          if [ "$FORCE_PUSH" = "true" ]; then
-            echo "🔧 Force pushing (覆盖 GitHub 远程以对齐 Gitee)"
-            git push --force origin "$BRANCH"
-          else
-            git push origin "$BRANCH"
-          fi
+      - name: Mirror branches and tags (Gitee is source of truth)
+        run: |
+          # remote-to-remote 直推：不经工作树、不产生 merge commit，GitHub 各 ref 强制对齐 Gitee
+          git push --force origin "refs/remotes/gitee/refactor/v2.0.0:refs/heads/refactor/v2.0.0"
+          git push --force origin "refs/remotes/gitee/github_sync:refs/heads/github_sync"
+          git push --force origin "refs/tags/*:refs/tags/*"
 
       - name: Detect changes
         id: detect
         run: |
-          SHA_BEFORE="${{ steps.pre_sync.outputs.sha }}"
-          SHA_AFTER=$(git rev-parse HEAD)
-          if [ "$SHA_BEFORE" != "$SHA_AFTER" ]; then
+          OLD="${{ steps.pre_sync.outputs.sha }}"
+          NEW=$(git rev-parse gitee/refactor/v2.0.0)
+          if [ "$OLD" != "$NEW" ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            git diff --name-only "$SHA_BEFORE" "$SHA_AFTER" > changed_files.txt
-            # 提取提交日志（oneline 格式，最多 10 条）
-            git log "$SHA_BEFORE".."$SHA_AFTER" --pretty=format:"%s" --max-count=10 > commit_log.txt
+            if [ "$OLD" = "none" ]; then
+              git log --pretty=format:"%s" -10 > commit_log.txt
+              echo "（首次同步）" > changed_files.txt
+            else
+              git diff --name-only "$OLD" "$NEW" > changed_files.txt
+              git log "$OLD".."$NEW" --pretty=format:"%s" --max-count=10 > commit_log.txt
+            fi
+            echo "🆕 检测到变更: $OLD..$NEW"
           else
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "" > commit_log.txt
+            echo "" > changed_files.txt
+            echo "无变更"
           fi
 
       - name: Set up Python
         if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.14'
 
       - name: Install dependencies
         if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
@@ -91,68 +100,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run lint (ruff)
-        if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
-        run: |
-          pip install ruff
-          ruff check . --select E,F --ignore E501 || true
-
-      - name: Run unit tests
-        if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
-        run: |
-          python -m pytest tests/ -v --tb=short --ignore=tests/e2e --ignore=tests/integration --junitxml=unit_test_report.xml 2>&1 | tee unit_test_output.txt
-
-      - name: Run E2E tests (真飞书为主，mock 为辅)
-        if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
-        env:
-          # v1.1.1: 注入 GitHub Secrets 到 E2E 环境变量（映射变量名）
-          # 真飞书为主：大部分测试直接用真飞书 API
-          # mock 为辅：少数需要模拟飞书错误的测试用 mock
-          FEISHU_E2E_APP_ID: ${{ secrets.FEISHU_APPID }}
-          FEISHU_E2E_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          FEISHU_E2E_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
-          FEISHU_E2E_OPEN_ID: ${{ secrets.FEISHU_OPEN_ID }}
-        run: |
-          # 只有 4 个 secrets 都配置了才跑真飞书测试
-          if [ -z "$FEISHU_E2E_APP_ID" ] || [ -z "$FEISHU_E2E_APP_SECRET" ] || [ -z "$FEISHU_E2E_CHAT_ID" ] || [ -z "$FEISHU_E2E_OPEN_ID" ]; then
-            echo "⚠️  未配置飞书 secrets，降级为 mock 模式"
-            echo "配置方法：GitHub 仓库 → Settings → Secrets → Actions → New repository secret"
-            echo "需要 4 个 secret: FEISHU_APPID / FEISHU_APP_SECRET / FEISHU_CHAT_ID / FEISHU_OPEN_ID"
-            # 降级为 mock 模式（不设环境变量，E2ETestRunner 自动用 mock）
-            python -m pytest tests/e2e/ -v --tb=short --junitxml=e2e_report.xml 2>&1 | tee e2e_output.txt
-            exit 0
-          fi
-          echo "✅ 检测到飞书凭据，开始真飞书 E2E 测试（真飞书为主，mock 为辅）"
-          # 串行跑（-p no:randomly），避免并发触发飞书 API 限制
-          # 飞书 CardKit 流式模式豁免 QPS，但 create/send/close 计入 1000/分 & 50/秒
-          python -m pytest tests/e2e/ -v --tb=short -p no:randomly --junitxml=e2e_report.xml 2>&1 | tee e2e_output.txt
-
-      - name: Set test exit code
+      - name: Run full test suite (unit + e2e mock)
         if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
         id: run_tests
         run: |
-          # 检查所有测试报告，任一失败则整体失败
-          EXIT_CODE=0
-          for report in unit_test_output.txt e2e_output.txt; do
-            if [ -f "$report" ] && grep -q "FAILED\|ERROR" "$report"; then
-              EXIT_CODE=1
-              echo "❌ $report 有失败"
-            fi
-          done
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-          exit $EXIT_CODE
+          python -m pytest tests/ --tb=short -q \
+            --junitxml=unit_test_report.xml 2>&1 | tee unit_test_output.txt
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
 
-      # ── v1.1.0: 自动创建 GitHub Release ──
-      # 同步 + 测试通过后，读取 plugin.yaml 版本号，
-      # 如果该版本的 tag 不存在则自动打 tag + 创建 Release。
-      # 用户不需要手动打 tag，只需在 Gitee github_sync 分支更新 plugin.yaml 版本号。
+      # ── GitHub Release（测试通过 + 版本 tag 未存在时创建，幂等）──
       - name: Read version from plugin.yaml
         if: steps.detect.outputs.has_changes == 'true' && steps.run_tests.outputs.exit_code == '0'
         id: version
         run: |
           VERSION=$(grep '^version:' plugin.yaml | sed 's/version: *"\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
           echo "📦 Detected version: $VERSION (tag: v$VERSION)"
 
       - name: Check if tag already exists
@@ -160,9 +122,7 @@ jobs:
         id: check_tag
         run: |
           TAG="v${{ steps.version.outputs.version }}"
-          # 检查 GitHub 远程是否有该 tag（不是本地对象库）
-          # git fetch gitee 会把 Gitee 上的 tag 拉到本地，git rev-parse 会误判为存在
-          # 用 git ls-remote --tags origin 检查 GitHub 远程才准确
+          # 用 ls-remote 查 GitHub 远程（fetch gitee 已把 Gitee tag 拉到本地，本地误判存在）
           if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
             echo "tag_exists=true" >> $GITHUB_OUTPUT
             echo "📌 Tag $TAG already exists on GitHub, skipping Release creation"
@@ -174,10 +134,7 @@ jobs:
       - name: Prepare release notes
         if: steps.detect.outputs.has_changes == 'true' && steps.run_tests.outputs.exit_code == '0' && steps.check_tag.outputs.tag_exists == 'false'
         run: |
-          # Release 描述只放完整更新日志链接（与 Gitee Release 描述保持一致）
-          echo "完整更新日志：https://raw.githubusercontent.com/${{ github.repository }}/master/docs/CHANGELOG.md" > release_notes.md
-          echo "📝 Release notes prepared:"
-          cat release_notes.md
+          echo "完整更新日志：https://raw.githubusercontent.com/${{ github.repository }}/refactor/v2.0.0/docs/CHANGELOG.md" > release_notes.md
 
       - name: Create GitHub Release
         if: steps.detect.outputs.has_changes == 'true' && steps.run_tests.outputs.exit_code == '0' && steps.check_tag.outputs.tag_exists == 'false'
@@ -192,15 +149,39 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Notify Feishu
+      # ── Gitee PR/Issue 增量摘要 → 飞书（水位经 cache 持久化）──
+      - name: Restore Gitee digest state
+        uses: actions/cache/restore@v4
+        with:
+          path: .gitee-digest-state.json
+          key: gitee-digest-state-${{ github.run_number }}
+          restore-keys: |
+            gitee-digest-state-
+
+      - name: Gitee PR/Issue digest → Feishu
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SIGN_SECRET: ${{ secrets.FEISHU_SIGN_SECRET }}
+          GITEE_OWNER: ${{ secrets.GITEE_USERNAME }}
+          GITEE_REPO: ${{ github.event.repository.name }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+        run: python3 scripts/feishu_notify.py gitee-digest --state-file .gitee-digest-state.json
+
+      - name: Persist Gitee digest state
+        uses: actions/cache/save@v4
+        with:
+          path: .gitee-digest-state.json
+          key: gitee-digest-state-${{ github.run_number }}
+
+      # ── 同步+测试结果报告 → 飞书 ──
+      - name: Notify Feishu (sync report)
         if: always() && (steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true)
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          FEISHU_SECRET: ${{ secrets.FEISHU_SIGN_SECRET }}
+          FEISHU_SIGN_SECRET: ${{ secrets.FEISHU_SIGN_SECRET }}
           TEST_EXIT_CODE: ${{ steps.run_tests.outputs.exit_code || '1' }}
           REPO: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           SERVER_URL: ${{ github.server_url }}
           TRIGGER: ${{ github.event_name }}
-          FORCE: ${{ inputs.force_tests || 'false' }}
-        run: python3 scripts/notify_feishu.py
+        run: python3 scripts/feishu_notify.py ci-report

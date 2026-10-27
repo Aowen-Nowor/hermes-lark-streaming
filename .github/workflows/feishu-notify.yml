@@ -1,0 +1,29 @@
+name: Feishu Notify (PR/Issue)
+
+# GitHub PR/Issue 事件实时推送飞书卡片（v2.0.27）。
+# 所需 Secrets：FEISHU_WEBHOOK（必需）、FEISHU_SIGN_SECRET（机器人开启签名时）。
+
+on:
+  issues:
+    types: [opened, reopened, closed]
+  pull_request:
+    types: [opened, reopened, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (scripts/feishu_notify.py)
+        uses: actions/checkout@v4
+
+      - name: Notify Feishu
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SIGN_SECRET: ${{ secrets.FEISHU_SIGN_SECRET }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/feishu_notify.py github-event

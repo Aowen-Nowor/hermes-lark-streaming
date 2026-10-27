@@ -4,7 +4,7 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.26-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.27-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.22-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
@@ -29,37 +29,17 @@ hermes 内置飞书平台的**增强版**：适配器完整继承内置 `FeishuA
 
 ## 特性
 
-**流式卡片（核心）**
-- 回答以打字机效果写入 CardKit 卡片（实体级 `stream_element` 流式更新）
-- **native streaming 通道（v2.0.13）**：适配器声明官方 `SUPPORTS_NATIVE_STREAMING`，答案流走 `send_stream_frame` 原生帧——工具边界不再封卡，单卡全回合；任何帧失败自动回落 edit/send（帧永不丢）；`feishu_streaming.native_streaming` 可一键回 edit-based
-- 工具进度与思考过程实时渲染进卡片状态面板：`agent loop · N 轮 · M 个工具 · 耗时` 动态标题、思考按轮分组（`第 N 轮 · X.Xs`）、思考正文 markdown 渲染（灰色小字号，`**加粗**`/`*斜体*`/`` `代码` `` 生效）、单工具耗时（`Terminal (2.3 s)`）、官方图标体系
-- 两步优雅定稿：终值落盘 + `close_streaming`，页脚呈现耗时 / 模型 / 上下文统计；纯回答回合自动移除空面板壳（v2.0.13）
-
-**回合外投递（v2.0.14）**
-- **cron 定时任务响应卡片化**：任务名标题行 + markdown 正文 + job_id 溯源页脚（此前为富文本 post）；成功/失败/队列重发三种投递同源覆盖（官方 `metadata["job_id"]` 精确识别，零启发式）
-- 回合外定稿（非流式单发回复）与 ≥200 字主动长文（send_message 工具族）同走静态卡通道；`feishu_streaming.oneshot_cards` 一键回原生
-
-**平台通知轨（v2.0.15）**
-- 子代理失败/超时通知（`⚠️ Subagent failed/timed out` 官方固定前缀）豁免进度行 300 字符上限：有活跃卡并入面板（warning_outlined 通报行样式），无活跃卡 early-create 回合卡——不再孤挂原生 post 文本
-
-**面板视觉（v2.0.16）**
-- 折叠面板轮次三色（V1 对齐）：流式进行中思考轮橙色、已完成绿、定稿收口全绿；警告族通报行（⚠️/🚨）橙色醒目，其余通报行保持灰
-- Terminal/shell 工具行 `code_outlined` 代码图标（原齿轮）；cron 卡头部去图标（job_id 溯源页脚保留）
-
-**回复引用与调用步骤（v2.0.22）**
-- **卡片回复引用触发消息**（私聊/群聊都生效）：卡片以飞书原生 reply 形态回应你的提问，群聊一眼看出在回应谁；cron/后台投递（无 om_ 锚点）仍直发，reply 失败自动降级直发（内容永不丢）
-- **连续 terminal 调用渲染为独立步骤行**：每次工具调用一个带图标步骤（`Terminal (169 ms)`），命令归属一目了然、耗时不再丢失（hermes 连续调用省略 header 的裸块归属 terminal）
-
-**交互卡片**
-- 澄清请求渲染为按钮/输入卡片，点击即回复，三态反馈（选择 → 已提交 → 已确认），操作者授权校验 fail-closed
-- **clarify 暂停/恢复（v2.0.26）**：澄清等待期间流式卡片保持「进行中」并显示暂停行（⏸ Waiting for your choice...），不再先变「已完成」；用户在交互卡上选择/输入后，回答**续写同一张卡**直到定稿——一次澄清回合一张卡；`feishu_streaming.clarify_suspend_sec`（默认 1.2s，0 = 关闭回 v2.0.25 行为）
-- `/aowen help · status · monitor` 运行状态指令
-
-**稳定性**
-- CardKit `300317` sequence 冲突主流程自愈（seq 对齐重发）
-- per-chat 帧串行化：建卡窗口内并发帧不再重复建卡（v2.0.11）
-- 空闲回收 GC：活跃长回合永不误杀；元素超限自动降级
-- 继承面 fail-fast 探测：hermes 上游重构在启动日志明确报出失配点，绝不静默出错
+| 特性 | 说明 |
+|------|------|
+| 流式卡片（核心） | 回答以打字机效果写入 CardKit 卡片（实体级 `stream_element` 流式更新）；两步优雅定稿，页脚呈现耗时/模型/上下文统计 |
+| native streaming（v2.0.13） | 答案流走官方 `send_stream_frame` 原生帧——工具边界不封卡，单卡全回合；任何帧失败自动回落 edit/send；`native_streaming: false` 可一键回 edit-based |
+| agent loop 状态面板 | 工具进度与思考过程实时渲染：动态标题（N 轮 · M 个工具 · 耗时）、思考按轮分组、单工具耗时（`Terminal (2.3 s)`）、官方图标体系、流式思考轮橙色/定稿全绿、纯 answer 回合无空面板（v2.0.24 懒渲染） |
+| 回复引用（v2.0.22） | 卡片以飞书原生 reply 形态引用触发提问（私聊/群聊）；cron/后台投递（无 om_ 锚点）仍直发，reply 失败自动降级直发（内容永不丢） |
+| clarify 暂停/续流（v2.0.26） | 澄清等待期间流式卡保持「进行中」+ 面板暂停行，用户选择后**同一张卡**续流至定稿——一次澄清回合一张卡 |
+| 交互卡片 | 澄清请求渲染为按钮/输入卡片，点击即回复，三态反馈（选择 → 已提交 → 已确认），操作者授权校验 fail-closed |
+| 回合外投递（v2.0.14） | cron 定时任务响应卡片化（任务名标题 + job_id 溯源页脚）；回合外定稿与 ≥200 字长文同走静态卡通道 |
+| 平台通知轨（v2.0.15） | 子代理失败/超时通知并入面板或 early-create 回合卡，不再孤挂原生文本 |
+| 稳定性 | 300317 sequence 自愈、per-chat 帧串行化、孤儿卡看门狗、空闲回收 GC、继承面 fail-fast 探测、字号完全 opt-in（零注入） |
 
 ## 架构
 
@@ -82,7 +62,7 @@ FrameComposer（per-chat 串行状态机 · CardTurnState）
 
 ## 快速开始
 
-> 🤖 **AI agent 部署？** 请读 [`SKILL.md`](SKILL.md)——面向 agent 的完整安装/启动/健康验证/V1→V2 迁移/升级回滚手册（含网关启动三要点、健康五项检查、V1 迁移三处配置、已知环境坑速查表）。人类读者继续往下即可。
+> 🤖 **AI agent 部署？** 请读 [`docs/SKILL.md`](docs/SKILL.md)——面向 agent 的完整安装/启动/健康验证/V1→V2 迁移/升级回滚手册（网关启动三要点、健康五项检查、已知环境坑速查表）。
 
 > ⚠ **git 安装必须带分支参数**：仓库默认分支 `github_sync` 仍是 V1（1.8.4）。V2 只在 `refactor/v2.0.0` 分支与 `v2.0.x` tag 上：`git clone -b refactor/v2.0.0 <REPO_URL>`；老用户 **勿用 `hermes plugins update` 升 V2**（它拉默认分支，拿不到 V2）。
 
@@ -94,21 +74,16 @@ cp -r hermes-lark-streaming ~/.hermes/plugins/
 pip install 'lark-oapi>=1.6.4' PyYAML
 ```
 
-> **依赖装进 hermes 的激活解释器环境**：hermes v0.21.x 的 PM 运行时会把它选代的
-> 依赖环境设为进程的 site-packages（`~/.hermes/installs/<id>/environments/<gen>/venv`，
-> 见 `pm/environments.py::activate_dependencies`），插件依赖必须装进**该环境**才能被
-> 插件 import（manifest `python_dependencies` 官方契约是仅校验提示、不自动安装）。
-> 判别方法：gateway 日志若插件报 `ModuleNotFoundError` 而 `pip list` 可见，即为环境
-> 错位——对 `$HOME/.hermes/installs/*/environments/*/venv/bin/python` 执行上述 pip。
+> **依赖装进 hermes 的激活解释器环境**：hermes v0.21.x 的 PM 运行时会把它选代的依赖环境设为进程 site-packages（`~/.hermes/installs/<id>/environments/<gen>/venv`），插件依赖必须装进**该环境**。判别方法：插件报 `ModuleNotFoundError` 而 `pip list` 可见，即为环境错位。
 
-> Python 版本与 hermes 官方对齐：**3.14**（`requires-python = ">=3.11,<3.15"`）。
+> Python 与 hermes 官方对齐：**3.14**（`requires-python = ">=3.11,<3.15"`）。
 
 在 `config.yaml` 中启用平台（与内置 `feishu` 二选一）：
 
 ```yaml
 platforms:
   feishu:
-    enabled: false            # 关内置（可选，环境变量凭证不再覆盖显式禁用）
+    enabled: false            # 关内置（可选）
   feishu-streaming:
     enabled: true
     extra:
@@ -134,7 +109,7 @@ plugins:
 
 ## 从 V1（1.x）升级
 
-V1（1.8.x 及更早，钩子拦截形态）与 V2 **共用同一个插件目录** `~/.hermes/plugins/hermes-lark-streaming/`，升级 = 换代码 + 三处配置 + 重启，约 5 分钟。agent 可执行的完整步骤（含两种安装路径的甄别、迁移失败速查）见 [`SKILL.md`](SKILL.md) 第 6 节。
+V1（1.8.x 及更早，钩子拦截形态）与 V2 **共用同一个插件目录** `~/.hermes/plugins/hermes-lark-streaming/`，升级 = 换代码 + 三处配置 + 重启，约 5 分钟。agent 可执行的完整步骤见 [`docs/SKILL.md`](docs/SKILL.md) 第 6 节。
 
 **① 前提**：hermes-agent **≥ v0.22**（V1 常见 v0.21，先升 hermes 本体）；lark-oapi ≥ 1.6.4（V1 1.8.0 起同 floor，一般零动作）。
 
@@ -143,7 +118,7 @@ V1（1.8.x 及更早，钩子拦截形态）与 V2 **共用同一个插件目录
 ```bash
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.26
+git fetch --tags && git checkout v2.0.27
 git status --short   # 确认无残留：V1 的 controller/ patching/ state/ flush/ 应已消失
 ```
 
@@ -155,7 +130,7 @@ git status --short   # 确认无残留：V1 的 controller/ patching/ state/ flu
 | ② | `platforms` | 只开着原生 `feishu` | `feishu: enabled: false` + 新增 `feishu-streaming: enabled: true`（凭证平移；**二选一，防双回复**） |
 | ③ | 配置节 | `hermes_lark_streaming:` | 改名 `feishu_streaming:`（**不改也自动兼容**；V1 的 9 个死键留着零副作用，可顺手删） |
 
-**④ 重启验证**：清 `__pycache__` → 启动网关 → 日志健康五项（[`SKILL.md`](SKILL.md) 第 3 节）→ 群聊与私聊各发一句话，卡片应**引用你的提问**（v2.0.22+）并流式打字。
+**④ 重启验证**：清 `__pycache__` → 启动网关 → 日志健康五项（[`docs/SKILL.md`](docs/SKILL.md) 第 3 节）→ 群聊与私聊各发一句话，卡片应**引用你的提问**（v2.0.22+）并流式打字。
 
 **回滚**：`git checkout v1.8.4` + 表中 ②③ 改回 + 重启，即回 V1（V2 无任何运行时残留）。
 
@@ -165,23 +140,18 @@ git status --short   # 确认无残留：V1 的 controller/ patching/ state/ flu
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `print_strategy` | `delay` | 打字机策略（`delay` / `fast`） |
-| `print_step` | `4` | 打字机步长 |
-| `card_ttl_sec` | `600` | 卡片会话 TTL（秒） |
+| `print_strategy` / `print_step` | `delay` / `4` | 打字机策略与步长 |
+| `card_ttl_sec` | `600` | 卡片会话 TTL（秒，下限 60 钳制） |
 | `streaming_panel_expanded` | `true` | 状态面板默认展开 |
-| `native_streaming` | `true` | native streaming 通道（v2.0.13）：false 回 edit-based 流（v2.0.12 行为） |
-| `oneshot_cards` | `true` | 回合外投递一次性卡（v2.0.14）：cron 投递族 / 回合外 final / ≥200 字长文；false 全部回原生文本（v2.0.13 行为） |
-| `clarify_suspend_sec` | `1.2` | clarify 暂停窗口秒数（v2.0.26）：窗口内 send_clarify 确认边界 → 流式卡保持「进行中」等回调、回答后同卡续流；0 = 关闭（finalize 立即落定，v2.0.25 行为——clarify 期间卡先完成、回调后开新卡） |
-| `footer.fields` / `footer.show_label` | — | 定稿页脚字段（elapsed/model/cost/status 等）；`display.show_reasoning: true` 且 `agent.reasoning_effort` 有效时默认字段自动追加 `reasoning`（推理等级），也可在 fields 中显式添加 |
-| `card_style.text_size.answer` | 未配置（零注入） | 正文（answer 元素）字号，v2.0.20 完全 opt-in：配置后按 `{default, pc, mobile}` 三档生效，未写的档位回落 `normal_v2`（v2.0.18 观感）；值域为官方 13 档 token（heading-0 30px ~ x-small 10px），手机观感偏小可设 `mobile: x-large`；未配置时不注入 `config.style`，payload 与 v2.0.18 逐字段一致 |
-| `card_style.text_size.aux` | 未配置（零注入） | 辅助行（面板思考/工具行/警告/页脚）字号，同上三档结构，未写档位回落 `notation` |
+| `native_streaming` | `true` | native streaming 通道；false 回 edit-based 流 |
+| `oneshot_cards` | `true` | 回合外投递一次性卡（cron 投递族 / 回合外 final / ≥200 字长文）；false 全部回原生文本 |
+| `clarify_suspend_sec` | `1.2` | clarify 暂停窗口秒数（v2.0.26）：窗口内等回调 → 同卡续流；0 = 关闭（回 v2.0.25 行为：卡先完成、回调后开新卡） |
+| `footer.fields` / `footer.show_label` | — | 定稿页脚字段（elapsed/model/cost/status 等）；`display.show_reasoning: true` 时默认自动追加 `reasoning` |
+| `card_style.text_size.answer` / `.aux` | 未配置（零注入） | 正文/辅助行字号，v2.0.20 完全 opt-in：`{default, pc, mobile}` 三档，手机观感偏小可设 `mobile: x-large`；未配置时 payload 与 v2.0.18 逐字段一致 |
 
-> v2.0.17 移除 V1 遗留死键：`linear` / `panel_expanded` / `flush_interval_ms` /
-> `answer_flush_interval_ms` / `feishu_base_url` / `show_reasoning` / `gateway_cards` /
-> `max_tool_steps` / `max_reasoning_rounds` —— V2 引擎从未消费；陈旧键留在
-> config.yaml 中无副作用，平台启停由 hermes 平台配置（`platforms.feishu-streaming`）负责。
+> v2.0.17 已移除 V1 遗留死键（`linear` / `panel_expanded` / `flush_interval_ms` 等 9 个）——陈旧键留在 config.yaml 中零副作用。
 
-完整说明见 [docs/API.md](docs/API.md)。
+完整键位说明与出站帧契约见 [docs/API.md](docs/API.md)。
 
 ## 仓库结构
 
@@ -190,38 +160,25 @@ hermes-lark-streaming/
 ├── plugin.yaml               # 插件清单（kind: platform · 版本单一来源）
 ├── __init__.py               # 包入口（register 导出 + __version__）——根目录唯一运行时 .py 之一
 ├── __main__.py               # python -m 诊断入口——根目录唯一运行时 .py 之二
-├── plugin/                   # hermes 集成层（对 hermes 的适配与钩子）
-│   ├── adapter.py            #   FeishuStreamingAdapter（出站语义层重写）
-│   ├── clarify.py            #   澄清卡片闭环（三态反馈 + fail-closed 授权）
-│   ├── reasoning_feed.py     #   思考隐藏流 → 面板思考行（官方观察者钩子）
-│   ├── tool_timing.py        #   post_tool_call 钩子 → 单工具耗时
-│   └── __init__.py           #   注册期辅助（lark-oapi 门槛 / 配置注入）
-├── cardkit/                  # CardKit v2 卡片层（构建/元素/seq 自愈/官方图标）
-├── composer/                 # 帧重组引擎（分类 + per-chat 状态机 + 定稿）
+├── plugin/                   # hermes 集成层（adapter / clarify / reasoning_feed / tool_timing）
+├── cardkit/                  # CardKit v2 卡片层（构建/元素/seq 自愈/官方图标/md 渲染）
+├── composer/                 # 帧重组引擎（分类 + per-chat 状态机 + 定稿 + 暂停窗口）
 ├── feishu/                   # FeishuClient（CardKit REST + 瞬态重试）
 ├── config/                   # 配置读取（config.yaml → Config）
 ├── aowen/                    # /aowen 指令
-├── tests/                    # 707 用例（单元 + e2e mock 全链路）
-├── scripts/                  # e2e_v2 真飞书验收 / smoke_v2 冒烟 / release 工具
-├── docs/                     # API.md
+├── tests/                    # 771 用例（单元 + e2e mock 全链路）
+├── scripts/                  # e2e_v2 真飞书验收 / smoke_v2 冒烟 / feishu_notify 通知 / create_release 发版
+├── docs/                     # SKILL.md（agent 安装手册）· API.md（配置与契约）· CHANGELOG.md
 ├── assets/screenshots/       # 实景截图
-├── CHANGELOG.md              # 版本历史（类型|问题|原因|修复 表格）
 └── pyproject.toml · LICENSE · README.md
 ```
 
-> **为什么根目录只有两个 .py？** hermes 目录插件加载器把插件目录本身作为
-> Python 包导入（`spec_from_file_location`，`__path__` 指向插件目录），之后
-> 所有相对导入走标准 import 机制——加载器唯一契约是根 `__init__.py` 暴露
-> `register`，子包布局对加载器不可见。因此运行时模块全部收进 `plugin/`（hermes
-> 集成层）与引擎子包，根目录只保留两个入口脚本与文档/配置。测试与脚本通过
-> `tests/conftest.py` 的同款引导把仓库根注册为 `hermes_lark_streaming` 包。
-
-**Python 版本**：与 hermes 官方完全对齐——`requires-python = ">=3.11,<3.15"`（官方唯一受支持运行时为 **3.14**，3.11 下限是官方更新器契约，见 hermes-agent `pyproject.toml`）。
+> **为什么根目录只有两个 .py？** hermes 目录插件加载器把插件目录本身作为 Python 包导入，唯一契约是根 `__init__.py` 暴露 `register`，子包布局对加载器不可见。测试与脚本通过 `tests/conftest.py` 的同款引导把仓库根注册为 `hermes_lark_streaming` 包。
 
 ## 测试与 E2E
 
 ```bash
-# 单元 + e2e mock 全链路（542 用例）
+# 单元 + e2e mock 全链路（771 用例）
 python -m pytest tests/
 
 # 冒烟（无飞书凭证）
@@ -232,9 +189,26 @@ export FEISHU_E2E_APP_ID=cli_xxx FEISHU_E2E_APP_SECRET=xxx FEISHU_E2E_CHAT_ID=oc
 python scripts/e2e_v2.py --scenario all
 ```
 
-`burst` 场景即 v2.0.11 修复的验收：并发帧 gather 投递，断言恒为单卡片。
-`oneshot` 场景即 v2.0.14 修复的验收：cron 投递一次性定稿卡（官方包装头解析 + 标题行 + job_id 溯源页脚）。
-`reply` 场景即 v2.0.22 修复的验收：om_ 锚点 → 卡片以 reply 形态引用（群聊必验；`FEISHU_E2E_DM_CHAT_ID` 可选配私聊双验证）+ 伪锚点降级直发；full 场景含 v2.0.22 连续 terminal 裸围栏块独立步骤行归属。版本水印自动跟随 plugin.yaml，无硬编码。
+`reply` 场景即 v2.0.22 引用验收（群聊必验；`FEISHU_E2E_DM_CHAT_ID` 可选配私聊双验证 + 伪锚点降级直发）。版本水印自动跟随 plugin.yaml，无硬编码。
+
+## CI 与工作流
+
+Gitee 为主仓库，GitHub 为同步备份（双向均自动通知飞书）。
+
+| 工作流 | 平台 | 触发 | 作用 |
+|--------|------|------|------|
+| `sync-from-gitee.yml` | GitHub Actions | 每小时 | Gitee → GitHub 全分支+tag 强制镜像（`refactor/v2.0.0` + `github_sync`）；变更时跑全量测试；新版本自动创建 GitHub Release；**Gitee PR/Issue 增量摘要 → 飞书** |
+| `feishu-notify.yml` | GitHub Actions | PR/Issue 事件 | GitHub 新 PR/Issue（开/重开/关）实时推送飞书卡片 |
+| `hermes-release-watch.yml` | GitHub Actions | 每日 | hermes-agent 上游发新版 → 飞书提醒（人工跑 E2E 验证继承面后再升级生产） |
+| `.workflow/release-pipeline.yml` | Gitee Go | push 到 `refactor/v2.0.0` | 自动创建 Gitee Release（tag = plugin.yaml 版本） |
+
+**所需仓库 Secrets**（GitHub 仓库 Settings → Secrets and variables → Actions；Gitee Go 在流水线参数设置）：
+
+| Secret | 用途 |
+|--------|------|
+| `FEISHU_WEBHOOK` | 飞书群自定义机器人 webhook 地址（所有飞书通知） |
+| `FEISHU_SIGN_SECRET` | 飞书机器人签名密钥（未开启签名可留空） |
+| `GITEE_USERNAME` / `GITEE_TOKEN` | Gitee 账号与令牌（同步拉取 + API 查询 PR/Issue） |
 
 ## FAQ
 
@@ -245,17 +219,17 @@ A: 适配器继承内置 `FeishuAdapter`，内置能力一个不少；仅重写 
 A: 不会。只注册 `feishu-streaming` 平台，不触碰任何全局对象。
 
 **Q: hermes 升级后会坏吗？**
-A: 出站帧协议（metadata 标记）与适配器接口都是官方协议；启动时对继承面 fail-fast 探测，上游重构会在启动日志明确报出失配点，而不是静默出错。
+A: 出站帧协议（metadata 标记）与适配器接口都是官方协议；启动时对继承面 fail-fast 探测，上游重构会在启动日志明确报出失配点，而不是静默出错。`hermes-release-watch` 工作流会在上游发新版时推送飞书提醒。
 
 **Q: 卡片渲染失败会怎样？**
 A: 当前回合立即降级为原生文本消息（降级红线），后续帧继续原生直到下一回合。日志保留完整原因（`composer: card channel degraded …`）。
 
 **Q: 点澄清卡按钮提示「该应用尚未配置卡片回调」？**
-A: 这是飞书开放平台侧的应用配置项，不是插件缺陷（插件与 hermes 内核的回调处理链路已就绪）。到[开发者后台](https://open.feishu.cn) → 你的应用 → 事件与回调 → 卡片交互回调 → 编辑 → 选择「**使用长连接接收回调**」→ 保存即生效（免公网、免重启网关）。注意勿选 webhook 模式（网关不提供公网回调端点）。
+A: 这是飞书开放平台侧的应用配置项，不是插件缺陷。到[开发者后台](https://open.feishu.cn) → 你的应用 → 事件与回调 → 卡片交互回调 → 编辑 → 选择「**使用长连接接收回调**」→ 保存即生效（免公网、免重启网关）。注意勿选 webhook 模式（网关不提供公网回调端点）。
 
 ## 更新日志
 
-见 [CHANGELOG.md](CHANGELOG.md) —— 每版本一张「类型 | 问题 | 原因 | 修复」表格，附审计方法与已知限制。
+见 [docs/CHANGELOG.md](docs/CHANGELOG.md) —— 每版本「版本+日期」标题 + 全表格精简记录。
 
 ## License
 

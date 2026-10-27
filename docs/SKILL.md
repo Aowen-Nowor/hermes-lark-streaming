@@ -5,7 +5,7 @@ description: 指导 AI agent 在 Linux 服务器上完成 hermes-lark-streaming 
 
 # hermes-lark-streaming 安装指南（agent 专用）
 
-本插件是 hermes-agent 的飞书平台增强插件（CardKit v2.0 流式卡片）。**面向 agent 的完整安装手册**——人类视角的介绍见 `README.md`；本文假设你（agent）拿到一台服务器的 SSH 访问权，需要从零把插件跑起来并验证健康。
+本插件是 hermes-agent 的飞书平台增强插件（CardKit v2.0 流式卡片）。**面向 agent 的完整安装手册**——人类视角的介绍见 `../README.md`；本文假设你（agent）拿到一台服务器的 SSH 访问权，需要从零把插件跑起来并验证健康。
 
 ## 0. 前置条件核查（缺一项先补一项）
 
@@ -60,7 +60,7 @@ plugins:
     - feishu-streaming-platform   # 插件注册名（plugin.yaml 的 name）
 ```
 
-可选配置（全部有缺省值，不配也能跑）——完整键位表见 `README.md` 配置节 / `docs/API.md`：
+可选配置（全部有缺省值，不配也能跑）——完整键位表见 `../README.md` 配置节 / `API.md`：
 
 ```yaml
 feishu_streaming:
@@ -131,7 +131,7 @@ export FEISHU_E2E_APP_ID=cli_xxx FEISHU_E2E_APP_SECRET=xxx FEISHU_E2E_CHAT_ID=oc
 **升级**（已有安装，拉新版本）：
 ```bash
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.26       # 按版本 checkout tag（勿依赖默认分支，见第 6 节）
+git fetch --tags && git checkout v2.0.27       # 按版本 checkout tag（勿依赖默认分支，见第 6 节）
 <VENV_PYTHON> -m py_compile $(git diff --name-only HEAD@{1} HEAD | grep '\.py$')  # 语法门禁
 find . -name __pycache__ -type d -prune -exec rm -rf {} +   # 清缓存（热替换旧字节码必做）
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
@@ -167,7 +167,7 @@ grep -E "^version" ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
 ```bash
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.26    # 或 git pull origin refactor/v2.0.0
+git fetch --tags && git checkout v2.0.27    # 或 git pull origin refactor/v2.0.0
 ```
 
 > V1 的 `controller/ patching/ state/ flush/` 子包在 V2 已删除，git checkout 会自动清掉工作区副本；**解压/复制部署的用户必须手动删除这些旧目录**（连同 V1 的 `docs/AGENT_GUIDE.md`），不要让两代代码同目录共存。

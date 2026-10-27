@@ -17,7 +17,7 @@
 
 可选环境变量：
     REPO         仓库名（默认 hermes-lark-streaming）
-    TARGET_BRANCH Release 的 target_commitish（默认 github_sync；但优先用 GITEE_COMMIT）
+    TARGET_BRANCH Release 的 target_commitish（默认 refactor/v2.0.0；但优先用 GITEE_COMMIT）
 
 工作流设计（v1.1.0 最终方案）：
   - 不用 release@gitee 插件（其参数不支持运行时变量）
@@ -72,10 +72,11 @@ def ensure_env() -> tuple[str, str, str, str]:
     token = os.environ.get("TOKEN", "").strip()
     repo = os.environ.get("REPO", "hermes-lark-streaming").strip()
     # 优先用 GITEE_COMMIT（当前 commit SHA），其次 TARGET_BRANCH 环境变量，默认 github_sync
+    # v2.0.27: 默认分支从 github_sync（V1 冻结）改为 refactor/v2.0.0（V2 开发分支）
     target_commitish = (
         os.environ.get("GITEE_COMMIT", "").strip()
         or os.environ.get("TARGET_BRANCH", "").strip()
-        or "github_sync"
+        or "refactor/v2.0.0"
     )
 
     if not owner:
@@ -103,7 +104,7 @@ def build_release_body(tag: str, owner: str, repo: str) -> str:
     不再把 CHANGELOG.md 全部内容塞进 Release body（太长）。
     用户点击链接即可查看完整更新日志。
     """
-    changelog_url = f"https://gitee.com/{owner}/{repo}/raw/github_sync/CHANGELOG.md"
+    changelog_url = f"https://gitee.com/{owner}/{repo}/raw/refactor/v2.0.0/docs/CHANGELOG.md"
     return f"完整更新日志：{changelog_url}"
 
 
