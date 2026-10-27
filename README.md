@@ -4,11 +4,11 @@
 
 **飞书 CardKit v2.0 流式卡片平台插件 · hermes-agent**
 
-[![version](https://img.shields.io/badge/version-2.0.25-brightgreen)](#更新日志)
+[![version](https://img.shields.io/badge/version-2.0.26-brightgreen)](#更新日志)
 [![platform](https://img.shields.io/badge/platform-feishu--streaming-teal)](#快速开始)
 [![hermes](https://img.shields.io/badge/hermes--agent-%E2%89%A50.22-grey)](https://github.com/NousResearch/hermes-agent)
 [![python](https://img.shields.io/badge/python-3.14-informational)](#快速开始)
-[![tests](https://img.shields.io/badge/tests-754%20passed-brightgreen)](#测试与-e2e)
+[![tests](https://img.shields.io/badge/tests-771%20passed-brightgreen)](#测试与-e2e)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
 *回答打字机流式呈现 · 工具与思考实时进面板 · 澄清问题变成可点击卡片 · 全程零 monkey-patch*
@@ -52,6 +52,7 @@ hermes 内置飞书平台的**增强版**：适配器完整继承内置 `FeishuA
 
 **交互卡片**
 - 澄清请求渲染为按钮/输入卡片，点击即回复，三态反馈（选择 → 已提交 → 已确认），操作者授权校验 fail-closed
+- **clarify 暂停/恢复（v2.0.26）**：澄清等待期间流式卡片保持「进行中」并显示暂停行（⏸ Waiting for your choice...），不再先变「已完成」；用户在交互卡上选择/输入后，回答**续写同一张卡**直到定稿——一次澄清回合一张卡；`feishu_streaming.clarify_suspend_sec`（默认 1.2s，0 = 关闭回 v2.0.25 行为）
 - `/aowen help · status · monitor` 运行状态指令
 
 **稳定性**
@@ -142,7 +143,7 @@ V1（1.8.x 及更早，钩子拦截形态）与 V2 **共用同一个插件目录
 ```bash
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.25
+git fetch --tags && git checkout v2.0.26
 git status --short   # 确认无残留：V1 的 controller/ patching/ state/ flush/ 应已消失
 ```
 
@@ -170,6 +171,7 @@ git status --short   # 确认无残留：V1 的 controller/ patching/ state/ flu
 | `streaming_panel_expanded` | `true` | 状态面板默认展开 |
 | `native_streaming` | `true` | native streaming 通道（v2.0.13）：false 回 edit-based 流（v2.0.12 行为） |
 | `oneshot_cards` | `true` | 回合外投递一次性卡（v2.0.14）：cron 投递族 / 回合外 final / ≥200 字长文；false 全部回原生文本（v2.0.13 行为） |
+| `clarify_suspend_sec` | `1.2` | clarify 暂停窗口秒数（v2.0.26）：窗口内 send_clarify 确认边界 → 流式卡保持「进行中」等回调、回答后同卡续流；0 = 关闭（finalize 立即落定，v2.0.25 行为——clarify 期间卡先完成、回调后开新卡） |
 | `footer.fields` / `footer.show_label` | — | 定稿页脚字段（elapsed/model/cost/status 等）；`display.show_reasoning: true` 且 `agent.reasoning_effort` 有效时默认字段自动追加 `reasoning`（推理等级），也可在 fields 中显式添加 |
 | `card_style.text_size.answer` | 未配置（零注入） | 正文（answer 元素）字号，v2.0.20 完全 opt-in：配置后按 `{default, pc, mobile}` 三档生效，未写的档位回落 `normal_v2`（v2.0.18 观感）；值域为官方 13 档 token（heading-0 30px ~ x-small 10px），手机观感偏小可设 `mobile: x-large`；未配置时不注入 `config.style`，payload 与 v2.0.18 逐字段一致 |
 | `card_style.text_size.aux` | 未配置（零注入） | 辅助行（面板思考/工具行/警告/页脚）字号，同上三档结构，未写档位回落 `notation` |

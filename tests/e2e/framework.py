@@ -123,6 +123,7 @@ class E2ETestRunner:
             build_card=factory.streaming,
             build_final_card=factory.final,
             config=self._config,
+            clarify_suspend_sec=0.0,
         )
 
         if self._use_real_feishu:

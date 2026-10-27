@@ -527,6 +527,17 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
 
         client = self._get_card_client()
         if client is not None:
+            # v2.0.26（clarify 暂停，用户验收：clarify 期间流式卡应等待回调、
+            # 回答后同一张卡续流，而非「先完成 → 回调后开新卡」）：clarify 卡
+            # 发出前把活跃流式卡置为等待态——finalize 暂停窗口内到达时确认
+            # 边界 finalize（取消落定定时器），面板追加暂停行。失败/无活跃卡
+            # （返回 False）不阻断 clarify 卡：回调后建新卡的 v2.0.25 行为
+            # 自然承接（内容永不丢）。
+            try:
+                await self._composer.suspend_for_clarify(chat_id, question)
+            except Exception:
+                _logger.debug(
+                    "feishu-streaming: clarify suspend skipped chat=%s", chat_id, exc_info=True)
             try:
                 result = await _clarify.send_clarify_card(
                     self, client, chat_id, question, choices, clarify_id, metadata=metadata,

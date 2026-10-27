@@ -18,6 +18,7 @@ asyncio.Lock）。历史假设“hermes 对单 chat 的出站天然串行”不�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Callable
@@ -91,6 +92,16 @@ class CardTurnState:
     # 首个状态行到达时 _patch_status 全量更新补插。finalize 空面板删除
     # 分支据此跳过对从未有过面板的卡发起 delete_elements。
     panel_on_card: bool = False
+    # ── v2.0.26 clarify 暂停/恢复（同卡续流）─────────────────────────
+    # hermes 边界语义（run_turn_runner.py:1404）：clarify 交互前强制关闭当前
+    # 流（finalize 帧），回答后重开新流。边界 finalize 与真回合终态到达本
+    # 引擎时参数完全一致（text, finalize=True）→ finalize 帧先进暂停窗口，
+    # 窗口内 send_clarify 到达即确认为边界（卡保持流式态等回调），到期无
+    # send_clarify → _pause_expire 真落定（普通回合语义）。
+    pause_pending: bool = False       # finalize 帧已到、等待 send_clarify 确认的窗口
+    paused: bool = False              # clarify 等待中（回调后 resume 续写同一张卡）
+    resume_base: str = ""             # 暂停时正文快照（reopen 后新段快照的拼接基线）
+    turn_id: str = ""                 # hermes 回合标识（transport 每帧携带；防跨回合串卡）
 
 
 class FrameComposer:
@@ -107,11 +118,27 @@ class FrameComposer:
         build_card: Callable[..., dict[str, Any]],
         build_final_card: Callable[..., dict[str, Any]],
         config: Any | None = None,
+        clarify_suspend_sec: float | None = None,
     ) -> None:
         self._get_client = get_client          # () -> FeishuClient | None
         self._build_card = build_card          # build_streaming_card_v2(**kwargs)
         self._build_final_card = build_final_card
         self._config = config
+        # v2.0.26：clarify 暂停窗口（秒）。显式参数 > Config.clarify_suspend_sec
+        # > 0（关闭——测试/无 config 环境走 v2.0.25 现状语义，存量断言零影响）。
+        # 生产 adapter 传插件 Config（默认 1.2s）→ 边界 finalize → send_clarify
+        # 的实测间隔 <200ms（2026-10-27 13:20 用户回合日志），1.2s 裕度充分。
+        if clarify_suspend_sec is not None:
+            self._clarify_suspend_sec = max(0.0, float(clarify_suspend_sec))
+        else:
+            try:
+                self._clarify_suspend_sec = max(
+                    0.0, float(config.clarify_suspend_sec))  # type: ignore[union-attr]
+            except Exception:  # noqa: BLE001 — 无 config/属性缺失 → 关闭（现状语义）
+                self._clarify_suspend_sec = 0.0
+        # v2.0.26：per-chat 暂停窗口落定定时器（loop.call_later，与看门狗同款
+        # 架构——句柄不在 all_tasks() 中，到期才建 task）。
+        self._pause_timers: dict[str, asyncio.TimerHandle] = {}
         self._states: dict[str, CardTurnState] = {}
         self._by_message: dict[str, str] = {}  # card_message_id -> chat_id
         # v2.0.11 P0：per-chat 帧处理串行化锁（见模块头并发模型说明）。
@@ -152,12 +179,19 @@ class FrameComposer:
             if st.finalized:
                 if idle > 60:
                     stale.append(cid)
+            elif st.paused or st.pause_pending:
+                # v2.0.26：clarify 暂停/窗口期豁免——hermes clarify 硬超时
+                # （clarify_gateway.resolve_clarify_timeout 默认 3600s）远大于
+                # TTL；回调/超时后必有续流帧或真 finalize 落定。此处回收会把
+                # 暂停卡状态蒸发，回调后续流退化为建新卡（暂停语义失效）。
+                continue
             elif idle > ttl:
                 stale.append(cid)
         for cid in stale:
             st = self._states.pop(cid, None)
             if st and st.card_message_id:
                 self._by_message.pop(st.card_message_id, None)
+            self._cancel_pause(cid)
 
     def _chat_lock(self, chat_id: str) -> asyncio.Lock:
         lock = self._chat_locks.get(chat_id)
@@ -411,12 +445,62 @@ class FrameComposer:
         - 失败（含任何异常）→ 返回 False → 官方 consumer 禁用 native 并回落
           edit/send 现有链路（降级红线：帧永不丢）。
 
+        v2.0.26 clarify 暂停/恢复（同卡续流）：hermes 在 clarify 交互前强制
+        finalize 当前流（run_turn_runner.py:1404，WeCom 气泡模型语义；实测
+        2026-10-27 13:20 回合日志），边界 finalize 与真回合终态到达时参数
+        完全一致（text, finalize=True）——唯一可靠区分是边界后必紧跟
+        ``send_clarify``（同一事件循环 <200ms：agent 线程 boundary future
+        resolve 后立即 schedule）。因此 finalize 帧先进「暂停窗口」
+        （``clarify_suspend_sec``，默认 1.2s，0=关闭走 v2.0.25 语义）：
+        - 窗口内 ``suspend_for_clarify`` 到达 → 确认为边界：卡保持流式态 +
+          面板暂停行（clarify_wait），等待用户点击 clarify 交互卡回调；
+        - 回调后 hermes Eager re-seed/lazy re-seed 重开流（seed 空帧 → delta
+          「新段内累积快照」）→ paused 分支解除暂停、``_merge_resumed_answer``
+          段拼接，**同一张卡**续流至真回合终态落定（用户验收：一张卡贯穿）；
+        - 窗口到期无 send_clarify → ``_pause_expire`` 真落定（普通回合仅
+          footer/关流式延迟窗口时长）。
+        暂停/窗口期豁免看门狗 seal 与 GC idle 回收（hermes clarify 硬超时
+        3600s 保证终态必达）；turn_id 变化的帧对暂停卡先真落定再建新卡
+        （用户不等澄清直接发新消息的防串）。
+
         返回 True＝帧已消费；False＝本帧未消费，调用方回落。
         """
         self._loop = asyncio.get_running_loop()
         async with self._chat_lock(chat_id):
             self._gc()
             try:
+                # v2.0.26：turn_id 防串——新回合帧到达而旧卡未落定（含 clarify
+                # 暂停卡：用户不等回答直接发新消息）→ 旧卡立即真落定，新回合
+                # 语义交由下方主流程（建新卡）。turn_id 缺失（mock/直调）跳过。
+                st0 = self._states.get(chat_id)
+                if (st0 is not None and not st0.finalized and turn_id
+                        and st0.turn_id and turn_id != st0.turn_id):
+                    self._cancel_pause(chat_id)
+                    st0.pause_pending = False
+                    st0.paused = False
+                    await self._finalize(st0, st0.answer_text)
+                    _logger.info(
+                        "composer: turn boundary seal (chat=%s old=%s new=%s)",
+                        chat_id, st0.turn_id[:8], turn_id[:8],
+                    )
+                # v2.0.26：finalize 帧先行分流——clarify 边界 finalize 与真回合
+                # 终态参数一致（text, finalize=True），唯一可靠区分 = 边界后必紧跟
+                # send_clarify（同一事件循环 <200ms，见 handle_stream_frame 类
+                # docstring v2.0.26 段）。暂停窗口内不 split/不落正文面板/
+                # 不关流式：文本暂存 answer_text（suspend 时占位判定清空 /
+                # expire 时 _finalize 终值 patch），两分支由
+                # suspend_for_clarify / _pause_expire 承接。
+                if finalize and self._clarify_suspend_sec > 0:
+                    st = self.active_state(chat_id)
+                    if st is not None:
+                        if turn_id and not st.turn_id:
+                            st.turn_id = turn_id
+                        if text:
+                            st.answer_text = text
+                        st.pause_pending = True
+                        st.last_activity = time.monotonic()
+                        self._arm_pause_expire(chat_id)
+                        return True
                 answer, progress = _split_native_composite(text)
                 if progress:
                     st_now = self.active_state(chat_id)
@@ -441,6 +525,8 @@ class FrameComposer:
                         st = self._states.get(chat_id)
                         if st is None:  # pragma: no cover — create 失败已抛异常
                             return False
+                    if turn_id and not st.turn_id:
+                        st.turn_id = turn_id
                     await self._finalize(st, answer)
                     return True
                 st = self.active_state(chat_id)
@@ -448,9 +534,40 @@ class FrameComposer:
                     # 种子帧/首内容帧：建卡（暂存行并入首卡面板；answer 空则
                     # 只建骨架不写 answer 元素——_create_card 内已处理）。
                     await self._create_card(chat_id, answer, reply_to=reply_to)
+                    st = self._states.get(chat_id)
+                    if st is not None and turn_id:
+                        st.turn_id = turn_id
+                    return True
+                if turn_id and not st.turn_id:
+                    st.turn_id = turn_id
+                # v2.0.26：clarify 回调后重开帧到达——同一张卡恢复续流。
+                # hermes 边界处理时 _reset_segment_state 清空 accumulated，
+                # reopen 后 delta 是「新段内累积快照」（不含暂停前内容）→
+                # 与 resume_base 按段拼接（同一回合多次 clarify 递进累积）。
+                if st.paused:
+                    st.paused = False
+                    _drop_clarify_wait_row(st)
+                    if (answer or "").strip():
+                        st.answer_text = _merge_resumed_answer(st.resume_base, answer)
+                        st.resume_base = st.answer_text
+                        await self._stream_answer(st)
+                    else:
+                        # 种子帧（空快照）：仅解除暂停 + 面板移除暂停行
+                        # （全量更新；后续 delta 局部更新正文）。
+                        await self._patch_status(st)
+                    self._arm_watchdog(chat_id)  # 暂停期让位，恢复后重新武装
+                    return True
+                if st.resume_base:
+                    # v2.0.26：clarify resume 后的新段快照——hermes reopen 后
+                    # delta 是「新段内累积」（_reset_segment_state 清空 accumulated，
+                    # 不含暂停前内容），与 resume_base 段拼接；递进更新 resume_base
+                    # （同回合多次 clarify 递进累积；真 final 帧为 authoritative
+                    # 全文，走暂停窗口路径直接覆盖，无拼接问题）。
+                    st.answer_text = _merge_resumed_answer(st.resume_base, answer)
+                    st.resume_base = st.answer_text
                 else:
                     st.answer_text = answer
-                    await self._stream_answer(st)
+                await self._stream_answer(st)
                 return True
             except Exception as exc:  # noqa: BLE001 — 降级红线：native 帧失败回落
                 self._degrade(chat_id, "stream_frame", exc)
@@ -544,6 +661,12 @@ class FrameComposer:
         st.last_activity = time.monotonic()
         st.finalized = False
         st.degraded = False
+        # v2.0.26：clarify 暂停族字段随回合重置（prev 复用连续性——上一回合
+        # 残留的暂停态不得渗透进新回合）。
+        st.pause_pending = False
+        st.paused = False
+        st.resume_base = ""
+        st.turn_id = ""
         st.status_lines = pending
         st.line_times = [time.monotonic()] * len(pending)
         # v2.0.9 P2-8 伴生：耗时表必须随回合重置——残留 key 是上一回合的
@@ -714,6 +837,95 @@ class FrameComposer:
         )
         return SendResult(success=True, message_id=st.card_message_id)
 
+    # ── clarify 暂停/恢复（v2.0.26，同卡续流）────────────────────────────
+    async def suspend_for_clarify(self, chat_id: str, question: str = "") -> bool:
+        """clarify 交互卡发出前调用：活跃流式卡进入「等待澄清」暂停态.
+
+        v2.0.26 主流程（用户验收：clarify 期间流式卡应等待回调、回答后同一张
+        卡续流，而非「先完成 → 回调后开新卡」）：
+        - finalize 帧暂停窗口内到达（pause_pending=True）→ 确认该 finalize 是
+          clarify 边界（hermes run_turn_runner.py:1404 官方边界语义）→ 取消
+          落定定时器，卡保持流式态；
+        - 窗口外到达（edit 灰度流 / 无边界 finalize 通道）→ 活跃卡同样暂停
+          （hermes 在 edit 模式不关流，回调后续流走 handle_send 追加——
+          active_state 未落定 → 自然同卡）。
+        面板追加暂停行（i18n clarify_wait）并全量更新（v2.0.24 懒渲染补插
+        机制承接纯 answer 卡首面板）。无活跃卡返回 False（adapter 照常发
+        clarify 卡——回调后建新卡的 v2.0.25 行为自然承接，内容永不丢）。
+        """
+        self._loop = asyncio.get_running_loop()
+        async with self._chat_lock(chat_id):
+            st = self.active_state(chat_id)
+            if st is None:
+                _logger.info(
+                    "composer: clarify suspend skipped (no active card) chat=%s", chat_id)
+                return False
+            self._cancel_pause(chat_id)
+            if st.pause_pending:
+                st.pause_pending = False
+                # hermes clarify 占位（stream_consumer._finalize_boundary_stream：
+                # accumulated 为空时 finalize_text = 「💬 ...」placeholder，WeCom
+                # 气泡模型的过渡文案）——不落飞书卡正文（面板暂停行已承载
+                # 等待语义）。
+                if _is_clarify_placeholder(st.answer_text):
+                    st.answer_text = ""
+            st.paused = True
+            st.resume_base = st.answer_text
+            row = _clarify_wait_row()
+            if row not in st.status_lines:
+                st.status_lines.append(row)
+                st.line_times.append(time.monotonic())
+            st.last_activity = time.monotonic()
+            await self._patch_status(st)
+            _logger.info(
+                "composer: clarify suspend chat=%s card=%s question=%r",
+                chat_id, st.card_id, (question or "")[:40],
+            )
+            return True
+
+    def _arm_pause_expire(self, chat_id: str) -> None:
+        """暂停窗口落定定时器（重复武装无害——先取消旧句柄再挂新）."""
+        self._cancel_pause(chat_id)
+        loop = self._loop
+        if loop is None or loop.is_closed() or self._clarify_suspend_sec <= 0:
+            return
+        try:
+            self._pause_timers[chat_id] = loop.call_later(
+                self._clarify_suspend_sec, self._pause_due, chat_id)
+        except RuntimeError:  # loop 已停转（跨线程窗口）
+            pass
+        except Exception:
+            _logger.debug("composer: pause timer arm failed chat=%s", chat_id, exc_info=True)
+
+    def _cancel_pause(self, chat_id: str) -> None:
+        timer = self._pause_timers.pop(chat_id, None)
+        if timer is not None:
+            with contextlib.suppress(Exception):
+                timer.cancel()
+
+    def _pause_due(self, chat_id: str) -> None:
+        """窗口到期回调（loop 线程）：窗口内无 send_clarify → 普通回合真落定."""
+        try:
+            self._pause_timers.pop(chat_id, None)
+            st = self._states.get(chat_id)
+            if st is None or not st.pause_pending:
+                return
+            asyncio.ensure_future(self._pause_expire(chat_id))
+        except Exception:
+            _logger.debug("composer: pause due failed chat=%s", chat_id, exc_info=True)
+
+    async def _pause_expire(self, chat_id: str) -> None:
+        """窗口到期真落定：与帧路径同一把 chat 锁（suspend/帧互斥）。"""
+        try:
+            async with self._chat_lock(chat_id):
+                st = self._states.get(chat_id)
+                if st is None or not st.pause_pending or st.finalized:
+                    return
+                st.pause_pending = False
+                await self._finalize(st, st.answer_text)
+        except Exception:
+            _logger.debug("composer: pause expire failed chat=%s", chat_id, exc_info=True)
+
     # ── 降级 ────────────────────────────────────────────────────────────
     def _degrade(self, chat_id: str, where: str, exc: Exception) -> None:
         st = self._states.get(chat_id)
@@ -754,6 +966,12 @@ class FrameComposer:
         try:
             st = self._states.get(chat_id)
             if st is None or st.finalized or st.degraded:
+                return
+            if st.paused or st.pause_pending:
+                # v2.0.26：clarify 暂停/窗口期看门狗让位——等待可长达 hermes
+                # clarify 硬超时（默认 3600s），静默是预期而非孤儿；不 seal、
+                # 保持监视（resume 后 _arm_watchdog 重新武装由帧路径承接）。
+                self._arm_watchdog(chat_id)
                 return
             if time.monotonic() - st.last_activity >= _WATCHDOG_IDLE_SEC:
                 asyncio.ensure_future(self._watchdog_seal(chat_id))
@@ -823,8 +1041,11 @@ class FrameComposer:
         st = self._states.pop(chat_id, None)
         if st and st.card_message_id:
             self._by_message.pop(st.card_message_id, None)
+        self._cancel_pause(chat_id)  # v2.0.26：暂停窗口定时器随状态一并清理
 
     def clear(self) -> None:
+        for cid in list(self._pause_timers):
+            self._cancel_pause(cid)
         self._states.clear()
         self._by_message.clear()
         self._chat_locks.clear()
@@ -994,6 +1215,59 @@ def _split_native_composite(text: str) -> tuple[str, list[str]]:
         return text, []
     except Exception:  # noqa: BLE001 — 拆分纯装饰，失败整体按正文
         return (text or "", [])
+
+
+# ── clarify 暂停/恢复 helpers（v2.0.26，同卡续流）────────────────────────────
+def _is_clarify_placeholder(text: str) -> bool:
+    """hermes clarify 边界占位文案判定（stream_consumer._finalize_boundary_stream：
+    accumulated 为空时 finalize_text = ``t("gateway.clarify.native_stream_placeholder")``
+    —— zh「💬 等待你的选择...」/ en「💬 Waiting for your choice...」，WeCom 气泡
+    模型的过渡文案，不应落飞书卡正文）。判定规则刻意用形态而非文案枚举：
+    💬 前缀 + 单行 + ≤40 字符（占位是一句短语；真实 answer 的思考内容走面板、
+    正文不会是单个 💬 短行）——跨语言/hermes 文案改动均稳健。
+    """
+    t = (text or "").strip()
+    return bool(t) and t.startswith("💬") and "\n" not in t and len(t) <= 40
+
+
+def _clarify_wait_row() -> str:
+    """面板暂停行文本（单语 en，与面板既有 hermes 进度行语言一致；见 i18n 词条）。"""
+    from ..cardkit.i18n import _T
+
+    return _T["clarify_wait"][0]
+
+
+def _drop_clarify_wait_row(st: CardTurnState) -> None:
+    """resume 时从内存面板移除暂停行（status_lines/line_times 必须同步收缩）.
+
+    API 层面无需专发更新：行从 status_lines 移除后，后续 _patch_status（进度行
+    到达）/ finalize _reseal_panel 重建 / finalize 空面板删除（panel_on_card=True
+    且行空）必然把它从卡上带走——回合必经 finalize，行不会残留。
+    """
+    try:
+        row = _clarify_wait_row()
+        idx = st.status_lines.index(row)
+    except ValueError:
+        return
+    st.status_lines.pop(idx)
+    if idx < len(st.line_times):
+        st.line_times.pop(idx)
+
+
+def _merge_resumed_answer(resume_base: str, snapshot: str) -> str:
+    """clarify 回调后的新段快照与暂停前正文按段拼接.
+
+    hermes 边界处理时 ``_reset_segment_state()`` 清空 accumulated → reopen 后
+    delta 是「新段内累积快照」（不含暂停前内容）→ 段间用空行拼接；同一回合
+    多次 clarify 时 resume_base 随 suspend 递进累积（见 handle_stream_frame）。
+    """
+    base = (resume_base or "").strip()
+    snap = (snapshot or "").strip()
+    if not base:
+        return snap
+    if not snap:
+        return base
+    return f"{base}\n\n{snap}"
 
 
 def _turn_elapsed_ms(st: CardTurnState) -> float:

@@ -42,6 +42,12 @@ _T: dict[str, tuple[str, str]] = {
     "rounds": ("{} rounds", "{} 轮"),
     "tools_count": ("{} tools", "{} 个工具"),
     "round_n": ("Round {}", "第 {} 轮"),
+    # v2.0.26：clarify 暂停行（engine.suspend_for_clarify → 面板状态行）。
+    # 行语言取 en（与面板既有 hermes 进度行「🔍 Searching...」等一致——
+    # status_lines 是单语文本通道，卡片级 i18n 仅标题/页脚元素支持）。
+    # emoji ⏸ 与 hermes 边界占位（💬 Waiting for your choice...）刻意区分：
+    # 面板行语法（classify._is_progress_frame_text）把 💬 行归思考块，⏸ 不冲突。
+    "clarify_wait": ("⏸ Waiting for your choice...", "⏸ 等待你的选择…"),
 }
 
 def _i18n(en: str, zh: str) -> dict[str, str]:

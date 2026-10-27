@@ -222,6 +222,26 @@ class Config:
         sec = self._plugin_sec()
         return _to_bool(sec.get("oneshot_cards", True), default=True)
 
+    @property
+    def clarify_suspend_sec(self) -> float:
+        """v2.0.26：clarify 暂停窗口秒数（默认 1.2；0 = 关闭，回 v2.0.25 行为）.
+
+        背景：hermes 在 clarify 交互前强制 finalize 当前流
+        （run_turn_runner.py:1404，WeCom 气泡模型语义），边界 finalize 与真
+        回合终态到达 composer 时参数一致（text, finalize=True）。引擎把
+        finalize 帧挂起本窗口：窗口内 send_clarify 到达 → 确认为 clarify
+        边界（卡片保持流式态等回调，回调后同一张卡续流）；到期无 send_clarify
+        → 真落定（普通回合仅 footer/关流式延迟本秒数）。
+        实测边界 finalize → send_clarify 间隔 <200ms（2026-10-27 13:20 用户
+        回合日志），1.2s 裕度充分；负值/非数值按默认。
+        """
+        sec = self._plugin_sec()
+        try:
+            val = float(sec.get("clarify_suspend_sec", 1.2))
+        except (TypeError, ValueError):
+            return 1.2
+        return val if val > 0 else 0.0
+
     def _default_footer_fields(self) -> list[list[str]]:
         # v2.0.21（审计 R10）：与 finalize._DEFAULT_FOOTER_FIELDS 对齐为同一
         # 事实源 [status/elapsed/model(+reasoning)]。此前默认表多列

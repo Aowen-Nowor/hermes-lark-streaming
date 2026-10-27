@@ -1,5 +1,48 @@
 # Changelog
 
+## v2.0.26 (2026-10-27)
+
+**clarify 暂停/恢复（同卡续流）：澄清等待期间流式卡片保持「进行中」，回答后续写同一张卡直到定稿，771 用例全绿。**
+
+### 背景（用户反馈 2026-10-27）
+
+「测试 Clarify 交互卡片时：发消息后创建流式输出卡片 → 卡片状态变成**已完成** → 再创建 Clarify 交互卡片 → 选择后**又创建一张流式输出卡片**继续输出。期望：流式卡片应等待 clarify 回调（保持进行中），回调后**继续在同一张卡上**流式输出，直到卡片状态变成已完成。」
+
+### 取证（源码行号 + 生产日志铁证）
+
+1. **hermes 平台语义**（非插件缺陷）：`gateway/run_turn_runner.py:1404` — clarify 交互前官方强制 `_close_native_stream_boundary("Clarify", placeholder, reopen=True)`（:1320 docstring 自述「interrupting interaction must finalize the current stream first, or post-interaction output keeps updating the OLD bubble above the prompt」——WeCom 气泡模型语义）；`stream_consumer._handle_approval_boundary` finalize 后 `_close_native_state()` + `_awaiting_reopen_after_boundary=True`，回调后 `request_reopen_seed`/lazy re-seed **重开一个新流**。
+2. **生产日志**（agent.log 2026-10-27 13:20:35→13:21:29 用户实测回合）：card created → `Clarify boundary: finalized stream`（第一张卡完成）→ tool clarify completed (10.01s) → `Eager re-seed after clarify answer` → **card created（第二张卡）** → 二次 clarify 边界 → card created（第三张）→ 真回合 final。两次 clarify = 三张卡。
+3. **识别难点**：边界 finalize 与真回合终态到达插件 `send_stream_frame` 时参数**完全一致**（`text, finalize=True`——transport:66 统一帧通道，无 reason 字段）。唯一可靠区分 = **边界 finalize 后必紧跟 send_clarify**（同一事件循环：agent 线程 boundary future resolve 后立即 schedule，实测间隔 <200ms）。
+
+### 变更
+
+| 位置 | 变更 |
+|------|------|
+| composer/engine.py | **finalize 帧暂停窗口**（`clarify_suspend_sec`，默认 1.2s，0=关闭走 v2.0.25 语义）：finalize 帧到达且有活跃卡 → 不 split/不落正文面板/不关流式，挂起等确认（`pause_pending`）；窗口内 `suspend_for_clarify` 到达 → 确认为 clarify 边界（取消落定定时器）；窗口到期无 send_clarify → `_pause_expire` 真落定（普通回合仅 footer/关流式延迟窗口时长） |
+| composer/engine.py | **suspend_for_clarify**：卡进入 `paused` 等待态，面板追加暂停行「⏸ Waiting for your choice...」（i18n `clarify_wait`，经 _patch_status 全量更新，懒渲染补插机制承接纯 answer 卡）；hermes 占位文案（💬 开头单行 ≤40 字符，`_is_clarify_placeholder` 形态判定跨语言稳健）不落正文 |
+| composer/engine.py | **同卡续流（resume）**：回调后 seed 帧（空）解除暂停 + 面板移除暂停行；后续 delta 是「新段内累积快照」（hermes 边界处理时 `_reset_segment_state` 清空 accumulated）→ 与 `resume_base` 段拼接（`_merge_resumed_answer`，**普通分支同样段感知**——resume 后每帧都拼，同回合多次 clarify 递进累积），**card_id 不变、建卡仅一次** |
+| composer/engine.py | **turn_id 防串**：CardTurnState 记录 hermes 回合标识（transport 每帧携带），turn_id 变化的帧对未落定卡（含暂停卡）先真落定再建新卡——用户不等澄清直接发新消息不再串卡；_create_card 重置暂停族字段 |
+| composer/engine.py | **看门狗/GC 豁免**：暂停/窗口期 `st.paused/pause_pending` 豁免看门狗 seal（保持监视重新武装）与 GC idle 回收——hermes clarify 硬超时（默认 3600s）远大于 TTL 600s，等待是预期而非孤儿；forget/clear 清理暂停定时器 |
+| plugin/adapter.py | send_clarify 在发卡前调用 `composer.suspend_for_clarify`（失败/无活跃卡返回 False 不阻断——回调后建新卡的 v2.0.25 行为自然承接，内容永不丢） |
+| config/reader.py | 新增 `feishu_streaming.clarify_suspend_sec`（默认 1.2；0 = 关闭回 v2.0.25 行为）；composer 构造参数优先，config 缺失/异常 → 0 |
+| cardkit/i18n.py | 新增 `clarify_wait` 词条（en 行语言与面板既有 hermes 进度行一致；emoji ⏸ 与 hermes 边界占位 💬 刻意区分） |
+| tests/e2e/test_v226_clarify_pause.py | 新增 17 用例：暂停窗口（不落定不关流式）/ suspend 确认（占位清空+暂停行+面板）/ 窗口到期真落定 / grace=0 现状语义 / config=None 语义 / 回调后同卡续流（card_id 不变+建卡一次）/ 段拼接 / 双 clarify 递进 / turn 防串 / 看门狗豁免 / GC 豁免 / forget 清理 |
+| tests/e2e/framework.py | E2E 基建显式 `clarify_suspend_sec=0`（存量 finalize 断言走立即落定语义） |
+| README / CHANGELOG / plugin.yaml / docs/API.md | badge 2.0.26 / tests 771 / 全条目 / 版本 / 出站契约补 clarify 暂停语义 |
+
+### 关联影响（全列）
+
+- **普通回合**：真 final 后延迟 clarify_suspend_sec（1.2s）才出现页脚/停转圈——内容早已流完，视觉影响极小；approval 边界同延迟（无功能影响）
+- **clarify 超时**（用户不答）：hermes tool 返回 timed_out → agent 继续输出 → lazy re-seed → seed 帧解除暂停 → 正常续流落定
+- **edit 灰度流**（native_streaming=false）：hermes 不发边界 finalize 帧 → suspend 直接暂停（窗口外路径），回调后 edit/send 通道 active_state 追加同卡（resume_base 只参与 native 帧路径，edit 通道语义不动）
+- **网关重启**：内存状态丢失（暂停卡留流式态）——存量风险不变（重启前未 finalize 的卡同样如此），SKILL.md 手动拉起指引覆盖
+- **s175/事故形态探针**（v2.0.25 行语法扫描）：clarify 占位文案 💬 开头此前会被判思考块进面板（用户日志 status_lines=2 的组成之一）——v2.0.26 暂停路径不落正文/面板，附带消除
+
+### 测试与配置兼容
+
+- 全量 **771 passed**（v2.0.25 基线 754 + 17 新增）；ruff 归一化对比基线零新增（EXE002 为文件权限位存量）；py_compile 全过
+- 配置兼容：`clarify_suspend_sec` 未配置走默认 1.2（生产开箱即用）；设 0 完整回退 v2.0.25 行为；测试语境（config=None）自动关闭
+
 ## v2.0.25 (2026-10-27)
 
 **Native 通道 answer 快照误拆面板根治（行语法扫描替代 emoji 启发式）+ 官方流式光标剥除，754 用例全绿。**
