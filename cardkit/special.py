@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import ast
+import re
 from typing import Any
 
 from .i18n import _LOCALES, _T, _i18n, _t
-from .elements import _escape_md
+from .elements import _escape_md, _card_text_style_config, _aux_text_size
+from .cards import _build_notice_row
 from .md import (
     _MAX_CRON_TABLES,
     _downgrade_tables,
@@ -17,6 +19,7 @@ from .md import (
 __all__ = [
     'build_cron_card',
     'build_gateway_card',
+    'parse_cron_delivery',
     'build_clarify_card',
     'build_clarify_submitted_card',
     'build_clarify_confirmed_card',
@@ -82,20 +85,89 @@ def normalize_clarify_choices(choices: list[str] | None) -> list[str]:
             normalized.append(n)
     return normalized
 
-def build_cron_card(content: str) -> dict[str, Any]:
-    """Cron 推送用的极简静态卡片 — schema 2.0，仅 markdown 内容."""
+# v2.0.14：官方 cron 投递包装头（cron/scheduler_delivery.py:2024-2031 逐行镜像）
+#   "Cronjob Response: {task_name}\n(job_id: {id})\n-------------\n\n{content}..."
+# wrap_response=false 时无包装头 → 原样返回。永不抛异常。
+_CRON_HEAD_PREFIX = "Cronjob Response: "
+_CRON_JOB_ID_RE = re.compile(r"^\(job_id:\s*(.*?)\)\s*$")
+
+
+def parse_cron_delivery(content: str) -> tuple[str, str, str]:
+    """解析官方 cron 投递包装头 → ``(task_name, job_id, body)``.
+
+    官方格式（scheduler_delivery.py:2025-2031，cron.wrap_response 默认 true）：
+    首行 ``Cronjob Response: {name}``，次行 ``(job_id: {id})``，第三行分隔线。
+    非包装内容（wrap_response=false / send_message 工具族）原样透传：
+    返回 ``("", "", content)``。任何解析异常降级为原样透传（内容永不丢失）。
+    """
+    try:
+        text = (content or "").strip("\n")
+        lines = text.split("\n")
+        title = job_id = ""
+        idx = 0
+        if lines and lines[0].startswith(_CRON_HEAD_PREFIX):
+            title = lines[0][len(_CRON_HEAD_PREFIX):].strip()
+            idx = 1
+            if len(lines) > idx:
+                m = _CRON_JOB_ID_RE.match(lines[idx].strip())
+                if m:
+                    job_id = m.group(1).strip()
+                    idx += 1
+            if len(lines) > idx and lines[idx].strip() and set(lines[idx].strip()) <= {"-"}:
+                idx += 1
+        body = "\n".join(lines[idx:]).strip()
+        return title, job_id, body
+    except Exception:  # noqa: BLE001 — 解析失败原样透传（内容永不丢失）
+        return "", "", content or ""
+
+
+def _cron_title_row(title: str) -> dict[str, Any]:
+    """cron 卡标题行：lark_md 粗体（与面板标题行同原语）.
+
+    v2.0.16：去除 time_outlined 头部图标（用户验收：cron 卡头部不用图标；
+    job_id 溯源页脚行保留图标）。div 无 icon 为已验证原语（命令摘要行
+    _build_tool_step_detail 同构）。
+    """
+    return {
+        "tag": "div",
+        "text": {"tag": "lark_md", "content": f"**{_escape_md(title)}**"},
+    }
+
+
+def build_cron_card(content: str, *, title: str = "", job_id: str = "") -> dict[str, Any]:
+    """Cron 推送用的静态卡片 — schema 2.0，markdown 内容.
+
+    v2.0.14 扩展（向后兼容）：``title`` 非空时在正文前插入标题行
+    （v2.0.16 起无图标粗体行，V1 极简卡无标题行）；``job_id`` 非空时在
+    末尾追加灰色 notation 页脚行（_build_notice_row 同构）——溯源信息
+    （原包装头的 ``(job_id: ...)`` 行）从正文上移到页脚，正文不再重复。
+    缺省参数下与 V1 行为逐字节一致（既有测试冻结该契约）。
+    """
     card: dict[str, Any] = {
         "schema": "2.0",
         "config": {"locales": _LOCALES},
         "body": {"elements": []},
     }
+    if title.strip():
+        card["body"]["elements"].append(_cron_title_row(title.strip()))
+        card["config"]["summary"] = {"content": title.strip()}
     if content.strip():
-        summary = content[:120].replace("\n", " ").replace("```", "").strip()
-        if summary:
-            card["config"]["summary"] = {"content": summary}
-        for chunk in _split_long_text(_downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES)):
-            if chunk.strip():
-                card["body"]["elements"].append({"tag": "markdown", "content": chunk})
+        if "summary" not in card["config"]:
+            summary = content[:120].replace("\n", " ").replace("```", "").strip()
+            if summary:
+                card["config"]["summary"] = {"content": summary}
+        chunks = [
+            chunk
+            for chunk in _split_long_text(_downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES))
+            if chunk.strip()
+        ]
+        if chunks and title.strip():
+            card["body"]["elements"].append({"tag": "hr"})
+        card["body"]["elements"].extend({"tag": "markdown", "content": chunk} for chunk in chunks)
+    if job_id.strip():
+        card["body"]["elements"].append(
+            _build_notice_row("time_outlined", f"Cronjob · job_id: {job_id.strip()}")
+        )
     # v1.7.0 (R4-10, E2E T7 铁证): body.elements=[] 被飞书 Card 2.0 直接拒绝
     # （230099/200621 "parse card json err"）。空内容的 cron 推送以前必产生
     # 一张非法卡 + 一次必败 API + 静默降级纯文本。单个空格 markdown 与
@@ -116,7 +188,7 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
                 "tag": "plain_text",
                 "content": f"{status_emoji} {status_label}",
                 "text_color": "turquoise",
-                "text_size": "notation",
+                "text_size": _aux_text_size(),
             },
         })
 
@@ -127,7 +199,9 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
 
     card: dict[str, Any] = {
         "schema": "2.0",
-        "config": {"locales": _LOCALES},
+        # v2.0.20：card_style 已配置时状态行走 cus-aux token 并注入 config.style；
+        # 未配置时零注入（与回合卡一致，观感同 v2.0.18）。
+        "config": {"locales": _LOCALES, **_card_text_style_config()},
         "body": {"elements": elements},
     }
 

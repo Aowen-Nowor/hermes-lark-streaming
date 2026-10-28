@@ -14,9 +14,6 @@ _MAX_CHUNK_CHARS = 2400
 # ── Pre-compiled regex patterns (P2-01: avoid recompilation on every call) ──
 _RE_FENCED_CODE = re.compile(r'```[\s\S]*?```')
 _RE_INLINE_CODE = re.compile(r'`[^`]+`')
-_RE_BOLD = re.compile(r'\*{2,3}(?!\s)((?:(?!\*{2,3}).)+?)(?<!\s)\*{2,3}', re.DOTALL)
-_RE_VALID_ITALIC = re.compile(r'(?<![a-zA-Z0-9_])\*(?!\s)((?:(?!\*).)+?)(?<!\s)\*', re.DOTALL)
-_RE_UNPAIRED_ASTERISK = re.compile(r'(?<!\\)\*(?=[^\s*])')
 _RE_TABLE_ROW = re.compile(r"\|.+\|\n\|[-:| ]+\|[\s\S]*?(?=\n\n|\n(?!\|)|$)")
 _RE_IMAGE_REF = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
 _RE_CODE_BLOCK_EXTRACT = re.compile(r"(^|\n)(`{3,})([^\n]*)\n[\s\S]*?\n\2(?=\n|$)")
@@ -25,8 +22,7 @@ _RE_HEADING_DEMOTE = re.compile(r"^#{2,6} (.+)$", re.MULTILINE)
 _RE_H1_DEMOTE = re.compile(r"^# (.+)$", re.MULTILINE)
 _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 _RE_SHORT_MD_CHECK = re.compile(r'^#{1,6} |\n#{1,6} |```|!\[|\n{3,}')
-# v1.3.0: placeholder pattern for restoring protected code/bold/italic blocks
-_RE_PROTECTED_PLACEHOLDER = re.compile(r'\x00P(\d+)P\x00')
+_RE_FENCE_LINE = re.compile(r"^\s*(`{3,})")  # 行首围栏标记（v2.0.21 围栏状态机）
 
 __all__ = [
     "_MAX_CRON_TABLES",
@@ -34,7 +30,6 @@ __all__ = [
     "_find_tables_outside_code_blocks",
     "_split_long_text",
     "_strip_invalid_image_keys",
-    "escape_markdown_asterisks",
     "optimize_markdown_style",
 ]
 
@@ -77,41 +72,42 @@ def _strip_invalid_image_keys(text: str) -> str:
 
     return _RE_IMAGE_REF.sub(_replace, text)
 
-def escape_markdown_asterisks(text: str) -> str:
-    """飞书 Markdown 解析器比 CommonMark 更激进——会把 2*4000+4*3000"""
-    if '\x00' in text:
-        text = text.replace('\x00', '')
+def _demote_headings_outside_fences(text: str) -> str:
+    """v2.0.21（审计 R5）：围栏感知的标题降级.
 
-    if '*' not in text:
-        return text
+    原实现先提取**闭合**代码块（_RE_CODE_BLOCK_EXTRACT 要求闭合 ```），再对
+    剩余文本跑 MULTILINE 标题降级——未闭合围栏（流式中段/模型输出奇数个
+    ```）内的 ``# 注释``/``## 标题`` 行被误改写为 #####/####，代码显示变形。
+    逐行状态机：行首 ``` 开栏/闭栏，围栏内行原样保留；围栏外行才降级
+    （H1→####，H2-H6→#####，与原双正则语义逐行等价）。
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    fence_len = 0  # 0 = 不在围栏内；>0 = 当前围栏开栏标记的反引号数
+    for ln in lines:
+        m = _RE_FENCE_LINE.match(ln)
+        if m:
+            if not fence_len:
+                fence_len = len(m.group(1))
+            elif len(m.group(1)) >= fence_len:
+                fence_len = 0  # 同长或更长的 ``` 闭栏
+            out.append(ln)
+            continue
+        if fence_len:
+            out.append(ln)  # 围栏内行原样（代码/注释不降级）
+            continue
+        if _RE_H1_DEMOTE.match(ln):
+            ln = _RE_H1_DEMOTE.sub(r"#### \1", ln)
+        else:
+            ln = _RE_HEADING_DEMOTE.sub(r"##### \1", ln)
+        out.append(ln)
+    return "\n".join(out)
 
-    _protected: list[str] = []
 
-    def _save(m: re.Match) -> str:
-        _protected.append(m.group(0))
-        return f'\x00P{len(_protected) - 1}P\x00'
+def _fence_balanced(prefix: str) -> bool:
+    """v2.0.21（审计 R6）：prefix 的行首围栏标记是否成对（偶数 = 闭合）."""
+    return len(_RE_FENCE_LINE.findall(prefix)) % 2 == 0
 
-    # Step 1: 保护代码区域
-    text = _RE_FENCED_CODE.sub(_save, text)
-    text = _RE_INLINE_CODE.sub(_save, text)
-
-    # Step 2: 保护粗体 **...** 和 ***...***
-    text = _RE_BOLD.sub(_save, text)
-
-    text = _RE_VALID_ITALIC.sub(_save, text)
-
-    # Step 4: 转义剩余 *（飞书可能误配对的）
-    text = _RE_UNPAIRED_ASTERISK.sub(r'\\*', text)
-
-    if _protected:
-        for i in range(len(_protected) - 1, -1, -1):
-            text = text.replace(f'\x00P{i}P\x00', _protected[i])
-
-    # Null bytes render as boxes (□) in Feishu and must never reach the API.
-    if '\x00' in text:
-        text = text.replace('\x00', '')
-
-    return text
 
 def optimize_markdown_style(text: str) -> str:
     """1. 提取代码块用占位符保护"""
@@ -131,10 +127,10 @@ def optimize_markdown_style(text: str) -> str:
 
         r = _RE_CODE_BLOCK_EXTRACT.sub(_extract, text)
 
-        # 2. 标题降级（仅当存在 H1-H3 时）
+        # 2. 标题降级（仅当存在 H1-H3 时；v2.0.21 围栏状态机——未闭合围栏内
+        # 的 # 行不再被误降级，闭合块已提取为占位符不受影响）
         if _RE_H1_TO_H3.search(text):
-            r = _RE_HEADING_DEMOTE.sub(r'##### \1', r)
-            r = _RE_H1_DEMOTE.sub(r'#### \1', r)
+            r = _demote_headings_outside_fences(r)
 
         # 3. 还原代码块
         for i, block in enumerate(code_blocks):
@@ -152,7 +148,13 @@ def optimize_markdown_style(text: str) -> str:
         return text
 
 def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
-    """将超长文本按段落/换行拆分为多个不超过 limit 字符的块."""
+    """将超长文本按段落/换行拆分为多个不超过 limit 字符的块.
+
+    v2.0.21（审计 R6）：切点围栏感知——原实现可在围栏/表格中间切开，跨块
+    不闭合 → 前后两块都渲染坏。现在候选切点（段落 > 换行 > 硬切）逐个检查
+    围栏是否闭合，取第一个闭合的；三候选全部落在围栏内才硬切（极端罕见：
+    单个未闭合围栏长度 > limit/2，与原行为一致不再恶化）。
+    """
     if len(text) <= limit:
         return [text]
     chunks: list[str] = []
@@ -160,11 +162,18 @@ def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
         if len(text) <= limit:
             chunks.append(text)
             break
+        candidates: list[int] = []
         cut = text.rfind("\n\n", 0, limit)
-        if cut < limit // 2:
-            cut = text.rfind("\n", 0, limit)
-        if cut < limit // 2:
-            cut = limit
-        chunks.append(text[:cut])
-        text = text[cut:].lstrip("\n")
+        if cut >= limit // 2:
+            candidates.append(cut)
+        cut = text.rfind("\n", 0, limit)
+        if cut >= limit // 2:
+            candidates.append(cut)
+        chosen = limit  # 兑底硬切（与原行为一致）
+        for cand in candidates:
+            if _fence_balanced(text[:cand]):
+                chosen = cand
+                break
+        chunks.append(text[:chosen])
+        text = text[chosen:].lstrip("\n")
     return chunks

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-import math
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +15,6 @@ _logger = logging.getLogger("hermes_lark_streaming")
 def _get_hermes_config_path() -> Path:
     """动态获取 Hermes 配置文件路径."""
     return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "config.yaml"
-
-_RELOAD_CACHE_TTL = 60.0  # 运行时可变配置缓存 TTL.
 
 def _to_bool(val: Any, default: bool = False) -> bool:
     if isinstance(val, bool):
@@ -49,34 +45,12 @@ def _to_int(val: Any, default: int) -> int:
             return default
     return default
 
-def _to_float(val: Any, default: float) -> float:
-    """安全 float 转换, 拒绝 nan/inf (NaN 破坏 max/min 比较节流逻辑)."""
-    if isinstance(val, bool):
-        return float(val)
-    if isinstance(val, (int, float)):
-        result = float(val)
-        if math.isnan(result) or math.isinf(result):
-            _logger.warning("HLS: config float value %r is nan/inf, using default %f", val, default)
-            return default
-        return result
-    if isinstance(val, str):
-        try:
-            result = float(val)
-        except ValueError:
-            _logger.warning("HLS: config value %r is not a valid float, using default %f", val, default)
-            return default
-        if math.isnan(result) or math.isinf(result):
-            _logger.warning("HLS: config float value %r is nan/inf, using default %f", val, default)
-            return default
-        return result
-    return default
-
 class Config:
     """插件配置, 惰性读取. 单例模式: reload() 才能清掉 controller 持有实例缓存."""
 
-    _instance: "Config | None" = None
+    _instance: Config | None = None
 
-    def __new__(cls) -> "Config":
+    def __new__(cls) -> Config:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
@@ -86,8 +60,6 @@ class Config:
         if getattr(self, "_initialized", False):
             return
         self._raw: dict[str, Any] | None = None
-        self._reload_cache: dict[str, Any] | None = None
-        self._reload_cache_at: float = 0.0
         # _lock: Config singleton shared across event-loop + worker threads.
         self._lock = threading.Lock()
         self._initialized = True
@@ -96,44 +68,13 @@ class Config:
         """Force reload from disk. Called by /aowen config reload."""
         with self._lock:
             self._raw = None
-            self._reload_cache = None
-            self._reload_cache_at = 0.0
         _logger.info("HLS: config reload triggered — caches cleared")
 
     @property
-    def enabled(self) -> bool:
-        """默认 True."""
-        sec = self._plugin_sec()
-        return _to_bool(sec.get("enabled", True), default=True)
-
-    @property
-    def linear(self) -> bool:
-        """默认 True."""
-        sec = self._plugin_sec()
-        return _to_bool(sec.get("linear", True), default=True)
-
-    @property
-    def panel_expanded(self) -> bool:
-        sec = self._plugin_sec()
-        return _to_bool(sec.get("panel_expanded", False))
-
-    @property
     def streaming_panel_expanded(self) -> bool:
-        """与 panel_expanded 独立."""
+        """与 V1 panel_expanded 独立（后者已随 V1 移除）."""
         sec = self._plugin_sec()
         return _to_bool(sec.get("streaming_panel_expanded", False))
-
-    @property
-    def max_tool_steps(self) -> int:
-        sec = self._plugin_sec()
-        val = _to_int(sec.get("max_tool_steps", 20), default=20)
-        return max(1, min(100, val))
-
-    @property
-    def max_reasoning_rounds(self) -> int:
-        sec = self._plugin_sec()
-        val = _to_int(sec.get("max_reasoning_rounds", 20), default=20)
-        return max(1, min(100, val))
 
     @property
     def print_strategy(self) -> str:
@@ -150,45 +91,6 @@ class Config:
         return max(1, min(10, val))
 
     @property
-    def flush_interval_ms(self) -> float:
-        """stream_element API 节流间隔 (ms). 默认 200."""
-        sec = self._plugin_sec()
-        ms = _to_float(sec.get("flush_interval_ms", 200), default=200.0)
-        return max(70.0, min(2000.0, ms))
-
-    @property
-    def flush_interval_sec(self) -> float:
-        return self.flush_interval_ms / 1000.0
-
-    @property
-    def answer_flush_interval_ms(self) -> float:
-        """answer-only 流式刷新间隔 (ms). 默认 150.
-
-        v1.7.0 (R2-09): previously hardcoded as _ANSWER_FAST_STREAM_MS=150 in
-        controller/linear_mixin.py with no way to tune it apart from the
-        general flush_interval_ms (which also gates panel updates)."""
-        sec = self._plugin_sec()
-        ms = _to_float(sec.get("answer_flush_interval_ms", 150), default=150.0)
-        return max(70.0, min(2000.0, ms))
-
-    @property
-    def answer_flush_interval_sec(self) -> float:
-        return self.answer_flush_interval_ms / 1000.0
-
-    @property
-    def show_reasoning(self) -> bool:
-        """TTL 缓存读取 (/reasoning 命令运行时修改配置)."""
-        display = self._reload_cached().get("display")
-        if not isinstance(display, dict):
-            return False
-        platforms = display.get("platforms")
-        if isinstance(platforms, dict):
-            feishu = platforms.get("feishu")
-            if isinstance(feishu, dict) and "show_reasoning" in feishu:
-                return _to_bool(feishu["show_reasoning"])
-        return _to_bool(display.get("show_reasoning", False))
-
-    @property
     def feishu_app_id(self) -> str:
         return str(self._platform_cfg().get("app_id", ""))
 
@@ -197,12 +99,12 @@ class Config:
         return str(self._platform_cfg().get("app_secret", ""))
 
     @property
-    def feishu_base_url(self) -> str:
-        return str(self._platform_cfg().get("base_url", "https://open.feishu.cn/open-apis"))
-
-    @property
     def card_duration_sec(self) -> int:
-        return _to_int(self._plugin_sec().get("card_ttl_sec", 600), default=600)
+        # v2.0.21（审计 R4）：下限钟制 60s——负值/极小值会让 engine._gc 的
+        # 「未定稿状态空闲超 TTL 回收」对活跃回合恒真（idle > ttl 恒成立），
+        # 状态表即时蒸发 → 下帧建新卡（断卡/双卡，gateway19 事故同族）。
+        # print_step 1~10 钉制同款先例；上游配置异常不应炸主流程。
+        return max(60, _to_int(self._plugin_sec().get("card_ttl_sec", 600), default=600))
 
     @property
     def footer_fields(self) -> list[list[str]]:
@@ -217,7 +119,76 @@ class Config:
             return self._default_footer_fields()
         if fields and isinstance(fields[0], str):
             return [fields]
-        return fields
+        # v2.0.21（审计 R8）：畸形行校验——fields 必须是 [[str, ...], ...]。
+        # 此前 dict/嵌套畸形原样透传 → 渲染层对非列表行静默产出空行、未知
+        # 字段名静默 None，footer 行消失无任何日志。现在逐行校验：畸形行
+        # 剧除 + warning 留痕，全畸形回落默认字段（不空 footer）。
+        cleaned: list[list[str]] = []
+        for row in fields:
+            if (
+                isinstance(row, list)
+                and bool(row)
+                and all(isinstance(f, str) and f.strip() for f in row)
+            ):
+                cleaned.append([str(f) for f in row])
+            else:
+                _logger.warning("HLS: config footer.fields invalid row %r dropped", row)
+        return cleaned or self._default_footer_fields()
+
+    @property
+    def footer_reasoning_level(self) -> str:
+        """v2.0.19：footer 推理等级显示值（"" = 不显示）.
+
+        语义（用户需求）：``display.show_reasoning: true`` 且
+        ``agent.reasoning_effort`` 解析出有效等级时，footer 的 ``reasoning``
+        字段显示等级。等级值用官方解析器 ``hermes_constants.resolve_reasoning_config``
+        （per-model override > 全局，与 agent 行为一致）；非 hermes 环境
+        （如测试沙箱）import 失败 → ``""``。
+        未配置/禁用/等级为空 → ``""``（显示层自动跳过该字段）。
+        """
+        raw = self._load()
+        display = raw.get("display")
+        if not (isinstance(display, dict) and _to_bool(display.get("show_reasoning", False))):
+            return ""
+        try:
+            from hermes_constants import resolve_reasoning_config
+        except ImportError:
+            return ""
+        rc = resolve_reasoning_config(raw, "")
+        if not isinstance(rc, dict) or not rc.get("enabled"):
+            return ""
+        return str(rc.get("effort") or "").strip()
+
+    @property
+    def card_text_sizes(self) -> dict[str, dict[str, str]]:
+        """v2.0.20：``card_style.text_size`` 自定义字号（完全 opt-in，默认零注入）.
+
+        用户反馈（2026-10-16）：手机端字号观感变大，要求默认恢复之前观感。
+        语义改为——未配置（默认）→ ``{}``：卡片不注入 ``config.style``、
+        元素不带字号 token，payload 与 v2.0.18 逐字段一致（answer=normal_v2、
+        aux=notation 字面值，观感零变化）。
+        配置后 → answer/aux 两组各 default/pc/mobile 三档；用户未写的组/档位
+        回落 v2.0.18 字面值枚举（answer→normal_v2、aux→notation），保证
+        「只改用户写的档位，其余观感不动」，同时 style.text_size 中两个
+        token 恒有完整定义（元素引用不落空）。值域为飞书卡片 2.0 官方
+        13 档 token（heading-0 30px ~ x-small 10px），非法值由客户端回落 normal。
+        """
+        sec = self._plugin_sec()
+        style = sec.get("card_style")
+        if not isinstance(style, dict):
+            return {}
+        ts = style.get("text_size")
+        if not isinstance(ts, dict) or not ts:
+            return {}
+        out: dict[str, dict[str, str]] = {}
+        for key, fallbacks in (
+            ("answer", {"default": "normal_v2", "pc": "normal_v2", "mobile": "normal_v2"}),
+            ("aux", {"default": "notation", "pc": "notation", "mobile": "notation"}),
+        ):
+            group = ts.get(key)
+            group = group if isinstance(group, dict) else {}
+            out[key] = {slot: str(group.get(slot, dv) or dv) for slot, dv in fallbacks.items()}
+        return out
 
     @property
     def footer_show_label(self) -> bool:
@@ -226,16 +197,62 @@ class Config:
         return _to_bool(footer.get("show_label", False))
 
     @property
-    def gateway_cards(self) -> bool:
-        """默认 True. TTL 缓存读取."""
-        sec = self._reload_cached().get("hermes_lark_streaming")
-        if not isinstance(sec, dict):
-            return True
-        return _to_bool(sec.get("gateway_cards", True), default=True)
+    def native_streaming(self) -> bool:
+        """v2.0.13：hermes native streaming 通道开关（默认 True）.
 
-    @staticmethod
-    def _default_footer_fields() -> list[list[str]]:
-        return [["status", "elapsed", "model", "cost", "compression_exhausted"]]
+        True → 适配器声明 ``SUPPORTS_NATIVE_STREAMING``，答案流帧走官方
+        native 帧通道（send_stream_frame）：segment-break finalize 被官方
+        consumer 吞掉（gateway/stream_consumer_transport.py:389），工具边界
+        不再封卡 → 单卡全回合（Task 18 报告 P1-B）。
+        False → 整平台回到 edit-based 流（v2.0.12 行为）；部署灰度/一键回退。
+        """
+        sec = self._plugin_sec()
+        return _to_bool(sec.get("native_streaming", True), default=True)
+
+    @property
+    def oneshot_cards(self) -> bool:
+        """v2.0.14：回合外正式投递一次性卡片（默认 True）.
+
+        True → 三类出站帧不再落原生 post 文本，改渲染为静态定稿卡：
+        1. cron 投递族（metadata 带 ``job_id``，成功/失败/队列排水同源）
+        2. 回合外定稿（notify=True 且无活跃卡——非流式单发回复等）
+        3. 长文主动投递（无标记 plain 且 ≥200 字——send_message 工具族）
+        False → 全部落回原生路径（v2.0.13 行为，一键回退）。
+        """
+        sec = self._plugin_sec()
+        return _to_bool(sec.get("oneshot_cards", True), default=True)
+
+    @property
+    def clarify_suspend_sec(self) -> float:
+        """v2.0.26：clarify 暂停窗口秒数（默认 1.2；0 = 关闭，回 v2.0.25 行为）.
+
+        背景：hermes 在 clarify 交互前强制 finalize 当前流
+        （run_turn_runner.py:1404，WeCom 气泡模型语义），边界 finalize 与真
+        回合终态到达 composer 时参数一致（text, finalize=True）。引擎把
+        finalize 帧挂起本窗口：窗口内 send_clarify 到达 → 确认为 clarify
+        边界（卡片保持流式态等回调，回调后同一张卡续流）；到期无 send_clarify
+        → 真落定（普通回合仅 footer/关流式延迟本秒数）。
+        实测边界 finalize → send_clarify 间隔 <200ms（2026-10-27 13:20 用户
+        回合日志），1.2s 裕度充分；负值/非数值按默认。
+        """
+        sec = self._plugin_sec()
+        try:
+            val = float(sec.get("clarify_suspend_sec", 1.2))
+        except (TypeError, ValueError):
+            return 1.2
+        return val if val > 0 else 0.0
+
+    def _default_footer_fields(self) -> list[list[str]]:
+        # v2.0.21（审计 R10）：与 finalize._DEFAULT_FOOTER_FIELDS 对齐为同一
+        # 事实源 [status/elapsed/model(+reasoning)]。此前默认表多列
+        # cost/compression_exhausted——两字段在 V2 契约下数据不可达（Task 26
+        # 定案：官方 hook/帧契约均无 usage 数据），渲染层永远静默跳过，收录
+        # 在默认表只误导显式配置用户；渲染层仍保留两字段分支（未来数据通道
+        # 开放自动生效）。
+        base = ["status", "elapsed", "model"]
+        if self.footer_reasoning_level:
+            base.append("reasoning")
+        return [base]
 
     @property
     def env_app_id(self) -> str:
@@ -247,7 +264,7 @@ class Config:
 
     def _plugin_sec(self) -> dict[str, Any]:
         raw = self._load()
-        sec = raw.get("hermes_lark_streaming")
+        sec = raw.get("feishu_streaming") or raw.get("hermes_lark_streaming")
         if isinstance(sec, dict):
             return sec
         return {}
@@ -255,21 +272,9 @@ class Config:
     def _platform_cfg(self) -> dict[str, Any]:
         """从环境变量或平台配置找飞书凭据."""
         if self.env_app_id and self.env_app_secret:
-            base_url = (
-                os.environ.get("FEISHU_BASE_URL")
-                or os.environ.get("LARK_BASE_URL")
-                or None
-            )
-            if not base_url:
-                domain = os.environ.get("FEISHU_DOMAIN", "").lower()
-                if domain == "lark":
-                    base_url = "https://open.larksuite.com/open-apis"
-                else:
-                    base_url = "https://open.feishu.cn/open-apis"
             return {
                 "app_id": self.env_app_id,
                 "app_secret": self.env_app_secret,
-                "base_url": base_url,
             }
         raw = self._load()
         for key in ("feishu", "lark"):
@@ -296,25 +301,3 @@ class Config:
             else:
                 self._raw = {}
             return self._raw
-
-    def _reload_cached(self) -> dict[str, Any]:
-        """带 TTL 缓存的磁盘重读 (运行时可变配置项). 避免高频属性访问读磁盘."""
-        now = time.monotonic()
-        with self._lock:
-            if self._reload_cache is not None and (now - self._reload_cache_at) < _RELOAD_CACHE_TTL:
-                return self._reload_cache
-            config_path = _get_hermes_config_path()
-            if config_path.exists():
-                try:
-                    text = config_path.read_text(encoding="utf-8")
-                    self._reload_cache = yaml.safe_load(text) or {}
-                except yaml.YAMLError:
-                    _logger.warning("HLS: config YAML syntax error in %s (reload), using empty config", config_path)
-                    self._reload_cache = {}
-                except (OSError, UnicodeDecodeError):
-                    _logger.warning("HLS: config file read error in %s (reload), using empty config", config_path)
-                    self._reload_cache = {}
-            else:
-                self._reload_cache = {}
-            self._reload_cache_at = now
-            return self._reload_cache

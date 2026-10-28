@@ -143,20 +143,18 @@ def _print_usage() -> None:
     print("  cleanup    Remove plugin-injected config from config.yaml (run after uninstall)")
     print("  python     Print the auto-detected Hermes Python interpreter path")
     print()
-    print("Note: This plugin uses runtime monkey patching (no file modification).")
-    print("      Install/uninstall via: hermes plugins install/uninstall")
+    print("Note: V2 is a native platform plugin — zero monkey-patching.")
+    print("      Enable by switching the gateway platform name: feishu -> feishu-streaming")
 
 def _cmd_status() -> int:
     try:
         from hermes_lark_streaming.config import Config
 
         cfg = Config()
-        print(f"Config hermes_lark_streaming.enabled: {cfg.enabled}")
-        print(f"Config hermes_lark_streaming.linear: {cfg.linear}")
         print(f"Feishu credentials: {'configured' if (cfg.env_app_id or cfg.feishu_app_id) else 'MISSING'}")
         print()
-        print("Plugin uses runtime monkey patching — no source files are modified.")
-        print("Install/uninstall via: hermes plugins install/uninstall")
+        print("V2 architecture: native platform plugin, zero monkey-patching.")
+        print("Enable by switching the gateway platform name: feishu -> feishu-streaming")
     except ImportError as e:
         print(f"Error: Cannot import hermes_lark_streaming: {e}")
         print("Please ensure the plugin is installed correctly.")
@@ -168,7 +166,6 @@ def _cmd_verify() -> int:
         from hermes_lark_streaming.config import Config
 
         cfg = Config()
-        print(f"Config hermes_lark_streaming.enabled: {cfg.enabled}")
         print(f"Feishu credentials: {'configured' if (cfg.env_app_id or cfg.feishu_app_id) else 'MISSING'}")
 
         # Verify that gateway modules are importable
@@ -193,9 +190,9 @@ def _cmd_verify() -> int:
 def _cmd_cleanup() -> int:
     """Remove plugin-injected config entries from config.yaml."""
     try:
-        from hermes_lark_streaming.plugin import _cleanup_config
+        from hermes_lark_streaming.plugin import cleanup_streaming_config
 
-        _cleanup_config()
+        cleanup_streaming_config()
         print("Cleanup complete. Next steps:")
         print("  1. hermes plugins uninstall hermes-lark-streaming")
         print("  2. hermes gateway restart")
@@ -251,11 +248,10 @@ def _cmd_doctor() -> int:
         from hermes_lark_streaming.config import Config
         cfg = Config()
         print("[3/6] Configuration:")
-        for k in ("enabled", "linear", "gateway_cards", "flush_interval_ms",
-                   "card_duration_sec", "print_strategy", "print_step",
-                   "panel_expanded", "streaming_panel_expanded",
-                   "max_tool_steps", "max_reasoning_rounds",
-                   "footer_fields", "footer_show_label"):
+        for k in ("card_duration_sec", "print_strategy", "print_step",
+                   "streaming_panel_expanded",
+                   "footer_fields", "footer_show_label", "native_streaming",
+                   "oneshot_cards"):
             print(f"      {k:24}{getattr(cfg, k, '?')}")
     except Exception as e:
         print(f"[3/6] Configuration:     FAILED — {e}")
@@ -281,18 +277,11 @@ def _cmd_doctor() -> int:
         print("      ⚠ MISSING — cards will NOT work.")
 
     print()
+    print("[5/6] Architecture: native platform plugin (zero monkey-patch)")
     try:
-        from hermes_lark_streaming.patching import _patch_status
-        if _patch_status:
-            print("[5/6] Patch status:")
-            for key, val in _patch_status.items():
-                if key in ("version", "hermes_layout"):
-                    continue
-                icon = "✓" if val in ("✓", "applied") else ("⚠" if "pending" in str(val) else "✗")
-                print(f"      {icon} {key}: {val}")
-            print(f"      Hermes layout: {_patch_status.get('hermes_layout', {})}")
-        else:
-            print("[5/6] Patch status: (not available — gateway not started)")
+        from hermes_lark_streaming.plugin.adapter import get_active_adapters
+        adapters = get_active_adapters()
+        print(f"      Active adapter instances: {len(adapters)}")
     except ModuleNotFoundError as e:
         print(f"[5/6] Patch status: (skipped — {e})")
     except Exception as e:

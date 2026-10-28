@@ -6,6 +6,8 @@ triggers:
   push:
     branches:
       precise:
+        # 默认分支（用户定案保持不变）。V2 在 refactor/v2.0.0 开发，
+        # 由用户手动同步到 github_sync 后触发本流水线（与 V1 发版流程一致）。
         - github_sync
 variables:
   global:

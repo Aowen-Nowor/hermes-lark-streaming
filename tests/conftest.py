@@ -98,14 +98,8 @@ def _ensure_event_loop_for_sync_tests():
 def _cleanup_event_loops():
     """Close any event loops that test helpers created but did not clean up."""
     yield
-    # Import late: the list is populated at test execution time.
-    try:
-        from tests.test_controller import _loops_to_cleanup
-
-        loops = list(_loops_to_cleanup)
-        _loops_to_cleanup.clear()
-    except ImportError:
-        loops = []
+    # V2: controller module removed — no helper-created loops to reap here.
+    loops = []
 
     for loop in loops:
         if loop.is_closed() or loop.is_running():
@@ -122,14 +116,11 @@ def _cleanup_event_loops():
 def _reset_config_singleton():
     """v1.2.0: 每个 test 重置 Config 单例，避免测试间状态泄漏.
 
-    Config 改单例后，controller/patching/aowen 持有同一实例。
+    V2: adapter/composer/aowen 持有同一实例。
     测试若修改 _raw/_reload_cache 会影响后续测试。此 fixture 在
-    每个 test 前清掉单例，保证隔离。同时重置 patching._config 缓存
-    （它持有 Config 实例引用，需一并清避免持有旧单例）。
+    每个 test 前清掉单例，保证隔离。
     """
     from hermes_lark_streaming.config.reader import Config
     Config._instance = None
-    # v1.3.0 P1-03: patching._config global cache removed — Config singleton
-    # reset above is sufficient for test isolation.
     yield
     Config._instance = None

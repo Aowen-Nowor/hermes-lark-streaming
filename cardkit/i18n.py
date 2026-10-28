@@ -18,19 +18,10 @@ _T: dict[str, tuple[str, str]] = {
     "elapsed": ("Elapsed {}", "耗时 {}"),
     "context": ("Context {}", "上下文 {}"),
     "processing": ("Processing...", "处理中..."),
-    "processing_prefix": ("💭 Processing...", "💭 处理中..."),
-    "thought": ("Thought", "思考"),
-    "thinking_panel": ("Thinking", "思考中"),
-    "thought_for": ("Thought for {}", "思考了 {}"),
-    "done": ("Done.", "完成。"),
     "api_calls": ("API", "API"),
     "history_offset": ("Offset", "偏移量"),
-    "error_panel": ("Error", "错误信息"),
-    "interrupt_panel": ("Interrupted", "中断信息"),
     "compression_exhausted": ("⚠ Context Full", "⚠ 上下文已满"),
     "cache": ("Cache {}", "缓存 {}"),
-    "bg_review_panel": ("Review", "审查"),
-    "partial_continues": ("Continues in next message", "内容未完，继续在下一条消息"),
     # ── Context loading hint (first card only, removed on first token) ──
     "loading_context": ("Loading context...", "正在加载上下文..."),
     # ── Clarify interactive card (three-state: pending / submitted / confirmed) ──
@@ -40,6 +31,9 @@ _T: dict[str, tuple[str, str]] = {
     "clarify_submitted": ("Submitted, awaiting confirmation...", "已提交，等待确认..."),
     "clarify_retry": ("Retry submission", "重试提交"),
     "clarify_confirmed": ("Confirmed", "已确认"),
+    # v2.0.21：过期/重启后点击澄清卡的回调提示（clarify._expired_response）
+    "clarify_expired": ("This clarify card has expired or the session was restarted. Please ask again.",
+                        "该澄清卡片已过期或会话已重启，请重新发起提问。"),
     "cost_estimated": ("${} (est.)", "${} (估算)"),
     "cost_actual": ("${} (actual)", "${} (实报)"),
     "cost_included": ("Free", "免费"),
@@ -48,14 +42,12 @@ _T: dict[str, tuple[str, str]] = {
     "rounds": ("{} rounds", "{} 轮"),
     "tools_count": ("{} tools", "{} 个工具"),
     "round_n": ("Round {}", "第 {} 轮"),
-    # ── v1.7.0 (R4): collapse hints + truncation suffix (were zh-hardcoded) ──
-    "collapse_hint_count": ("⚡ {} items collapsed", "⚡ 还有 {} 项已折叠"),
-    "collapse_rounds": ("{} rounds of reasoning", "{} 轮早期推理"),
-    "collapse_tools": ("{} tool steps", "{} 步早期操作"),
-    "collapse_hint_full": ("⚡ Collapsed: {}", "⚡ 还有 {}已折叠"),
-    "truncated_suffix": ("\n\n... (truncated, {} chars total)", "\n\n... (已截断，共 {} 字)"),
-    # v1.7.0 (R4): known interrupt reasons (core.py error_message) → bilingual
-    "interrupt_by_new_message": ("Interrupted by new message", "被新消息中断"),
+    # v2.0.26：clarify 暂停行（engine.suspend_for_clarify → 面板状态行）。
+    # 行语言取 en（与面板既有 hermes 进度行「🔍 Searching...」等一致——
+    # status_lines 是单语文本通道，卡片级 i18n 仅标题/页脚元素支持）。
+    # emoji ⏸ 与 hermes 边界占位（💬 Waiting for your choice...）刻意区分：
+    # 面板行语法（classify._is_progress_frame_text）把 💬 行归思考块，⏸ 不冲突。
+    "clarify_wait": ("⏸ Waiting for your choice...", "⏸ 等待你的选择…"),
 }
 
 def _i18n(en: str, zh: str) -> dict[str, str]:

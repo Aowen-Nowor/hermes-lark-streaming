@@ -72,6 +72,8 @@ def ensure_env() -> tuple[str, str, str, str]:
     token = os.environ.get("TOKEN", "").strip()
     repo = os.environ.get("REPO", "hermes-lark-streaming").strip()
     # 优先用 GITEE_COMMIT（当前 commit SHA），其次 TARGET_BRANCH 环境变量，默认 github_sync
+    # v2.0.28: 默认分支保持 github_sync（用户定案：V2 在 refactor/v2.0.0 开发，
+    # 手动同步到 github_sync 后触发发版，与 V1 流程一致）
     target_commitish = (
         os.environ.get("GITEE_COMMIT", "").strip()
         or os.environ.get("TARGET_BRANCH", "").strip()

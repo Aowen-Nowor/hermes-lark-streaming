@@ -1,0 +1,70 @@
+name: Hermes Release Watch
+
+# hermes-agent 上游发新版 → 飞书提醒人工验证继承面（v2.0.27）。
+# 取代 V1 hermes-integration-test.yml：其运行的 tests/integration/ 兼容套件
+# 已随 V2 架构删除（V2 的继承面验证 = 服务器真飞书 E2E，CI 无法复现），
+# 且该工作流钉死 Python 3.11（hermes 官方唯一受支持运行时为 3.14）。
+# 所需 Secrets：FEISHU_WEBHOOK / FEISHU_SIGN_SECRET。
+
+on:
+  schedule:
+    - cron: '33 0 * * *'  # 08:33 AM Asia/Shanghai, 避开整点高负载
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (scripts/feishu_notify.py)
+        uses: actions/checkout@v4
+
+      - name: Restore last seen release
+        # .hermes-last-release 在 .gitignore 中，经 Actions Cache 持久化（V1 同款模式）
+        uses: actions/cache/restore@v4
+        with:
+          path: .hermes-last-release
+          key: hermes-last-release-${{ github.run_number }}
+          restore-keys: |
+            hermes-last-release-
+
+      - name: Check latest hermes release
+        id: check
+        run: |
+          LATEST=$(curl -sf https://api.github.com/repos/NousResearch/hermes-agent/releases/latest | jq -r '.tag_name // empty')
+          if [ -z "$LATEST" ]; then
+            echo "❌ 无法获取 NousResearch/hermes-agent 最新 release"
+            exit 1
+          fi
+          LAST=$(cat .hermes-last-release 2>/dev/null || echo "none")
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          echo "last=$LAST" >> $GITHUB_OUTPUT
+          if [ "$LATEST" != "$LAST" ]; then
+            echo "has_new=true" >> $GITHUB_OUTPUT
+            echo "🆕 新版本检测: $LATEST (上次: $LAST)"
+          else
+            echo "has_new=false" >> $GITHUB_OUTPUT
+            echo "无新版本 ($LATEST)"
+          fi
+
+      - name: Notify Feishu
+        if: steps.check.outputs.has_new == 'true'
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SIGN_SECRET: ${{ secrets.FEISHU_SIGN_SECRET }}
+          HERMES_LATEST: ${{ steps.check.outputs.latest }}
+          HERMES_LAST: ${{ steps.check.outputs.last }}
+        run: python3 scripts/feishu_notify.py hermes-release
+
+      - name: Save seen release
+        if: steps.check.outputs.has_new == 'true'
+        run: echo "${{ steps.check.outputs.latest }}" > .hermes-last-release
+
+      - name: Persist to cache
+        if: steps.check.outputs.has_new == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .hermes-last-release
+          key: hermes-last-release-${{ github.run_number }}

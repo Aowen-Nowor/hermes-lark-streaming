@@ -8,7 +8,11 @@ dynamic = ["version"]
 description = "Feishu/Lark CardKit v2.0 streaming cards for Hermes Agent — plugin edition"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.11"
+# v2.0.12：与 hermes 官方完全对齐（hermes-agent pyproject.toml:10-15）：
+#   requires-python = ">=3.11,<3.15"，注释原文 "we *only* support 3.14" ——
+#   3.14 是唯一受支持运行时（wheels 仅保证 3.14），保留 3.11+ 元数据范围是
+#   为了让旧 Python 上的既有安装能走完升级步骤（tests/compat 更新器契约）。
+requires-python = ">=3.11,<3.15"
 authors = [
     {name = "Aowen-Nowor"},
 ]
@@ -34,16 +38,23 @@ dev = [
     "ruff>=0.1.0",
 ]
 
-# The plugin code lives at the repo root (alongside plugin.yaml).
-# When loaded as a Hermes directory plugin, the plugin loader imports
-# __init__.py directly from this directory.
+# The plugin code lives at the repo root (alongside plugin.yaml):
+# root holds only __init__.py / __main__.py; runtime subpackages are direct
+# children (plugin/ = hermes integration layer, cardkit|composer|feishu|config
+# = card platform engine). When loaded as a Hermes directory plugin, the
+# plugin loader imports __init__.py directly from this directory.
 # For pip installs, the repo root is mapped as "hermes_lark_streaming".
 [tool.setuptools.package-dir]
 hermes_lark_streaming = "."
 
+# Single source of truth remains plugin.yaml: __init__.py parses it into
+# __version__, setuptools resolves the dynamic version from that attribute.
+[tool.setuptools.dynamic]
+version = {attr = "hermes_lark_streaming.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["controller*", "cardkit*", "patching*", "state*", "feishu*", "config*", "aowen*", "plugin*", "flush*"]
+include = ["cardkit*", "feishu*", "config*", "aowen*", "plugin*", "composer*"]
 
 [tool.setuptools.package-data]
 hermes_lark_streaming = ["plugin.yaml"]

@@ -1,23 +1,22 @@
-"""Tests for version reading logic in __init__.py and setup.py.
+"""Tests for version metadata contracts.
 
 Covers:
   - hermes_lark_streaming.__version__ matches the version in plugin.yaml
   - Fallback to "unknown" when plugin.yaml is missing
   - Fallback to "unknown" when plugin.yaml has no version: field
-  - setup.py raises FileNotFoundError when plugin.yaml is missing
-  - setup.py raises ValueError when plugin.yaml has no version: field
-  - setup.py successfully extracts version and calls setup()
+  - pyproject.toml dynamic-version wiring (v2.0.12: setup.py removed —
+    setuptools resolves the dynamic version from __init__.__version__,
+    whose single source of truth remains plugin.yaml)
+  - requires-python aligned with hermes official (">=3.11,<3.15"; hermes
+    pyproject comment: "we *only* support 3.14")
 """
 
 from __future__ import annotations
 
-import importlib
 import importlib.util
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 import hermes_lark_streaming
 
@@ -25,8 +24,9 @@ import hermes_lark_streaming
 # Helpers
 # ---------------------------------------------------------------------------
 
-_SETUP_PY = Path(__file__).resolve().parent.parent / "setup.py"
-_PLUGIN_YAML = Path(__file__).resolve().parent.parent / "plugin.yaml"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_PYPROJECT = _REPO_ROOT / "pyproject.toml"
+_PLUGIN_YAML = _REPO_ROOT / "plugin.yaml"
 
 
 def _read_plugin_yaml_version() -> str:
@@ -59,7 +59,7 @@ def _reload_hls():
     ``ModuleNotFoundError`` in Python 3.11+.  This function re-registers
     the module using the same approach as conftest.py.
     """
-    init_file = Path(__file__).resolve().parent.parent / "__init__.py"
+    init_file = _REPO_ROOT / "__init__.py"
     spec = importlib.util.spec_from_file_location(
         "hermes_lark_streaming",
         str(init_file),
@@ -129,87 +129,33 @@ class TestInitVersion:
 
 
 # ---------------------------------------------------------------------------
-# setup.py  –  version extraction & error handling
+# pyproject.toml  –  dynamic version wiring & python floor (v2.0.12)
 # ---------------------------------------------------------------------------
-# setup.py is difficult to test directly because it calls setup() at module
-# level.  We load it via importlib.util with setuptools.setup patched out,
-# and scope Path mocks to only affect plugin.yaml lookups.
+# setup.py was removed in v2.0.12 (repo-root hygiene: only __init__.py /
+# __main__.py may live at root). The dynamic version moved into
+# [tool.setuptools.dynamic] via attr resolution.
 
 
-class TestSetupVersion:
-    """Tests for setup.py version-reading logic."""
+class TestPyprojectVersionContract:
+    """pyproject.toml packaging metadata contracts."""
 
-    def _load_setup(self) -> MagicMock:
-        """Execute setup.py with ``setuptools.setup`` replaced by a mock.
+    def test_setup_py_removed(self) -> None:
+        """setup.py no longer exists at repo root (root hygiene contract)."""
+        assert not (_REPO_ROOT / "setup.py").exists()
 
-        Returns the mock so callers can assert on how setup() was called.
+    def test_dynamic_version_wired_to_plugin_yaml_source(self) -> None:
+        """[tool.setuptools.dynamic] resolves version from the package attr,
+        whose single source of truth is plugin.yaml."""
+        text = _PYPROJECT.read_text(encoding="utf-8")
+        assert "dynamic = [\"version\"]" in text
+        assert 'version = {attr = "hermes_lark_streaming.__version__"}' in text
+
+    def test_requires_python_matches_hermes_official(self) -> None:
+        """requires-python is frozen to hermes official ">=3.11,<3.15".
+
+        hermes-agent pyproject.toml declares the same range with the comment
+        "we *only* support 3.14" (3.14 is the only supported runtime; the
+        3.11 floor keeps the updater contract for old installs).
         """
-        mock_setup = MagicMock()
-        with patch("setuptools.setup", mock_setup):
-            spec = importlib.util.spec_from_file_location(
-                "_test_setup_version", _SETUP_PY
-            )
-            assert spec is not None and spec.loader is not None
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-        # Clean up in case the module was registered
-        sys.modules.pop("_test_setup_version", None)
-        return mock_setup
-
-    # -- error cases --------------------------------------------------------
-
-    def test_file_not_found_error_when_plugin_yaml_missing(self) -> None:
-        """FileNotFoundError is raised when plugin.yaml does not exist."""
-        original_exists = Path.exists
-
-        def mock_exists(self: Path) -> bool:
-            if _is_plugin_yaml_path(self):
-                return False
-            return original_exists(self)
-
-        with patch.object(Path, "exists", mock_exists):
-            with pytest.raises(FileNotFoundError, match="plugin.yaml not found"):
-                self._load_setup()
-
-    def test_value_error_when_no_version_field(self) -> None:
-        """ValueError is raised when plugin.yaml exists but has no version: field."""
-        original_exists = Path.exists
-        original_read_text = Path.read_text
-
-        def mock_exists(self: Path) -> bool:
-            if _is_plugin_yaml_path(self):
-                return True
-            return original_exists(self)
-
-        def mock_read_text(self: Path, *args: object, **kwargs: object) -> str:
-            if _is_plugin_yaml_path(self):
-                return "name: test\ndescription: no version here\n"
-            return original_read_text(self, *args, **kwargs)
-
-        with patch.object(Path, "exists", mock_exists), \
-             patch.object(Path, "read_text", mock_read_text):
-            with pytest.raises(ValueError, match="No 'version:' field found"):
-                self._load_setup()
-
-    # -- success case -------------------------------------------------------
-
-    def test_successful_version_extraction(self) -> None:
-        """setup() is called with the version extracted from plugin.yaml."""
-        original_exists = Path.exists
-        original_read_text = Path.read_text
-
-        def mock_exists(self: Path) -> bool:
-            if _is_plugin_yaml_path(self):
-                return True
-            return original_exists(self)
-
-        def mock_read_text(self: Path, *args: object, **kwargs: object) -> str:
-            if _is_plugin_yaml_path(self):
-                return 'name: test\nversion: "1.2.3"\ndescription: test\n'
-            return original_read_text(self, *args, **kwargs)
-
-        with patch.object(Path, "exists", mock_exists), \
-             patch.object(Path, "read_text", mock_read_text):
-            mock_setup = self._load_setup()
-
-        mock_setup.assert_called_once_with(version="1.2.3")
+        expected = 'requires-python = ">=3.11,<3.15"'
+        assert expected in _PYPROJECT.read_text(encoding="utf-8")
