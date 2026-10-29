@@ -57,7 +57,8 @@ jobs:
       - name: Add Gitee remote and fetch
         run: |
           git remote add gitee "https://${{ secrets.GITEE_USERNAME }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USERNAME }}/${{ github.event.repository.name }}.git"
-          git fetch gitee --prune --tags
+          # --force：两平台同名 tag 对象不同源（V1 遗留），Gitee 为唯一事实源，同名 tag 强制以 Gitee 为准
+          git fetch gitee --prune --tags --force
 
       - name: Record pre-sync SHA
         id: pre_sync
