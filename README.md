@@ -77,19 +77,28 @@ plugins: {stream_reasoning_deltas: true}   # 思考隐藏流 → 面板思考行
 
 ## 从 V1（1.x）升级
 
-共用同一插件目录 `~/.hermes/plugins/hermes-lark-streaming/`；agent 可执行步骤见 [`docs/SKILL.md`](docs/SKILL.md) 第 6 节。
+V1（standalone 钩子形态，会向 config.yaml **注入配置**）与 V2（platform 形态，零注入）实现形态不同，升级 = **先卸载干净 V1，再全新安装 V2**（不是原地换代码）。agent 可执行版本见 [`docs/SKILL.md`](docs/SKILL.md) 第 6 节。
 
-**① 前提**：hermes-agent **≥ v0.22**（V1 常见 v0.21，先升本体）；lark-oapi ≥ 1.6.4。
+**① 前提**：hermes-agent **≥ v0.22**（V1 常见 v0.21，先升本体）。
 
-**② 换代码**（停网关后）：
+**② 卸载 V1**（三步，顺序不能乱——cleanup 清除 V1 注入的配置，必须在插件代码还在时执行）：
 
 ```bash
-pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
-cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.29    # 或 hermes plugins update
+# 1. 清理 V1 注入到 config.yaml 的配置（插件代码还在时执行）
+#    自动检测 Hermes Python 路径：
+HERMES_PYTHON=$(python3 ~/.hermes/plugins/hermes-lark-streaming/__main__.py python)
+$HERMES_PYTHON ~/.hermes/plugins/hermes-lark-streaming/__main__.py cleanup
+
+# 2. 卸载插件
+hermes plugins uninstall hermes-lark-streaming
+
+# 3. 重启网关
+hermes gateway restart
 ```
 
-**③ config.yaml 三处改动**
+**③ 全新安装 V2**：按[快速开始](#快速开始)执行。
+
+**④ config.yaml 三处改动**
 
 | # | 位置 | V1 | V2 |
 |---|---|---|---|
@@ -97,7 +106,8 @@ git fetch --tags && git checkout v2.0.29    # 或 hermes plugins update
 | ② | `platforms` | 只开原生 `feishu` | `feishu: enabled: false` + `feishu-streaming: enabled: true`（凭证平移；二选一防双回复） |
 | ③ | 配置节 | `hermes_lark_streaming:` | 改名 `feishu_streaming:`（不改也自动兼容） |
 
-**④ 验证**：清 `__pycache__` → 重启 → 发一句话，卡片应引用提问并流式打字。**回滚**：`git checkout v1.8.4` + ②③改回 + 重启。
+**⑤ 验证**：重启 → 发一句话，卡片应引用提问并流式打字。
+**回滚**：恢复 config.yaml 备份 → 按原方式重装 V1 → 重启。
 
 ## 配置
 
