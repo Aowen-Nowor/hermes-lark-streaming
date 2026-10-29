@@ -11,12 +11,16 @@ name: Sync from Gitee
 #   - Release：测试通过后按 plugin.yaml 版本自动创建 GitHub Release（幂等）。
 #   - 新增：Gitee PR/Issue 增量摘要 → 飞书（水位经 actions/cache 持久化，无更新静默）。
 #
-# v2.0.29 修复：
-#   - permissions 增加 workflows:write：镜像含 .github/workflows/* 变更时，GITHUB_TOKEN 默认被 GitHub
-#     拒收（refusing to allow a GitHub App to create or update workflow ... without `workflows` permission），
-#     V1→V2 首次同步即因此失败。修复必须先进默认分支 github_sync 才生效。
+# v2.0.29 修复（GitHub 未同步事故）：
+#   - 根因：GITHUB_TOKEN 永远无法获得 workflow 文件写权限（GitHub 安全设计：permissions 块不支持
+#     workflows key，防 workflow 自改提权），V2 首次同步携带 .github/workflows/* 变更时
+#     push 被 remote rejected。中途误加 `workflows: write` 会导致整个 workflow 解析失败（空 run failure）。
+#   - 修复：checkout/push 改用 secrets.GH_MIRROR_PAT（classic PAT，需 repo + workflow scope）。
+#   - 连带修复：Release 幂等判定改查 GitHub Release 是否已存在（原逻辑查 tag，但 tag 先于判定
+#     由 Mirror 步骤从 Gitee 镜像，永远存在 → Release 永不创建）。
 #
-# 所需 Secrets：GITEE_USERNAME / GITEE_TOKEN（同步+API）、FEISHU_WEBHOOK / FEISHU_SIGN_SECRET（通知）。
+# 所需 Secrets：GITEE_USERNAME / GITEE_TOKEN（同步+API）、FEISHU_WEBHOOK / FEISHU_SIGN_SECRET（通知）、
+#               GH_MIRROR_PAT（GitHub 侧 checkout+push，classic PAT 含 repo + workflow scope）。
 
 on:
   schedule:
@@ -34,7 +38,6 @@ env:
 
 permissions:
   contents: write
-  workflows: write   # 镜像 .github/workflows/* 变更所必需（默认拒收，见头部 v2.0.29 修复说明）
 
 jobs:
   sync:
@@ -44,7 +47,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_MIRROR_PAT }}   # PAT 推送（含 workflow 文件变更）；GITHUB_TOKEN 永远无此权限
 
       - name: Configure Git
         run: |
@@ -54,7 +57,8 @@ jobs:
       - name: Add Gitee remote and fetch
         run: |
           git remote add gitee "https://${{ secrets.GITEE_USERNAME }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USERNAME }}/${{ github.event.repository.name }}.git"
-          git fetch gitee --prune --tags
+          # --force：两平台同名 tag 对象不同源（V1 遗留），Gitee 为唯一事实源，同名 tag 强制以 Gitee 为准
+          git fetch gitee --prune --tags --force
 
       - name: Record pre-sync SHA
         id: pre_sync
@@ -123,18 +127,20 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "📦 Detected version: $VERSION (tag: v$VERSION)"
 
-      - name: Check if tag already exists
+      - name: Check if GitHub Release already exists
         if: steps.detect.outputs.has_changes == 'true' && steps.run_tests.outputs.exit_code == '0'
         id: check_tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="v${{ steps.version.outputs.version }}"
-          # 用 ls-remote 查 GitHub 远程（fetch gitee 已把 Gitee tag 拉到本地，本地误判存在）
-          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
+          # 幂等锚 = Release 本身（tag 已由 Mirror 步骤先从 Gitee 镜像，查 tag 会永远误判已存在）
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "tag_exists=true" >> $GITHUB_OUTPUT
-            echo "📌 Tag $TAG already exists on GitHub, skipping Release creation"
+            echo "📌 Release $TAG already exists on GitHub, skipping"
           else
             echo "tag_exists=false" >> $GITHUB_OUTPUT
-            echo "🆕 Tag $TAG does not exist on GitHub, will create Release"
+            echo "🆕 Release $TAG does not exist on GitHub, will create"
           fi
 
       - name: Prepare release notes
