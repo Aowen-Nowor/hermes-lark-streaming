@@ -138,17 +138,17 @@ pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
 
 ## 6. 从 V1（1.x）升级到 V2（一次性迁移）
 
-V1（≤1.8.x，standalone 钩子形态，运行时拦截 GatewayRunner/FeishuAdapter）与 V2（≥2.0.0，platform 形态，零 monkey-patch）**共用同一个插件目录** `~/.hermes/plugins/hermes-lark-streaming/`。升级 = 换代码 + 三处配置 + 重启，全程约 5 分钟。
+V1（≤1.8.x，standalone 钩子形态，运行时拦截 GatewayRunner/FeishuAdapter，**安装时向 config.yaml 注入配置**）与 V2（≥2.0.0，platform 形态，零注入）实现形态不同，**不能原地换代码**。升级 = 先卸载干净 V1（6.2）→ 再按第 1 节全新安装 V2 → 三处配置（6.3）→ 验证，全程约 5 分钟。
 
-### 6.0 先分清安装方式（V1 两种安装路径处置不同）
+### 6.0 升级前置：备份 + 确认 V1 在位
 
 ```bash
-ls ~/.hermes/plugins/hermes-lark-streaming/patching/ 2>/dev/null && echo V1代码在位
+cp ~/.hermes/config.yaml ~/.hermes/config.yaml.bak-v1   # 以实际 hermes 配置路径为准；回滚靠它
+ls ~/.hermes/plugins/hermes-lark-streaming/__main__.py  # cleanup 依赖插件代码在位
 grep -E "^version" ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
 ```
-- **CLI 安装**（V1 README 的 `hermes plugins install <git url>`）：目录可能带 `.git`（可直接 checkout），也可能被 PM 复制（无 .git → 走方式 B 重新 clone 覆盖）
-- **手动放置**：直接 git 操作即可
-- `hermes plugins update hermes-lark-streaming` 自动拉取最新发布版；若执行后 plugin.yaml 仍是 1.8.x，说明 V2 尚未发布，改用 checkout tag（6.2）
+- 无论 V1 当初是 CLI 安装还是手动放置，升级路径相同：**卸载干净（6.2）→ 全新安装 V2**；原地换代码会残留 V1 注入的配置与旧子包，不做
+- 若插件目录已被删除/损坏导致 cleanup 无法执行：跳过 6.2 第 1 步，事后手动清 config.yaml 中 V1 注入残留（`hermes_lark_streaming:` 节 + `plugins.enabled` 里的 `hermes-lark-streaming` 条目）
 
 ### 6.1 前置核查（V1 特有差异）
 
@@ -158,21 +158,26 @@ grep -E "^version" ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
 | lark-oapi | ≥1.6.4（V1 1.8.0 起同 floor） | 同左（+ PyYAML≥6.0） | 已满足则零动作；更老 V1 则 `pip install -U 'lark-oapi>=1.6.4'` |
 | Python | ≥3.11 | 同左（官方运行时 3.14） | 零动作 |
 
-### 6.2 停网关 + 换代码
+### 6.2 卸载 V1（三步，顺序不能乱）
+
+cleanup 清除 V1 注入到 config.yaml 的配置，**必须在插件代码还在时执行**：
 
 ```bash
-pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
-cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.29    # 或 hermes plugins update
-```
+# 1. 清理 V1 注入的配置（插件代码还在时执行）
+HERMES_PYTHON=$(python3 ~/.hermes/plugins/hermes-lark-streaming/__main__.py python)
+$HERMES_PYTHON ~/.hermes/plugins/hermes-lark-streaming/__main__.py cleanup
 
-> V1 的 `controller/ patching/ state/ flush/` 子包在 V2 已删除，git checkout 会自动清掉工作区副本；**解压/复制部署的用户必须手动删除这些旧目录**（连同 V1 的 `docs/AGENT_GUIDE.md`），不要让两代代码同目录共存。
+# 2. 卸载插件
+hermes plugins uninstall hermes-lark-streaming
+
+# 3. 重启网关
+hermes gateway restart
+```
 
 ### 6.3 config.yaml 三处改动
 
-1. **插件注册名**（V2 manifest name 已变）——`plugins.enabled`：
-   `- hermes-lark-streaming` → `- feishu-streaming-platform`
-   （兼容事实：目录名即 path key，旧条目其实也能命中加载；规范做法是改名，消除歧义）
+1. **插件注册名**——`plugins.enabled`：
+   cleanup 已清掉 V1 条目 `hermes-lark-streaming`，新增 `- feishu-streaming-platform`；若仍在则删旧条目
 2. **平台切换**（V1 借道原生 `feishu` 平台+钩子；V2 是独立平台）——**必须显式切换，二选一防双回复**：
    ```yaml
    platforms:
@@ -184,13 +189,13 @@ git fetch --tags && git checkout v2.0.29    # 或 hermes plugins update
          app_id: cli_xxx
          app_secret: xxx
    ```
-3. **配置节名**：`hermes_lark_streaming` → `feishu_streaming`（**不改也兼容**——V2 reader 惰性回读旧节名；V1 的 9 个死键 `linear / panel_expanded / flush_interval_ms / answer_flush_interval_ms / feishu_base_url / show_reasoning / gateway_cards / max_tool_steps / max_reasoning_rounds` 留着零副作用，建议顺手删）
+3. **配置节名**：新增 `feishu_streaming:`（V1 注入节已被 cleanup 清除；若 config 里仍有 `hermes_lark_streaming:` 残留则删——V2 的 9 个死键 `linear / panel_expanded / flush_interval_ms / answer_flush_interval_ms / feishu_base_url / show_reasoning / gateway_cards / max_tool_steps / max_reasoning_rounds` 不再存在）
 
-### 6.4 依赖 + 清缓存 + 重启 + 验证
+### 6.4 安装 V2 + 依赖 + 验证
 
 ```bash
+# 按第 1 节全新安装插件本体（git clone；正式版 checkout tag，见第 5 节）
 <VENV_PYTHON> -m pip install "lark-oapi>=1.6.4" PyYAML    # 已满足则跳过
-find ~/.hermes/plugins/hermes-lark-streaming -name __pycache__ -type d -prune -exec rm -rf {} +
 # 第 2 节命令启动网关 → 第 3 节五项健康验证
 # 真飞书验收：--scenario full,reply（引用+裸块归属）
 ```
@@ -204,7 +209,7 @@ find ~/.hermes/plugins/hermes-lark-streaming -name __pycache__ -type d -prune -e
 | 配置注入 | 往 config.yaml 注入配置节 + plugins.enabled 条目 | 零注入（全部 opt-in） |
 | 引用回复 | 无（卡片直发） | 卡片 reply 引用触发消息（私聊/群聊；cron/后台无 om_ 锚点自动直发） |
 | hermes 版本面 | v0.21.x 可用 | 需 v0.22+（启动 fail-fast 探测会明确报失配点） |
-| 回滚 | — | `git checkout v1.8.4` + 平台段改回 feishu + plugins.enabled 改回旧名 → 重启即回 V1 |
+| 回滚 | — | 恢复 config.yaml 备份（6.0）→ 按原方式重装 V1 → 重启 |
 
 ### 6.6 迁移失败速查
 
@@ -222,7 +227,7 @@ find ~/.hermes/plugins/hermes-lark-streaming -name __pycache__ -type d -prune -e
 | 启动即退、无日志 | `~/.hermes/gateway.lock` 残留 | 删锁重启 |
 | SSH 断开后进程消失 | 未用 `setsid` 脱离会话 | 用第 2 节原样命令 |
 | 插件加载了但 API 全 404/attribute error | lark-oapi < 1.4.24（无 async cardkit） | 升级 lark-oapi |
-| **装完发现是 V1（kind: standalone / 有 patching/ 目录）** | 安装源不是 V2 正式版 | 按第 5 节 checkout v2.0.29 tag 后重启；V1 用户升级见第 6 节 |
+| **装完发现是 V1（kind: standalone / 有 patching/ 目录）** | 安装源不是 V2 正式版 | 卸载后按第 1 节重装 + 第 5 节 checkout v2.0.29 tag；V1 用户升级见第 6 节 |
 | 卡片建出来了但旧观感/字号不对 | `card_style` 配置残留（完全 opt-in） | 删掉该配置段并重启，或按 README 配置 |
 | 密码 SSH 登不上 | 服务器 sshd 加固为仅公钥 | 用密钥认证（paramiko `pkey=` / `ssh -i`） |
 | 改了代码行为不变 | `__pycache__` 旧字节码 | 清缓存重启（第 5 节命令） |

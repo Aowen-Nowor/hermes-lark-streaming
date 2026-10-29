@@ -11,6 +11,11 @@ name: Sync from Gitee
 #   - Release：测试通过后按 plugin.yaml 版本自动创建 GitHub Release（幂等）。
 #   - 新增：Gitee PR/Issue 增量摘要 → 飞书（水位经 actions/cache 持久化，无更新静默）。
 #
+# v2.0.29 修复：
+#   - permissions 增加 workflows:write：镜像含 .github/workflows/* 变更时，GITHUB_TOKEN 默认被 GitHub
+#     拒收（refusing to allow a GitHub App to create or update workflow ... without `workflows` permission），
+#     V1→V2 首次同步即因此失败。修复必须先进默认分支 github_sync 才生效。
+#
 # 所需 Secrets：GITEE_USERNAME / GITEE_TOKEN（同步+API）、FEISHU_WEBHOOK / FEISHU_SIGN_SECRET（通知）。
 
 on:
@@ -29,6 +34,7 @@ env:
 
 permissions:
   contents: write
+  workflows: write   # 镜像 .github/workflows/* 变更所必需（默认拒收，见头部 v2.0.29 修复说明）
 
 jobs:
   sync:
