@@ -26,6 +26,11 @@ name: Sync from Gitee
 #   - 测试门禁失效：默认 shell 是 bash -e（无 pipefail），`pytest | tee` 后 `$?` 取的是 tee 的
 #     退出码——pytest 全红 exit_code 仍为 0，红测试照样放行 GitHub Release。
 #     修复：该步骤显式 shell: bash（-eo pipefail），pytest 退出码穿透管道，失败即整步失败。
+#   - 测试/发布树错位：run 的工作树停留在 dispatch 时的旧 checkout（run #1546 实证：检出 b0c38d0，
+#     Mirror 已把 a51cc0a 推上 GitHub，但 pytest 与 plugin.yaml 仍读旧树——版本号命中既有 Release 被跳过，
+#     且变更事件被本轮消费后下轮 has_changes=false，新版本 Release 永远缺位＝v2.0.30/31 未发布的结构性根因）。
+#     修复：Detect changes 后重新检出 origin/refactor/v2.0.0（=刚镜像的 Gitee tip）再测试；
+#     Release 以 target_commitish=new_sha 钉住被测提交。
 #
 # 所需 Secrets：GITEE_USERNAME / GITEE_TOKEN（同步+API）、FEISHU_WEBHOOK / FEISHU_SIGN_SECRET（通知）、
 #               GH_MIRROR_PAT（GitHub 侧 checkout+push，classic PAT 含 repo + workflow scope）。
@@ -104,6 +109,7 @@ jobs:
         run: |
           OLD="${{ steps.pre_sync.outputs.sha }}"
           NEW=$(git rev-parse gitee/refactor/v2.0.0)
+          echo "new_sha=$NEW" >> $GITHUB_OUTPUT
           if [ "$OLD" != "$NEW" ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
             if [ "$OLD" = "none" ]; then
@@ -120,6 +126,16 @@ jobs:
             echo "" > changed_files.txt
             echo "无变更"
           fi
+
+      # v2.0.32 修复③：Mirror 后工作树仍是 dispatch 时的旧 checkout——pytest 与 plugin.yaml
+      # 版本读取必须发生在刚镜像的 Gitee tip 上（测试的代码=发布的代码）
+      - name: Checkout mirrored tip for test & release
+        if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
+        uses: actions/checkout@v4
+        with:
+          ref: refactor/v2.0.0        # Mirror 步骤刚推送到 origin 的 Gitee 事实源 tip
+          fetch-depth: 0
+          token: ${{ secrets.GH_MIRROR_PAT }}
 
       - name: Set up Python
         if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
@@ -181,6 +197,7 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ steps.detect.outputs.new_sha }}   # tag 钉在被测提交（默认 GITHUB_SHA=dispatch 旧 sha，错位）
           body_path: release_notes.md
           draft: false
           prerelease: false
