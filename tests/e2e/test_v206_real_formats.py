@@ -216,7 +216,11 @@ class TestRenderRealFormats:
         lines = [REAL_THINK, REAL_TERMINAL_BLOCK, REAL_BARE_BLOCK, REAL_VERB_ZH_SEARCH]
         els = _render_status_children(lines)
         texts = str(_div_texts(els))
-        assert "第 1 轮" in texts and "robot-add_outlined" in texts
+        # UX-2b：轮次标题双语——zh 在 i18n_content，en content 兑底
+        round_titles = [el for el in els
+                        if "第 1 轮" in str(el.get("text", {}).get("i18n_content", {}))]
+        assert round_titles and "Round 1" in str(round_titles[0]["text"]["content"])
+        assert "robot-add_outlined" in texts
         assert "**Terminal**" in texts and "**Search**" in texts
         # 无 emoji / 代码块围栏泄漏到面板
         for el in els:
@@ -224,8 +228,9 @@ class TestRenderRealFormats:
             assert "💻" not in content and "```" not in content and "📖" not in content
 
     def test_panel_title_counts_real_formats(self):
+        # UX-2a：双语对 (en, zh)——段序/计数口径不变
         title = _panel_title([REAL_THINK, REAL_TERMINAL_BLOCK, REAL_BARE_BLOCK, REAL_VERB_ZH_SEARCH])
-        assert title == "agent loop · 1 轮 · 3 个工具"
+        assert title == ("agent loop · 1 rounds · 3 tools", "agent loop · 1 轮 · 3 个工具")
 
 
 # ---------------------------------------------------------------------------
@@ -316,13 +321,19 @@ class TestEngineRealRound:
         card = client.cards[st.card_id]["card"]
         panel = card["body"]["elements"][0]
         texts = str(panel["elements"])
-        assert "**Terminal**" in texts and "**Search**" in texts and "第 1 轮" in texts
+        assert "**Terminal**" in texts and "**Search**" in texts
+        # UX-2b：轮次标题双语对——en content + i18n_content zh（面板首行是工具行，
+        # 轮次标题按 i18n_content 全局搜）
+        round_titles = [el for el in panel["elements"]
+                        if "第 1 轮" in str(el.get("text", {}).get("i18n_content", {}))]
+        assert round_titles and "Round 1" in str(round_titles[0]["text"]["content"])
         assert "💻" not in texts.replace("💻", "", 0) or True  # emoji 只允许存在于原始 status_lines，不允许进面板元素
         for el in panel["elements"]:
             content = str(el.get("text", {}).get("content", "") or el.get("content", ""))
             assert "💻" not in content and "```" not in content
 
-        # 标题：1 轮 + 2 个工具（terminal 块 + 动词行）
-        assert card["body"]["elements"][0]["header"]["title"]["content"].startswith(
-            "agent loop · 1 轮 · 2 个工具"
-        )
+        # 标题：1 轮 + 2 个工具（terminal 块 + 动词行）——UX-2a：content=en 兑底，
+        # zh 文案落 i18n_content.zh_cn
+        header = panel["header"]["title"]
+        assert header["content"].startswith("agent loop · 1 rounds · 2 tools")
+        assert header["i18n_content"]["zh_cn"].startswith("agent loop · 1 轮 · 2 个工具")

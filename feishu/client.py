@@ -109,6 +109,12 @@ CARDKIT_SEQUENCE_CONFLICT = 300317  # sequence 冲突
 # v2.0.32（审计 P0-1/P1-3）：流式会话超时——官方 ~10min 流式会话寿命到期后 stream_element 必返回此码（生产实证：11-07 12:01 建卡 → 12:11:08 必现 600s；15:08 建卡 → 15:18:35 同族）。
 # 官方恢复动作（开放平台 cardkit 文档，审计 R5 核对）= settings streaming_mode:true 同卡重开，sequence 跳号允许（s98 真飞书实证）。
 CARDKIT_STREAMING_TIMEOUT = 200850
+# OPT-1c（性能审计）：卡片体积超限（官方单卡 30KB 上限）。确定性拒收：重试 3×
+# 只会三连撞墙还拖慢降级红线 ~1s（与 11310/300305 元素超限同族语义）——上抛交
+# composer 降级承接；体积防线在 cards._enforce_card_byte_budget（上传前裁剪）。
+# 注意 230099 通用码包裹形态（ErrCode: 200860 子码）同样不可重试，
+# _is_transient_error 的子码排除表已同步加入。
+CARDKIT_CARD_SIZE = 200860
 CARDKIT_ELEMENT_NOT_FOUND = 300313  # 元素不存在（add_elements 后服务端尚未持久化时的竞态）
 CARDKIT_ELEMENT_NOT_FOUND_ALT = 300314  # delete_elements 不存在的元素
 MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
@@ -156,6 +162,11 @@ def is_streaming_timeout_error(e: "FeishuAPIError") -> bool:
     """判断是否为流式会话超时（200850，官方恢复动作 = settings 重开）."""
     return getattr(e, "code", None) == CARDKIT_STREAMING_TIMEOUT
 
+
+def is_card_size_error(e: FeishuAPIError) -> bool:
+    """OPT-1c：判断是否为卡片体积超限错误（200860；30KB 上限，确定性拒收）."""
+    return getattr(e, "code", None) == CARDKIT_CARD_SIZE
+
 def is_element_not_found_error(e: "FeishuAPIError") -> bool:
     """判断 FeishuAPIError 是否为"元素不存在"错误。"""
     if e.code == CARDKIT_ELEMENT_NOT_FOUND:
@@ -199,12 +210,17 @@ class FeishuClientConfig:
 
 def _is_transient_error(e: FeishuAPIError) -> bool:
     """判断 FeishuAPIError 是否为 CardKit 瞬态错误（可重试）."""
+    # OPT-1c：200860 体积超限显式不可重试——确定性拒收，重试无意义（3× 白撞
+    # 且重试延迟拖慢降级红线）。白名单本就未收录直报码；此处显式短路钉死语义，
+    # 并同步覆盖 230099 通用码的 ErrCode 子码包裹形态（旧实现会被误判为可重试）。
+    if e.code == CARDKIT_CARD_SIZE:
+        return False
     if e.code in CARDKIT_TRANSIENT_CODES:
         return True
-    # 230099 是通用码，需检查子错误码：11310(元素超限)不可重试
+    # 230099 是通用码，需检查子错误码：11310(元素超限)/200860(体积超限)不可重试
     if e.code == CARDKIT_CONTENT_FAILED:
         sub = e.extract_sub_code()
-        return sub is not None and sub not in (CARDKIT_ELEMENT_LIMIT,)
+        return sub is not None and sub not in (CARDKIT_ELEMENT_LIMIT, CARDKIT_CARD_SIZE)
     return False
 
 class FeishuClient:

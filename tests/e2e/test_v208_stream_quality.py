@@ -331,14 +331,17 @@ class TestToolDurations:
                  "💻 运行命令 uname -r"]
         times = [10.0, 11.0, 12.0]
         els = _render_status_children(lines, line_times=times)
-        assert "第 1 轮 · 2.0s" in els[0]["text"]["content"]
+        # UX-2b：双语对——en content + i18n_content zh 均带同值耗时段
+        assert "Round 1 · 2.0s" in els[0]["text"]["content"]
+        assert "第 1 轮 · 2.0s" in els[0]["text"]["i18n_content"]["zh_cn"]
 
     def test_round_elapsed_omitted_without_times(self):
         els = _render_status_children([f"{THINK_PREFIX} 思考"])
-        assert "·" not in els[0]["text"]["content"].split("**")[1].replace("第 1 轮", "", 1) or True
+        assert "·" not in els[0]["text"]["content"].split("**")[1].replace("Round 1", "", 1) or True
         # 不携带耗时信息（title 不含 elapsed 段）
         assert "s<" not in els[0]["text"]["content"]
-        assert "第 1 轮" in els[0]["text"]["content"]
+        assert "Round 1" in els[0]["text"]["content"]
+        assert "第 1 轮" in els[0]["text"]["i18n_content"]["zh_cn"]
 
     def test_reconcile_inherits_thinking_growth(self):
         old = [f"{THINK_PREFIX} 前缀文本"]

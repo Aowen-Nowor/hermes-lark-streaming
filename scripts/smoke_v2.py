@@ -35,7 +35,8 @@ def level1() -> None:
     manifest = yaml.safe_load((REPO_ROOT / "plugin.yaml").read_text(encoding="utf-8"))
     check("plugin.yaml kind=platform", manifest.get("kind") == "platform")
     check("plugin.yaml name", manifest.get("name") == "feishu-streaming-platform")
-    check("plugin.yaml version=2.0.0", manifest.get("version") == "2.0.0")
+    manifest_version = manifest.get("version")
+    check("plugin.yaml version 存在", bool(manifest_version), manifest_version)
     # 平台名推导（hermes loader 规则：strip trailing '-platform'）
     name = manifest["name"]
     platform_name = name.removesuffix("-platform")
@@ -71,17 +72,16 @@ def level1() -> None:
 
 
 def _load_pkg(sub: str):
-    """以独立包名加载 composer 子模块（规避相对导入链，Level 1 专用）."""
-    import importlib.util
+    """经包别名加载 composer 子模块。
 
-    name = f"_smoke_pkg_{sub}"
-    spec = importlib.util.spec_from_file_location(
-        name, REPO_ROOT / "composer" / f"{sub}.py",
-    )
-    m = importlib.util.module_from_spec(spec)
-    sys.modules[name] = m
-    spec.loader.exec_module(m)
-    return m
+    v2.0.33 修复：原独立文件加载（_smoke_pkg_*）规避相对导入的 hack 在 classify.py
+    改用 ``from ..cardkit.progline import`` 后必然 ImportError（相对导入无法在
+    无包上下文模块解析）——统一走 _install_package_alias() 的正规包导入。
+    """
+    _install_package_alias()
+    import importlib
+
+    return importlib.import_module(f"hermes_lark_streaming.composer.{sub}")
 
 
 def _install_package_alias() -> None:
@@ -125,8 +125,14 @@ def level3(hermes_root: str) -> None:
     sys.path.insert(0, str(REPO_ROOT.parent))
     _install_package_alias()
     import hermes_lark_streaming as pkg
+    import yaml
 
-    check("包导入 + 版本", pkg.__version__ == "2.0.0", pkg.__version__)
+    manifest_version = yaml.safe_load(
+        (REPO_ROOT / "plugin.yaml").read_text(encoding="utf-8")
+    ).get("version")
+
+    check("包导入 + 版本与 plugin.yaml 一致", pkg.__version__ == manifest_version,
+          f"pkg={pkg.__version__} manifest={manifest_version}")
     from hermes_lark_streaming.plugin import adapter as A
 
     # 惰性导入：register 前基类为占位，显式触发真实导入
@@ -148,7 +154,9 @@ def level3(hermes_root: str) -> None:
     check("register_platform 调用", kw.get("name") == "feishu-streaming"
           and kw.get("adapter_factory") is A.FeishuStreamingAdapter)
     check("依赖检查 fn 复用内置", kw.get("check_fn") is A._get_builtin().feishu_deps_present)
-    check("/aowen 官方 hook 注册", any(h[0] == "pre_gateway_dispatch" for h in calls.get("hooks", [])))
+    # v2.0.31 起零 hook 架构（reasoning_feed 删除，provides_hooks: []）——断言不再注册运行时 hook
+    check("零 hook 架构（v2.0.31+）", not calls.get("hooks"),
+          f"hooks={calls.get('hooks')}" )
     # 继承链（register 重建后验证）
     from gateway.platforms.base import BasePlatformAdapter  # type: ignore
 

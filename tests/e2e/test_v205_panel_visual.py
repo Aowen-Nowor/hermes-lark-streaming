@@ -98,31 +98,39 @@ class TestToolDisplay:
 
 
 class TestPanelTitle:
+    # UX-2a：_panel_title 产出双语对 ``(en, zh)``（i18n 表 rounds/tools_count
+    # 两键接线）；落卡时 en 兑底 content + i18n_content 双语（_apply_panel_title）。
+
     def test_empty(self):
-        assert _panel_title([]) == "agent loop"
+        assert _panel_title([]) == ("agent loop", "agent loop")
 
     def test_tools_only(self):
-        assert _panel_title(['🔧 a："x"']) == "agent loop · 1 个工具"
+        assert _panel_title(['🔧 a："x"']) == ("agent loop · 1 tools", "agent loop · 1 个工具")
 
     def test_round_and_tool(self):
         title = _panel_title(["💬 A", '🔧 a："x"'])
-        assert title == "agent loop · 1 轮 · 1 个工具"
+        assert title == ("agent loop · 1 rounds · 1 tools", "agent loop · 1 轮 · 1 个工具")
 
     def test_two_rounds(self):
         title = _panel_title(["💬 A", '🔧 a："x"', "💬 B"])
-        assert title == "agent loop · 2 轮 · 1 个工具"
+        assert title == ("agent loop · 2 rounds · 1 tools", "agent loop · 2 轮 · 1 个工具")
 
     def test_elapsed_segment(self):
-        assert _panel_title(['🔧 a："x"'], elapsed_ms=4100) == "agent loop · 1 个工具 · 4.1s"
-        assert _panel_title(["💬 A", '🔧 a："x"'], elapsed_ms=65_000) == "agent loop · 1 轮 · 1 个工具 · 1m 5s"
+        assert _panel_title(['🔧 a："x"'], elapsed_ms=4100) == (
+            "agent loop · 1 tools · 4.1s", "agent loop · 1 个工具 · 4.1s")
+        assert _panel_title(["💬 A", '🔧 a："x"'], elapsed_ms=65_000) == (
+            "agent loop · 1 rounds · 1 tools · 1m 5s",
+            "agent loop · 1 轮 · 1 个工具 · 1m 5s")
 
     def test_tiny_elapsed_omitted(self):
         # <0.1s 不显示（避免 "0.0s" 噪音）
-        assert _panel_title(['🔧 a："x"'], elapsed_ms=50) == "agent loop · 1 个工具"
+        assert _panel_title(['🔧 a："x"'], elapsed_ms=50) == (
+            "agent loop · 1 tools", "agent loop · 1 个工具")
 
     def test_pending_counts_once_after_merge(self):
         # 合并后 pending 已被取代 → 只计一次；未合并才可能双计
-        assert _panel_title(["🖥️ terminal..."]) == "agent loop · 1 个工具"
+        assert _panel_title(["🖥️ terminal..."]) == (
+            "agent loop · 1 tools", "agent loop · 1 个工具")
 
 
 # ---------------------------------------------------------------------------
@@ -138,13 +146,34 @@ def _texts(children: list[dict]) -> list[str]:
     return out
 
 
+def _texts_bilingual(children: list[dict]) -> list[str]:
+    """UX-2b：轮次标题等 i18n 元素的 content + i18n_content 双语全文拼接.
+
+    轮次标题 content=en 兑底（"Round N"）、i18n_content.zh_cn=中文（第 N 轮）
+    ——断言任一语种时用本 helper（纯 content 断言只看得到 en）。
+    """
+    out = []
+    for el in children:
+        text = el.get("text")
+        if not isinstance(text, dict):
+            out.append(str(el.get("content", "")))
+            continue
+        blob = str(text.get("content", ""))
+        i18n = text.get("i18n_content") or {}
+        blob += " " + " ".join(str(v) for v in i18n.values())
+        out.append(blob)
+    return out
+
+
 class TestRenderStatusChildren:
     def test_thinking_becomes_round(self):
         kids = _render_status_children(["💬 正在检查内核"])
         assert len(kids) == 2
         title_el, detail_el = kids
         assert title_el["icon"]["token"] == "robot-add_outlined"
-        assert "第 1 轮" in _texts([title_el])[0]
+        # UX-2b：content=en 兑底 + i18n_content zh（双语对，不再恒 zh）
+        assert "Round 1" in _texts([title_el])[0]
+        assert "第 1 轮" in title_el["text"]["i18n_content"]["zh_cn"]
         assert "green" in _texts([title_el])[0]  # 定稿轮绿色（V1 finalized 语义）
         assert _texts([detail_el])[0] == "<font color='grey'>正在检查内核</font>"
         assert detail_el["text"]["tag"] == "lark_md"  # v2.0.12：思考正文 markdown 渲染
@@ -157,9 +186,12 @@ class TestRenderStatusChildren:
 
     def test_two_rounds_split_by_tool(self):
         kids = _render_status_children(["💬 A", '🔧 a："x"', "💬 B"])
-        rounds = [t for t in _texts(kids) if "第" in t and "轮" in t]
-        assert len(rounds) == 2
-        assert "第 1 轮" in rounds[0] and "第 2 轮" in rounds[1]
+        # UX-2b：双语全文（content + i18n_content）内匹配轮次标题
+        rounds = [t for t in _texts_bilingual(kids) if "第 1 轮" in t or "Round 1" in t]
+        assert len(rounds) == 1
+        assert "第 1 轮" in rounds[0] and "Round 1" in rounds[0]
+        rounds2 = [t for t in _texts_bilingual(kids) if "第 2 轮" in t or "Round 2" in t]
+        assert len(rounds2) == 1
 
     def test_tool_row_green_with_humanized_title_and_preview(self):
         kids = _render_status_children(["🖥️ terminal：\"uname -r\""])
@@ -265,10 +297,16 @@ class TestFirstCardCarriesMergedPanel:
             card = runner.get_card(session)
             panel = card.elements.get(UNIFIED_PANEL_ELEMENT_ID, {})
             header_title = (panel.get("header", {}).get("title", {}) or {}).get("content", "")
+            # UX-2a：content=en 兑底；zh 文案落 i18n_content.zh_cn
+            header_i18n = (panel.get("header", {}).get("title", {}) or {}).get(
+                "i18n_content", {})
+            zh_title = header_i18n.get("zh_cn", "")
             # V1 三段式：轮次 + 工具数（+ 实测耗时，mock 环境建卡极快可能 <0.1s 省略）
-            assert header_title == "agent loop · 1 轮 · 2 个工具" or header_title.startswith(
+            assert zh_title == "agent loop · 1 轮 · 2 个工具" or zh_title.startswith(
                 "agent loop · 1 轮 · 2 个工具 · "
-            ), header_title
+            ), zh_title
+            assert header_title == zh_title.replace("1 轮", "1 rounds").replace(
+                "2 个工具", "2 tools"), header_title
 
             def _flat(el: dict) -> str:
                 text = el.get("text")
@@ -276,7 +314,18 @@ class TestFirstCardCarriesMergedPanel:
                 return f"{el.get('content', '')} {nested}"
 
             contents = [_flat(el) for el in panel.get("elements", [])]
-            assert any("第 1 轮" in c for c in contents), contents
+            # UX-2b：轮次标题双语——zh 文案在 i18n_content（_flat 只取 content），
+            # 补挂 i18n 后再断言（见 _texts_bilingual 同款口径）
+            bilingual = []
+            for el in panel.get("elements", []):
+                text = el.get("text")
+                blob = el.get("content", "")
+                if isinstance(text, dict):
+                    blob += " " + str(text.get("content", ""))
+                    i18n = text.get("i18n_content") or {}
+                    blob += " " + " ".join(str(v) for v in i18n.values())
+                bilingual.append(blob)
+            assert any("第 1 轮" in c for c in bilingual), bilingual
             assert any("**Terminal**" in c for c in contents), contents
             assert any("**Browser**" in c for c in contents), contents
             assert any("pytest tests/ -q" in c for c in contents), contents

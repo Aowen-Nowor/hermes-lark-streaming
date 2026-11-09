@@ -42,6 +42,13 @@ _T: dict[str, tuple[str, str]] = {
     "rounds": ("{} rounds", "{} 轮"),
     "tools_count": ("{} tools", "{} 个工具"),
     "round_n": ("Round {}", "第 {} 轮"),
+    # UX-1a（审计，2026-11-09）：元素/字节裁剪提示——旧措辞「还有 N 项已折叠」
+    # 不实：裁剪是把面板子项从卡片实体删除（cardkit_update 全量替换），展开
+    # 面板即证项已不在（非折叠收起）。措辞改诚实「已省略」，并补 en 语种
+    # （旧提示纯 zh——卡片 locales 恒 ["zh_cn","en_us"]，en 用户看中文提示）。
+    "trim_hint": ("⚡ {} earlier steps omitted", "⚡ 前 {} 项已省略"),
+    # UX-3b（审计）：cron 卡分块上限截断标记（build_cron_card 超 10 块截断）。
+    "cron_truncated": ("…(truncated)", "…（内容过长，已截断）"),
     # v2.0.26：clarify 暂停行（engine.suspend_for_clarify → 面板状态行）。
     # 行语言取 en（与面板既有 hermes 进度行「🔍 Searching...」等一致——
     # status_lines 是单语文本通道，卡片级 i18n 仅标题/页脚元素支持）。

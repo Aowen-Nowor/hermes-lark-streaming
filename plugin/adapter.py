@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import time
@@ -486,12 +487,35 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         else:
             card = build_gateway_card(content)
         thread_id = str(meta.get("thread_id") or "").strip()
+        reply_anchor = str(reply_to or "").strip()
+        # UX-3a（审计，2026-11-09）：reply 失败（消息被删/非法锚点等异常）不再
+        # 上抛弃卡。镜像 composer.engine._create_card 流式路径的生产实证模式
+        # （engine.py _create_card：anchor om_ → reply_card_by_id 失败 → 记
+        # warning → 直发群 send_card_by_id_to_chat，内容永不丢红线）——oneshot
+        # 两个 reply_card 调用位（thread_id 话题锚 / reply_to 消息锚）同款：
+        # 异常仅记日志、message_id 置空，统一落下方直发位。直发再失败才上抛
+        # （send() 捕获回落原生路径，降级红线不变）。
+        message_id: str | None = None
         if thread_id.startswith("om_"):
             # 话题/线程续投：官方 thread_id 在飞书即 root 消息 id → 线程内回复卡
-            message_id = await client.reply_card(thread_id, card)
-        elif str(reply_to or "").strip().startswith("om_"):
-            message_id = await client.reply_card(str(reply_to).strip(), card)
-        else:
+            try:
+                message_id = await client.reply_card(thread_id, card)
+            except Exception:
+                _logger.warning(
+                    "feishu-streaming: oneshot reply card failed (thread anchor=%s) "
+                    "— fallback to direct send",
+                    thread_id[:20], exc_info=True,
+                )
+        elif reply_anchor.startswith("om_"):
+            try:
+                message_id = await client.reply_card(reply_anchor, card)
+            except Exception:
+                _logger.warning(
+                    "feishu-streaming: oneshot reply card failed (anchor=%s) "
+                    "— fallback to direct send",
+                    reply_anchor[:20], exc_info=True,
+                )
+        if not message_id:
             message_id = await client.send_card_to_chat(chat_id, card)
         _logger.info(
             "feishu-streaming: oneshot card delivered (%s) chat=%s job=%s msg=%s",
@@ -612,11 +636,54 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
 
     async def delete_message(self, chat_id: str, message_id: str) -> bool:
         try:
-            if self._composer.state_by_message(message_id) is not None:
+            # v2.0.33（审计 FIX-4b）：身份校验后才 forget——state_by_message 在
+            # 状态对象复用（同 chat 连续 turn）+ 旧反查键滞留（FIX-4a 前的历
+            # 史数据/任意路径漏驱逐）时可能把「被删的旧卡消息」解析到「当前
+            # 活跃卡状态」；无脑 forget(chat_id) 会把进行中的回合状态连根拔掉
+            # （正文断流 + 面板蒸发）。只有解析到的状态正是被删的那张卡
+            # （card_message_id == message_id）才回收；其余情况一律不动
+            # composer 注册表（远端删除本身照常执行）。
+            st = self._composer.state_by_message(message_id)
+            if st is not None and st.card_message_id == message_id:
                 self._composer.forget(chat_id)
         except Exception:
             _logger.debug("feishu-streaming: delete state cleanup failed", exc_info=True)
         return await super().delete_message(chat_id, message_id)
+
+    # ── 网关停机钩子（v2.0.33 FIX-1：在飞卡停机收口）────────────────────
+    async def disconnect(self) -> None:
+        """基类断连后对本端未落定活跃卡 best-effort 收口（跑马灯永挂根治）.
+
+        取证（agent.log/gateway.log 2026-11-07 13:50:38-39）：gateway.run 停机
+        序列「Sent shutdown notification」与 composer 建卡同秒（停机通知本身
+        建了新卡），随后 adapter 断连、进程退出、零 finalize → 远端卡
+        streaming_mode 永挂（用户需手动删卡）。内置基类的 disconnect
+        （'[Feishu] Disconnected' 日志，gateway 停机序列逐 adapter await——
+        「✓ feishu-streaming disconnected」）只停自家 WS 长连接，感知不到本
+        插件的 composer 状态表；历史上全链路无任何 teardown（rg
+        'shutdown|disconnect|unregister' 零命中）。
+
+        顺序：先 super().disconnect()——对齐基类停机语义（先停 WS 入站，
+        收口期间不再有新帧进来改变状态表），后收口。卡片 API 走插件自有
+        FeishuClient（HTTP 独立通道），不依赖基类 WS 连接，断连后仍可落盘
+        定稿。兼容防御：基类 disconnect 跨版本可能为 sync/async（awaitable
+        才 await，与 clarify.py 同款防御）；表面缺失时告警一次、收口照常
+        （收口是本插件自有职责，不因基类漂移放弃）。
+        """
+        base_disconnect = getattr(super(), "disconnect", None)
+        if base_disconnect is None:
+            _logger.warning(
+                "feishu-streaming: built-in FeishuAdapter has no disconnect() — "
+                "shutdown seal proceeds without base teardown"
+            )
+        else:
+            result = base_disconnect()
+            if inspect.isawaitable(result):
+                await result
+        try:
+            await self._composer.seal_all_on_shutdown()
+        except Exception:
+            _logger.warning("feishu-streaming: shutdown seal failed", exc_info=True)
 
     # ── 澄清卡片：逻辑归位内置（发卡/状态/回调/retire 全继承）─────────
     # 本插件只做流式卡挂起——composer 是插件自己的状态，内置不知道；

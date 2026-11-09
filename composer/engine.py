@@ -25,6 +25,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+# OPT-1b/2/5：卡片字节预算守卫、进度行解析 memo、流式 markdown 卫生化。
+# cards 不反向依赖 composer，顶层导入无环（与 progline/seq 同层叶子）。
+from ..cardkit.cards import (
+    _enforce_card_byte_budget,
+    _parse_line_cached,
+    md_hygiene_cached,
+    md_hygiene_line_cached,
+)
 from ..cardkit.progline import split_progress_segments, strip_dedup_suffix
 from ..cardkit.seq import call_with_seq_recovery
 from .classify import (
@@ -58,6 +66,15 @@ _WATCHDOG_IDLE_SEC = 300.0
 # 主流程预防，非兜底；撞上 200850 仍由 call_with_seq_recovery 的重开自愈
 # 兑底闭环（双层，同一主链）。长回合 >10min 不再中断打字机。
 _STREAM_RENEW_AGE_SEC = 540.0
+
+# OPT-1a（性能五项审计 P1）：面板更新尾沿合并窗口（秒）。
+# 生产取证：499s 回合 35 次工具完成 ≈70 次全量快照上传 ≈1.3MB 上行，其中
+# 思考增长/interim tick/耗时回填均为「行数不变的原地改写」——0.2s 窗口内
+# 合并为一次 cardkit_update（每 chat 单挂起 timer）。新增行（工具步骤出现）
+# 不合并、保持同步上传：结构性进展即时可见（v2.0.24 面板即时补插语义同族），
+# 也与存量 e2e 契约「每新增行一次 update」（test_e2e_full 两次状态补丁两次
+# update）兼容——这是有意的保守切分，见 _queue_panel_flush。
+_PANEL_FLUSH_DELAY_SEC = 0.2
 
 try:  # hermes 运行时存在；导入失败时 composer 退化为纯直通（tests / 无 hermes 环境）
     from gateway.platforms.base import SendResult  # type: ignore
@@ -119,6 +136,25 @@ class CardTurnState:
     paused: bool = False              # clarify 等待中（回调后 resume 续写同一张卡）
     resume_base: str = ""             # 暂停时正文快照（reopen 后新段快照的拼接基线）
     turn_id: str = ""                 # hermes 回合标识（transport 每帧携带；防跨回合串卡）
+    # ── OPT-1a（性能审计）：面板待发旗标——absorb/interim/耗时回填等路径置位，
+    # 0.2s 尾沿合并单发（_panel_flush_timers 每 chat 至多一个挂起 timer）；
+    # _flush_panel_now 冲刷后清除。终态（finalized/degraded）下由 seal/finalize
+    # 路径接管面板，冲刷自动跳过——最后状态先落卡再封卡的红线不变。
+    panel_dirty: bool = False
+    # ── OPT-4（性能审计）：最近一次成功 cardkit_stream_element 的 answer 全文
+    # （create 种子与 _stream_answer 成功后记录）。finalize 比对：字节一致 →
+    # 跳过 answer 终值 patch（流式路径已把同内容落卡，省一次全量上传）；
+    # reasoning 前插会改写 answer_text → 与基线不等 → patch 照发（自然失效）。
+    # 从未流过（None/空）→ 恒不跳过。
+    last_streamed_answer: str = ""
+    # ── OPT-5（性能审计）：流式 markdown 卫生化缓存。answer 用单槽精确串缓存
+    # （键=原文串 == 比对——native 帧每帧把 answer_text 重绑为内容相等的新
+    # str 对象，is 键在 interim tick 上逐帧 miss；见 cards.md_hygiene_cached）；
+    # status_lines 用逐行精确串缓存（行合并后不可变，命中率近恒 1）。变换只
+    # 作用于发往卡片的视图；st.answer_text/status_lines 恒存原文——合并去重、
+    # 耗时表键（strip_dedup_suffix(行)）、答案复读过滤均不受影响。
+    answer_md_cache: dict[str, Any] = field(default_factory=dict)
+    md_lines_cache: dict[str, str] = field(default_factory=dict)
 
 
 class FrameComposer:
@@ -161,12 +197,22 @@ class FrameComposer:
         # v2.0.26：per-chat 暂停窗口落定定时器（loop.call_later，与看门狗同款
         # 架构——句柄不在 all_tasks() 中，到期才建 task）。
         self._pause_timers: dict[str, asyncio.TimerHandle] = {}
+        # v2.0.33（审计 FIX-6）：GC 孤儿卡收口的 fire-and-forget 任务强引用集。
+        # ensure_future 裸任务可能被事件循环中途垃圾回收（asyncio 文档明确
+        # 要求保留引用），done_callback 自动清席。
+        self._gc_seal_tasks: set[asyncio.Task[None]] = set()
         self._states: dict[str, CardTurnState] = {}
         self._by_message: dict[str, str] = {}  # card_message_id -> chat_id
         # v2.0.11 P0：per-chat 帧处理串行化锁（见模块头并发模型说明）。
         # 锁随 chat 惰性创建；只在 clear() 全量清空，forget() 不清——在途持有者
         # 与后来者必须共用同一把锁才有互斥意义（chat 级锁对象内存可忽略）。
+        # OPT-3 修订：forget()/_gc 弹出状态后，若锁未持有且无等待者则一并驱逐
+        # （见 _evict_chat_lock_if_idle）——持有中绝不驱逐，互斥语义不变。
         self._chat_locks: dict[str, asyncio.Lock] = {}
+        # OPT-1a：per-chat 面板尾沿合并定时器（单挂起，见 _queue_panel_flush）
+        # 与冲刷任务强引用集（FIX-6 同款——裸任务防事件循环中途 GC）。
+        self._panel_flush_timers: dict[str, asyncio.TimerHandle] = {}
+        self._panel_flush_tasks: set[asyncio.Task[None]] = set()
         # v2.0.7：reasoning 流回灌的线程安全入口需要事件循环引用 ——
         # 构造期若已在 loop 内则直接捕获，否则首个 async 帧入口补捕获。
         try:
@@ -204,10 +250,22 @@ class FrameComposer:
         - 未定稿（活跃回合/占位）：仅 ``last_activity`` 空闲超 TTL 才回收
           —— 活跃回合每帧都刷新 last_activity，长回合永不误杀；空闲超 TTL
           的状态只能是已中断的孤儿回合（回收同 TTL 语义，非新增兕底）。
+
+        v2.0.33（审计 FIX-6）：未定稿孤儿回收前先优雅收口远端卡——空闲超
+        TTL 的未定稿状态其远端卡仍处流式态（spinner 永挂家族），而看门狗
+        阈值（默认 300s，可配）与 card_duration_sec 相互独立，TTL 先到时
+        GC 是唯一收口时机（card_ttl_sec < watchdog_idle_sec 配置下看门狗
+        永远轮不到）。收口顺序：先置 degraded+finalized（与 _watchdog_seal
+        同款：后续帧不再消费本状态）再异步 seal（fire-and-forget，复用
+        finalize_card 四步）；seal 失败仅留日志、不回滚回收——进程内卫生
+        不被远端 API 阻塞，官方 ~10min 流式会话自愈为最终防线。已定稿
+        60s 冷却回收不变（远端卡已在定稿时关流）；paused/pause_pending
+        继续豁免（clarify 等待可达 hermes 硬超时 3600s）。
         """
         ttl = self._ttl_sec()
         now = time.monotonic()
         stale: list[str] = []
+        orphan_seals: list[CardTurnState] = []
         for cid, st in self._states.items():
             idle = now - st.last_activity
             if st.finalized:
@@ -221,17 +279,159 @@ class FrameComposer:
                 continue
             elif idle > ttl:
                 stale.append(cid)
+                if st.card_id:
+                    # 未定稿孤儿（有远端卡）：置终态旗标停止消费 + 收口排队。
+                    st.degraded = True
+                    st.finalized = True
+                    orphan_seals.append(st)
         for cid in stale:
             st = self._states.pop(cid, None)
             if st and st.card_message_id:
                 self._by_message.pop(st.card_message_id, None)
             self._cancel_pause(cid)
+            # OPT-1a（面板合并护栏）：合并 timer 随状态驱逐一并取消——已定稿
+            # 60s 冷却回收与未定稿孤儿 seal 排队（_schedule_orphan_seal 内含
+            # force 冲刷）两条路径都不该再留挂起 timer，否则到期只会空转一次
+            # 冲刷任务并对已弹出的 chat 重建锁对象（dangling timer 红线）。
+            self._cancel_panel_flush(cid)
+            # OPT-3：状态已弹出且锁空闲无等待者 → 一并驱逐锁对象。
+            # 帧路径的 _gc 在 chat 锁内运行（locked() 恒真）→ 天然不驱逐
+            # （在途持有者与后来者必须共用同一把锁，见 _chat_locks 注释）；
+            # forget()/无锁直调路径才真正回收。
+            self._evict_chat_lock_if_idle(cid)
+        # 弹出后再调度 seal（任务体操作已脱离注册表的状态对象，与注册表零竞态）。
+        for st in orphan_seals:
+            self._schedule_orphan_seal(st)
+
+    def _schedule_orphan_seal(self, st: CardTurnState) -> None:
+        """GC 孤儿卡收口的 fire-and-forget 调度（seal 失败不回滚回收决定）.
+
+        _gc 全部调用点均在帧处理入口的 chat 锁内（async 上下文），正常路径
+        必有 running loop；无 running loop（同步直调，仅测试环境）时跳过
+        seal——本端状态已回收，远端卡由官方 ~10min 流式会话自愈兑底。
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _logger.debug(
+                "composer: gc orphan seal skipped (no running loop) card=%s",
+                str(st.card_id)[:12],
+            )
+            return
+        task = loop.create_task(self._seal_live_card(st))
+        self._gc_seal_tasks.add(task)  # 强引用防任务被中途 GC
+        task.add_done_callback(self._gc_seal_tasks.discard)
 
     def _chat_lock(self, chat_id: str) -> asyncio.Lock:
         lock = self._chat_locks.get(chat_id)
         if lock is None:
             lock = self._chat_locks[chat_id] = asyncio.Lock()
         return lock
+
+    def _evict_chat_lock_if_idle(self, chat_id: str) -> None:
+        """OPT-3：驱逐空闲 per-chat 锁（前置条件：该 chat 状态已从 _states 弹出）.
+
+        判定保守钉死方向：locked() 为真绝不驱逐（在途持有者与后来者必须共用
+        同一把锁才有互斥意义）；``_waiters`` 属性不可得（跨版本实现细节，
+        getattr 落空）时视为占用不驱逐。漏驱逐的代价只是一把小锁对象随
+        chat 数缓增，误驱逐的代价是互斥失效建重复卡——不可逆方向不冒险。
+        """
+        lock = self._chat_locks.get(chat_id)
+        if lock is None or lock.locked():
+            return
+        if not hasattr(lock, "_waiters"):
+            return  # 属性不可得（跨版本实现变化）→ 视为占用，不冒险驱逐
+        # 3.11+ 实现：_waiters 为 None（无等待者）或 futures 容器（有等待者）。
+        waiters = getattr(lock, "_waiters", None)
+        if waiters:
+            return
+        self._chat_locks.pop(chat_id, None)
+
+    # ── OPT-1a：面板更新尾沿合并（0.2s 窗口单飞）─────────────────────────
+    async def _queue_panel_flush(self, st: CardTurnState, *, urgent: bool = False) -> None:
+        """置脏并调度面板冲刷：urgent（新增行）/首个面板插入即时发，其余尾沿合并.
+
+        生产画像（审计取证：499s 回合 35 次工具完成 ≈70 次全量快照 ≈1.3MB 上行）
+        中，思考增长、interim tick、pending→preview 取代、耗时回填均为「行数不变
+        的原地改写」→ 0.2s 窗口内合并为一次 cardkit_update；新增行（工具步骤/
+        通报/暂停行出现）urgent 同步上传——结构性进展即时可见，且存量 e2e 以
+        「每新增行一次 update」为契约（test_e2e_full 两次状态补丁两次 update）。
+        全部调用点都在 chat 锁内，即时分支与旧 _patch_status 直发等价。
+        """
+        st.panel_dirty = True
+        if urgent or not st.panel_on_card:
+            # v2.0.24 懒渲染语义：首个状态行补插面板必须即时（test_v224 契约）。
+            await self._flush_panel_now(st.chat_id, st)
+            return
+        if st.chat_id in self._panel_flush_timers:
+            return  # 已有挂起冲刷：它取最新状态单发，无需重复调度
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return  # 无 loop（同步直调环境）：保持置脏，交后续帧/finalize 冲刷
+        try:
+            self._panel_flush_timers[st.chat_id] = loop.call_later(
+                _PANEL_FLUSH_DELAY_SEC, self._panel_flush_due, st.chat_id)
+        except RuntimeError:  # loop 已停转（跨线程窗口）
+            self._panel_flush_timers.pop(st.chat_id, None)
+
+    def _cancel_panel_flush(self, chat_id: str) -> None:
+        """取消挂起的面板合并 timer（forget/clear/即时冲刷共用）."""
+        timer = self._panel_flush_timers.pop(chat_id, None)
+        if timer is not None:
+            with contextlib.suppress(Exception):
+                timer.cancel()
+
+    def _panel_flush_due(self, chat_id: str) -> None:
+        """合并窗口到期回调（loop 线程）：持 chat 锁冲刷一次最新面板状态."""
+        self._panel_flush_timers.pop(chat_id, None)
+        try:
+            task = asyncio.ensure_future(self._coalesced_flush(chat_id))
+        except RuntimeError:  # 无可用 loop（极端停机窗口）
+            return
+        self._panel_flush_tasks.add(task)  # 强引用防任务被中途 GC（FIX-6 同款）
+        task.add_done_callback(self._panel_flush_tasks.discard)
+
+    async def _coalesced_flush(self, chat_id: str) -> None:
+        """timer 冲刷体：与帧路径同一把 chat 锁；失败与帧路径同语义（degrade+seal）.
+
+        旧同步路径里 patch 失败即帧入口降级（handle_send/handle_edit except 块
+        → _degrade + _seal_degraded_card）；合并冲刷的失败一一对应映射，绝不静默
+        吞掉导致面板永挂/降级红线失明。锁内复查 dirty/终态旗标：挂起窗口内
+        回合已封（seal/finalize 先到）则跳过——最后状态先落卡再封卡的红线由
+        seal 侧的强制冲刷承接，timer 不与 seal 双发。
+        """
+        try:
+            # 状态已被 forget/_gc 驱逐 → 无主冲刷直接放弃（查 _states 而非先取
+            # 锁：_chat_lock 会惰性重建锁对象，对已驱逐 chat 是纯泄漏）。
+            if chat_id not in self._states:
+                return
+            async with self._chat_lock(chat_id):
+                await self._flush_panel_now(chat_id)
+        except Exception as exc:
+            self._degrade(chat_id, "panel_flush", exc)
+            _logger.debug("composer: panel flush failed chat=%s", chat_id[:12], exc_info=True)
+            with contextlib.suppress(Exception):
+                await self._seal_degraded_card(chat_id)
+
+    async def _flush_panel_now(
+        self, chat_id: str, st: CardTurnState | None = None, *, force: bool = False,
+    ) -> None:
+        """立即冲刷待发面板状态（取消挂起 timer；调用方须持 chat 锁或状态已脱管）.
+
+        force=True 供收口路径（_seal_live_card）使用：状态已被置终旗标
+        （degraded/finalized，降级/GC 孤儿/停机收口均先置旗标再 seal）时仍
+        冲刷——seal/finalize 发 API 前最后面板状态必须先落卡（流式正确性红线）。
+        非 force 路径遇终态只清旗标不发包：终态卡片由 seal 侧接管，双发竞态零容忍。
+        """
+        self._cancel_panel_flush(chat_id)
+        if st is None:
+            st = self._states.get(chat_id)
+        if st is None or not st.panel_dirty or not st.card_id:
+            return
+        st.panel_dirty = False
+        if not force and (st.finalized or st.degraded):
+            return
+        await self._patch_status(st)
 
     def active_state(self, chat_id: str) -> CardTurnState | None:
         st = self._states.get(chat_id)
@@ -367,7 +567,8 @@ class FrameComposer:
                 if key in st.tool_durations:
                     break  # 最近同工具行已挂 → 属更新调用，行未到 → pending
                 st.tool_durations[key] = label
-                await self._patch_status(st)
+                # OPT-1a：耗时回填是行数不变的原地改写 → 尾沿合并（0.2s 窗口）。
+                await self._queue_panel_flush(st)
                 return
             queue = st.pending_tool_durations.setdefault(tool_name, [])
             if len(queue) < 4:
@@ -452,6 +653,16 @@ class FrameComposer:
                 st = self.state_by_message(message_id)
                 if st is None or st.degraded:
                     return None
+                if not finalize and st.finalized:
+                    # v2.0.33（审计 FIX-3）：定稿后的状态在 60s GC 冷却窗口内仍可
+                    # 经 state_by_message 反查到。迟到的非定稿 edit（网关重试/
+                    # 换通道竞态）会对已关流式的卡发 cardkit_stream_element →
+                    # 300309（CARDKIT_STREAMING_CLOSED，client.py:107）无处处理
+                    # → 整通道误降级（后续帧全部退原生文本）。定稿 edit 本身
+                    # 已携带全量终值，非定稿迟到帧按构造是重复内容：短路返回
+                    # 成功（与 _on_stream 追加段同款 SendResult 形态），不触
+                    # 卡片 API、不降级。
+                    return SendResult(success=True, message_id=st.card_message_id)
                 if finalize:
                     return await self._finalize(st, content)
                 return await self._patch_answer(st, content)
@@ -597,7 +808,9 @@ class FrameComposer:
                     else:
                         # 种子帧（空快照）：仅解除暂停 + 面板移除暂停行
                         # （全量更新；后续 delta 局部更新正文）。
-                        await self._patch_status(st)
+                        # OPT-1a：行数不变的原地改写 → 尾沿合并（timer 兑现，
+                        # 或紧随的 delta/finalize 强制冲刷）。
+                        await self._queue_panel_flush(st)
                     self._arm_watchdog(chat_id)  # 暂停期让位，恢复后重新武装
                     return True
                 if st.resume_base:
@@ -623,19 +836,32 @@ class FrameComposer:
 
         v2.0.13 从 ``_on_progress`` 有卡分支抽出共用：native 复合帧的工具行
         与网关进度气泡行走同一套合并/耗时认领/行时戳逻辑。
+
+        OPT-2：answer 归一化（" ".join(split())）每次调用只算一次——旧实现对
+        每条 incoming 行重复全量扫描 answer 缓冲（大 answer × accumulate 快照
+        多行 = O(n×m)）；归一化结果传入 _is_answer_duplicate，行为逐字等价。
+        OPT-1a：新增行（urgent）同步上传；原地改写进 0.2s 尾沿合并。
         """
-        fresh = [ln for ln in lines if not _is_answer_duplicate(ln, st.answer_text)]
+        # OPT-2：每次 absorb 归一化一次 answer（旧：每行一次）。
+        answer_norm = " ".join((st.answer_text or "").split())
+        fresh = [
+            ln for ln in lines
+            if not _is_answer_duplicate(ln, st.answer_text, answer_norm=answer_norm)
+        ]
         if not fresh:
             return
-        merged = _merge_progress_lines(st.status_lines, fresh)
+        old_lines = st.status_lines
+        merged = _merge_progress_lines(old_lines, fresh)
         if merged is None:
             return
-        self._migrate_tool_durations(st, st.status_lines, merged)
-        new_times = _reconcile_line_times(st.status_lines, st.line_times, merged)
-        self._attach_pending_durations(st, st.status_lines, merged)
+        self._migrate_tool_durations(st, old_lines, merged)
+        new_times = _reconcile_line_times(old_lines, st.line_times, merged)
+        self._attach_pending_durations(st, old_lines, merged)
         st.status_lines = merged
         st.line_times = new_times
-        await self._patch_status(st)
+        # OPT-1a：新增行 = 用户可见的结构性进展 → 同步上传不延迟；原地改写
+        # （思考增长/pending→preview 取代）→ 0.2s 尾沿合并单发。
+        await self._queue_panel_flush(st, urgent=len(merged) > len(old_lines))
 
     async def _on_stream(self, chat_id: str, content: str, *, reply_to: str | None = None) -> SendResult | None:
         st = self.active_state(chat_id)
@@ -668,7 +894,11 @@ class FrameComposer:
         if prev is None or prev.finalized or prev.turn_started_at is None:
             st.turn_started_at = time.monotonic()
         card = self._build_card(
-            status_lines=pending or None,
+            # OPT-5：首卡面板行同样过流式 markdown 卫生化（与 _patch_status
+            # 同一视图/同一缓存——否则建卡帧与更新帧样式来回翻转）。
+            status_lines=[
+                md_hygiene_line_cached(ln, st.md_lines_cache) for ln in pending
+            ] or None,
             panel_title=_panel_title(pending, elapsed_ms=_turn_elapsed_ms(st)),
             status_durations=dict(st.tool_durations),
             status_times=[time.monotonic()] * len(pending),
@@ -699,7 +929,15 @@ class FrameComposer:
         # finalized 状态，不重置会导致第 2 turn active_state 恒 None（重复建卡）。
         st.chat_id = chat_id
         st.card_id = card_id
+        # v2.0.33（审计 FIX-4a）：复用状态对象升级为活跃卡时，旧 card_message_id
+        # 的 _by_message 反查键必须先驱逐——否则旧卡消息被删除时
+        # state_by_message(旧id) 仍解析到本状态对象（当前活跃卡），adapter.
+        # delete_message 据此 forget(chat_id) 会把进行中的回合状态连根拔掉
+        # （正文断流 + 面板蒸发）。新键注册保留下方原逻辑。
+        old_message_id = st.card_message_id
         st.card_message_id = str(message_id)
+        if old_message_id and old_message_id != st.card_message_id:
+            self._by_message.pop(old_message_id, None)
         st.answer_text = ""
         st.seq = 0
         st.created_at = time.monotonic()
@@ -716,6 +954,14 @@ class FrameComposer:
         st.turn_id = ""
         st.status_lines = pending
         st.line_times = [time.monotonic()] * len(pending)
+        # OPT-1a/4/5：新回合清位——挂起面板脏旗标（旧 turn 的合并 timer 到期后
+        # 查 dirty=False 自然 no-op）、answer 流式基线、markdown 卫生化缓存
+        # （旧行/旧文缓存引用随回合释放，不跨回合钉内存）。
+        st.panel_dirty = False
+        self._cancel_panel_flush(chat_id)
+        st.last_streamed_answer = ""
+        st.answer_md_cache.clear()
+        st.md_lines_cache.clear()
         # v2.0.9 P2-8 伴生：耗时表必须随回合重置——残留 key 是上一回合的
         # 行文本，同命令重跑时新行会错误继承旧耗时（跨回合数据污染）。
         st.tool_durations.clear()
@@ -726,13 +972,18 @@ class FrameComposer:
         st.answer_text = content or ""
         st.seq += 1
         if st.answer_text:
+            # OPT-5：种子正文过流式 markdown 卫生化（与 _patch_status 全量快照
+            # 同一视图——防全量更新与流式元素内容样式来回翻转）。
+            seed_view = md_hygiene_cached(st.answer_text, st.answer_md_cache)
             await call_with_seq_recovery(
                 st,
                 lambda seq: client.cardkit_stream_element(
-                    card_id, _answer_element_id(), st.answer_text, sequence=seq),
+                    card_id, _answer_element_id(), seed_view, sequence=seq),
                 what="create:answer-seed",
                 reopen=self._reopen_closure(st),
             )
+            # OPT-4：种子上传成功即记录基线（finalize 等值跳过比对用）。
+            st.last_streamed_answer = st.answer_text
         _logger.info(
             "composer: card created chat=%s card=%s msg=%s status_lines=%d",
             chat_id, card_id, st.card_message_id, len(pending),
@@ -807,15 +1058,21 @@ class FrameComposer:
             raise RuntimeError("card client unavailable")
         # v2.0.32（P1-3 方案B）：会话将到期先主动续期（主流程预防）。
         await self._renew_stream_if_due(st)
+        # OPT-5：发往卡片的正文视图过流式 markdown 卫生化（oneshot 卡同款待遇，
+        # special.py 先例；不做 chunk/split——流式语义是全量快照，只做变换）。
+        # 状态缓冲 st.answer_text 恒存原文：OPT-4 基线、网关拼接、复读过滤均按原文。
+        content = md_hygiene_cached(st.answer_text, st.answer_md_cache)
         st.seq += 1
         st.last_activity = time.monotonic()
         await call_with_seq_recovery(
             st,
             lambda seq: client.cardkit_stream_element(
-                st.card_id, _answer_element_id(), st.answer_text, sequence=seq),
+                st.card_id, _answer_element_id(), content, sequence=seq),
             what="stream:answer",
             reopen=self._reopen_closure(st),
         )
+        # OPT-4：上传成功即记录基线（finalize 比对 state.answer_text 等值跳过）。
+        st.last_streamed_answer = st.answer_text
 
     async def _on_progress(self, chat_id: str, cls: ClassifyResult, *, reply_to: str | None = None) -> SendResult | None:
         st = self.active_state(chat_id)
@@ -871,13 +1128,15 @@ class FrameComposer:
         if not _EMOJI_RE.match(text):
             text = f"{_THINKING_PREFIX} {text}"
         lines = split_progress_segments(text) or ([text] if text else [])
+        old_len = len(st.status_lines)
         merged = _merge_progress_lines(st.status_lines, lines)
         if merged is None:
             return SendResult(success=True, message_id=st.card_message_id)
         new_times = _reconcile_line_times(st.status_lines, st.line_times, merged)
         st.status_lines = merged
         st.line_times = new_times
-        await self._patch_status(st)
+        # OPT-1a：新增行即时上传；思考增长类原地改写 → 尾沿合并（0.2s 窗口）。
+        await self._queue_panel_flush(st, urgent=len(merged) > old_len)
         return SendResult(success=True, message_id=st.card_message_id)
 
     async def _on_final_send(self, chat_id: str, content: str) -> SendResult | None:
@@ -890,13 +1149,26 @@ class FrameComposer:
         client = self._get_client()
         if client is None:
             raise RuntimeError("card client unavailable")
+        # OPT-5：发往卡片的视图过流式 markdown 卫生化（oneshot 卡 special.py
+        # 同款待遇）。状态缓冲恒存原文——面板标题/耗时表键/合并语义都按原文。
+        answer_view = md_hygiene_cached(st.answer_text or "", st.answer_md_cache)
+        lines_view = [
+            md_hygiene_line_cached(ln, st.md_lines_cache) for ln in st.status_lines
+        ]
         card = self._build_card(
-            status_lines=st.status_lines,
-            answer_text=st.answer_text,   # 防全量更新把已流 answer 重置为空
+            status_lines=lines_view,
+            answer_text=answer_view,   # 防全量更新把已流 answer 重置为空
             panel_title=_panel_title(st.status_lines, elapsed_ms=_turn_elapsed_ms(st)),
             status_durations=dict(st.tool_durations),
             status_times=list(st.line_times),
         )
+        # OPT-1b：30KB 悬崖守卫——上传前实测序列化体积，超预算从最旧面板行裁起
+        # （复用 _enforce_card_element_limit 的裁剪走查与 trim hint 提示机制，
+        # UX-1a 起为诚实双语措辞「⚡ N earlier steps omitted / 前 N 项已省略」；
+        # answer 永不裁）。生产实证：34 行状态 19.3KB/update，~12KB
+        # 答案即撞官方 30KB 上限（200860）→ 全通道中途降级；裁剪只作用于本次
+        # 上传视图，st.status_lines 恒存全量（不丢过程记录）。
+        card = _enforce_card_byte_budget(card)
         # v2.0.24：首个状态行到达时全量更新补插面板（懒渲染，s172 实证）；
         # 此处 status_lines 恒非空（调用点均已过 merge 非空门），面板必在。
         st.panel_on_card = _card_has_panel(card)
@@ -921,6 +1193,10 @@ class FrameComposer:
         # 页脚（三步定稿非事务性）。已定稿直接短路返回成功。
         if st.finalized:
             return SendResult(success=True, message_id=st.card_message_id)
+        # OPT-1a：定稿入口强制冲刷挂起面板状态（取消合并 timer，同步上传）——
+        # 最后面板状态必须先于 finalize 四步 API 落卡（流式正确性红线）。
+        # 置 finalized 旗标之前冲刷：_flush_panel_now 对终态非 force 不发包。
+        await self._flush_panel_now(st.chat_id, st)
         st.finalized = True
         if content:
             st.answer_text = content
@@ -993,7 +1269,10 @@ class FrameComposer:
                 st.status_lines.append(row)
                 st.line_times.append(time.monotonic())
             st.last_activity = time.monotonic()
-            await self._patch_status(st)
+            # OPT-1a：clarify 暂停行同走置脏+尾沿合并（与 absorb/interim 同一
+            # 护栏）；本行是首块面板时 _queue_panel_flush 的懒渲染分支保持即时
+            # 补插（v2.0.24 语义，test_v226「暂停行补插面板」契约不回退）。
+            await self._queue_panel_flush(st)
             _logger.info(
                 "composer: clarify suspend chat=%s card=%s question=%r",
                 chat_id, st.card_id, (question or "")[:40],
@@ -1040,7 +1319,16 @@ class FrameComposer:
                     return
                 st.pause_pending = False
                 await self._finalize(st, st.answer_text)
-        except Exception:
+        except Exception as exc:
+            # v2.0.33（审计 FIX-2）：_finalize 先置 finalized=True 再跑远端三步
+            # 定稿——定稿中段抛异常（如 answer 终值 patch 撞不可自愈错误）时
+            # 状态已带 finalized 旗标，看门狗对其豁免，远端卡将永挂流式态
+            # （跑马灯家族）。原 blanket debug 吞异常后无人收口。与 send/
+            # edit/stream_frame 帧路径同语义：_degrade 退役卡片通道 +
+            # _seal_degraded_card 优雅关流式（幂等：无卡/client 缺失为 no-op；
+            # state 已 finalized 不重复消费）。
+            self._degrade(chat_id, "pause_expire", exc)
+            await self._seal_degraded_card(chat_id)
             _logger.debug("composer: pause expire failed chat=%s", chat_id, exc_info=True)
 
     # ── 降级 ────────────────────────────────────────────────────────────
@@ -1067,11 +1355,34 @@ class FrameComposer:
         st = self._states.get(chat_id)
         if st is None or not st.card_id:
             return  # 占位/无卡降级（如 client 缺失）无远端卡可收口
+        if await self._seal_live_card(st):
+            _logger.info(
+                "composer: degraded card sealed chat=%s card=%s",
+                chat_id[:12], str(st.card_id)[:12],
+            )
+
+    async def _seal_live_card(self, st: CardTurnState) -> bool:
+        """对单张远端活跃卡执行 finalize_card 优雅收口（降级/GC/停机共用核心）.
+
+        v2.0.33 自 _seal_degraded_card 抽出：finalize_card 四步（answer 终值
+        patch + 页脚 + 面板收口 + 关流式）对「已脱离消费链路的活跃卡」语义
+        一致——降级收口、GC 孤儿收口、网关停机收口（seal_all_on_shutdown）
+        三条主链共用。调用方负责先置 degraded+finalized 停止消费；远端 API
+        失败仅 debug 不上抛（官方 ~10min 流式会话自愈为最终防线），返回是否
+        真正落盘（供调用方记 info 日志/计数）。
+        """
         client = self._get_client()
         if client is None:
-            return
+            return False
         try:
             from .finalize import finalize_card
+
+            # OPT-1a：收口前强制冲刷挂起面板状态。降级/GC 孤儿/停机收口的调用方
+            # 均已置终旗标或已把状态脱离注册表（force=True 保障仍发包）；并发
+            # timer 冲刷查 _states 落空/见终旗标自然跳过，无双发竞态。冲刷失败
+            # 不阻断收口（下方 finalize_card 同款 best-effort）。
+            with contextlib.suppress(Exception):
+                await self._flush_panel_now(st.chat_id, st, force=True)
 
             await finalize_card(
                 client, st, answer_element_id=_answer_element_id(),
@@ -1082,15 +1393,59 @@ class FrameComposer:
                 model_name=self._resolve_footer_model(st.chat_id),
                 reopen=self._reopen_closure(st),
             )
-            _logger.info(
-                "composer: degraded card sealed chat=%s card=%s",
-                chat_id[:12], str(st.card_id)[:12],
-            )
         except Exception:
             _logger.debug(
-                "composer: degrade seal skipped card=%s",
+                "composer: card seal skipped card=%s",
                 str(st.card_id)[:12], exc_info=True,
             )
+            return False
+        return True
+
+    async def seal_all_on_shutdown(self) -> int:
+        """网关停机收口：对全部未落定的远端活跃卡执行优雅定稿（v2.0.33 FIX-1）.
+
+        证据（agent.log/gateway.log 2026-11-07 13:50:38-39）：网关停机序列里
+        通知卡建卡（composer: card created）与「Sent shutdown notification」
+        同秒，随后 adapter 断连、进程退出、零 finalize → 远端卡 streaming
+        永挂（用户需手动删卡）。内置基类 disconnect 只停自家 WS，感知不到
+        本插件的 composer 状态表；本方法由 adapter.disconnect 在基类断连后
+        调用，逐卡 best-effort 收口。
+
+        语义：非 finalized 且非 degraded 且有远端卡的状态全部收口——含
+        paused/pause_pending（暂停卡同样是远端活卡，跑马灯同族）。每卡复用
+        _seal_live_card（finalize 四步），单卡失败 warning 后继续（个体失败
+        不阻断其余卡）；总预算 ~5s（deadline 检查，超时即停——收口不应拖住
+        停机序列，残余卡交官方流式会话自愈）。返回成功收口的卡数，并记
+        'composer: shutdown seal closed N live card(s)' 供停机取证。
+        """
+        sealed = 0
+        deadline = time.monotonic() + 5.0
+        for chat_id, st in list(self._states.items()):
+            if st.finalized or st.degraded or not st.card_id:
+                continue
+            st.degraded = True
+            st.finalized = True  # 停止消费（与 _watchdog_seal 同款先置旗标）
+            self._cancel_pause(chat_id)  # 暂停卡收口后暂停窗口定时器无意义
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _logger.warning(
+                    "composer: shutdown seal budget exhausted chat=%s card=%s",
+                    chat_id[:12], str(st.card_id)[:12],
+                )
+                break
+            try:
+                ok = await asyncio.wait_for(self._seal_live_card(st), timeout=remaining)
+                if ok:
+                    sealed += 1
+            except Exception:
+                # wait_for 超时取消（预算耗尽）或 seal 意外上抛：个体失败
+                # 不阻断其余卡（本端旗标已置，进程即将退出无后续消费）。
+                _logger.warning(
+                    "composer: shutdown seal failed chat=%s card=%s",
+                    chat_id[:12], str(st.card_id)[:12], exc_info=True,
+                )
+        _logger.info("composer: shutdown seal closed %d live card(s)", sealed)
+        return sealed
 
     # ── 孤儿卡看门狗（v2.0.21，审计 R1）───────────────────────────────────
     def _spawn_watchdog(self, chat_id: str) -> None:
@@ -1110,7 +1465,13 @@ class FrameComposer:
         if loop is None or loop.is_closed():
             return
         try:
-            loop.call_later(_WATCHDOG_IDLE_SEC, self._watchdog_due, chat_id)
+            # v2.0.33（审计 FIX-7）：重武装周期走配置解析（_watchdog_idle_sec，
+            # 60~1800s 钉制）而非硬编码常量——原实现 arm 与 due 两处只看配置，
+            # 重武装却钉死 300s，自定义 watchdog_idle_sec < 300 的部署里 due
+            # 判定按配置阈值放行后重武装却要再等 300s（孤儿卡收口延迟最高
+            # 5 倍于配置值）；> 300 配置则提前到期、due 内静默复查挡住（无害
+            # 但空转）。统一以 _watchdog_idle_sec() 为唯一事实源。
+            loop.call_later(self._watchdog_idle_sec(), self._watchdog_due, chat_id)
         except RuntimeError:  # loop 已停转（跨线程窗口）
             pass
         except Exception:
@@ -1166,6 +1527,9 @@ class FrameComposer:
                 idle_sec = self._watchdog_idle_sec()
                 if time.monotonic() - st.last_activity < idle_sec:
                     return  # 双保险：ensure_future 窗口内回合恢复活跃
+                # OPT-1a：收口前强制冲刷挂起面板状态（此刻未置终旗标，非 force
+                # 即可发；先落卡再 seal API——流式正确性红线）。
+                await self._flush_panel_now(chat_id, st)
                 st.degraded = True
                 st.finalized = True
                 client = self._get_client()
@@ -1201,10 +1565,17 @@ class FrameComposer:
         if st and st.card_message_id:
             self._by_message.pop(st.card_message_id, None)
         self._cancel_pause(chat_id)  # v2.0.26：暂停窗口定时器随状态一并清理
+        # OPT-1a：面板合并 timer 随状态清理（避免无主 timer 到期后空转）。
+        self._cancel_panel_flush(chat_id)
+        # OPT-3：状态已弹出且锁空闲无等待者 → 驱逐锁对象（锁集合回收口；
+        # adapter.delete_message 的 forget 不持 chat 锁，此处真正生效）。
+        self._evict_chat_lock_if_idle(chat_id)
 
     def clear(self) -> None:
         for cid in list(self._pause_timers):
             self._cancel_pause(cid)
+        for cid in list(self._panel_flush_timers):
+            self._cancel_panel_flush(cid)  # OPT-1a：合并 timer 全量清空
         self._states.clear()
         self._by_message.clear()
         self._chat_locks.clear()
@@ -1562,7 +1933,9 @@ def _merge_progress_lines(existing: list[str], incoming: list[str]) -> list[str]
     return merged if changed else None
 
 
-def _is_answer_duplicate(line: str, answer_text: str) -> bool:
+def _is_answer_duplicate(
+    line: str, answer_text: str, *, answer_norm: str | None = None,
+) -> bool:
     """💬 思考行是否为已流答案的复读（v2.0.8）.
 
     网关 ``_relay_thinking``（agent/turn_response_intake.py）把每次模型响应的
@@ -1572,13 +1945,19 @@ def _is_answer_duplicate(line: str, answer_text: str) -> bool:
 
     仅做前缀匹配（归一化空白后取前 60 字符、≥40 才判）：隐藏推理（reasoning
     内容与答案正文不同源）绝不误伤；碎片（<40 字符）保留。永不抛异常。
+
+    OPT-2：``answer_norm`` 允许调用方传入预归一化 answer（_absorb_status_lines
+    每次调用只算一次 " ".join(split())）；缺省就地计算，行为逐字等价。
     """
     try:
         text = (line or "").strip().removeprefix(_THINKING_PREFIX).strip()
         body = " ".join(text.split())[:60]
         if len(body) < 40:
             return False
-        answer = " ".join((answer_text or "").split())
+        if answer_norm is not None:
+            answer = answer_norm
+        else:
+            answer = " ".join((answer_text or "").split())
         if not answer:
             return False
         return answer[:len(body)] == body
@@ -1651,20 +2030,29 @@ def _card_has_panel(card: dict[str, Any]) -> bool:
         return False
 
 
-def _panel_title(status_lines: list[str], *, elapsed_ms: float = 0.0) -> str:
-    """V1(1.8.1) 同款面板动态标题.
+def _panel_title(status_lines: list[str], *, elapsed_ms: float = 0.0) -> tuple[str, str]:
+    """V1(1.8.1) 同款面板动态标题（UX-2a：双语 ``(en, zh)`` 文案对）.
 
     "agent loop" ·（N 轮）·（M 个工具）·（X.Xs）——各段有数据才拼接：
     轮次数 = 💬 思考行分组数；工具数 = 工具行条数（pending 已被取代不重复计）；
     elapsed = 首帧→当前实测（v2.0.3 曾以「帧无耗时」为由省略，v2.0.5 起由
     composer 本地实测，非网关伪造）。永不抛异常。
+
+    UX-2a（审计，2026-11-09）：此前恒拼 zh 段（f"{rounds} 轮"/f"{tools} 个工具"
+    硬编码），en 客户端用户看中文标题；i18n 表 rounds/tools_count 两键定义后
+    零调用。现按 _T 元组序产出 ``(en, zh)`` 对，落卡由
+    cards._apply_panel_title 写 content=en + i18n_content 双语（面板占位标题
+    elements._build_unified_panel_placeholder 同款机制）。
     """
     try:
         rounds = tools = 0
         prev_thinking = False
         for ln in status_lines or []:
             try:
-                kind, _tool, _c = parse_progress_line(ln)
+                # OPT-2：经模块级 memo（cards._parse_line_cached）——_patch_status
+                # 每次全量渲染对同一批行只解析 1 次（旧：分组判定/渲染循环/
+                # 本标题各解析一次 = 3 次）。
+                kind, _tool, _c = _parse_line_cached(ln)
             except Exception:  # noqa: BLE001
                 kind = "unknown"
             if kind == "tool":
@@ -1676,15 +2064,26 @@ def _panel_title(status_lines: list[str], *, elapsed_ms: float = 0.0) -> str:
                 prev_thinking = True
             else:
                 prev_thinking = False
-        parts = ["agent loop"]
+        # 基段与轮次/工具段走 i18n 表（此前 rounds/tools_count 为死键）
+        from ..cardkit.i18n import _T
+
+        en_base, zh_base = _T["agent_process"]
+        en_parts = [en_base]
+        zh_parts = [zh_base]
         if rounds:
-            parts.append(f"{rounds} 轮")
+            en_parts.append(_T["rounds"][0].format(rounds))
+            zh_parts.append(_T["rounds"][1].format(rounds))
         if tools:
-            parts.append(f"{tools} 个工具")
+            en_parts.append(_T["tools_count"][0].format(tools))
+            zh_parts.append(_T["tools_count"][1].format(tools))
         if elapsed_ms >= 100:  # <0.1s 不显示（避免 "0.0s" 噪音）
             from ..cardkit.elements import _format_elapsed
 
-            parts.append(_format_elapsed(elapsed_ms))
-        return " · ".join(parts)
+            elapsed_label = _format_elapsed(elapsed_ms)
+            en_parts.append(elapsed_label)
+            zh_parts.append(elapsed_label)
+        return " · ".join(en_parts), " · ".join(zh_parts)
     except Exception:  # noqa: BLE001 — 标题永不影响主流程
-        return "agent loop"
+        from ..cardkit.i18n import _T
+
+        return _T["agent_process"]

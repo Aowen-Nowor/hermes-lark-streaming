@@ -778,8 +778,9 @@ class TestEnforceCardElementLimit:
 
     V2 构造路径：``build_streaming_card_v2(status_lines=[...])`` 塞入大量
     工具行（每行渲染 2 元素：官方图标标题 + 缩进命令摘要），超阈值时安全网
-    裁剪面板最旧子项并插入「⚡ 还有 N 项已折叠」提示；answer/页脚/spinner
-    永不裁剪。
+    裁剪面板最旧子项并插入 trim hint（UX-1a 起诚实双语措辞：「⚡ N earlier
+    steps omitted」en 兑底 content + i18n_content zh「⚡ 前 N 项已省略」）；
+    answer/页脚/spinner 永不裁剪。
     """
 
     _TOOL_LINE = "🖥️ terminal：uname -r && sleep 1 && echo done-{i}-padding-padding"
@@ -795,7 +796,7 @@ class TestEnforceCardElementLimit:
         return None
 
     def test_v2_card_under_limit_not_trimmed(self):
-        """正常状态量（12 行）远低于阈值——不裁剪、无折叠提示."""
+        """正常状态量（12 行）远低于阈值——不裁剪、无省略提示."""
         card = build_streaming_card_v2(
             status_lines=self._make_status_lines(12),
             answer_text="short answer",
@@ -805,10 +806,17 @@ class TestEnforceCardElementLimit:
         panel = self._panel_of(card)
         assert panel is not None
         for child in panel.get("elements", []):
-            assert "已折叠" not in child.get("content", "")
+            # UX-1a：双语提示均不得出现（未裁剪 = 无提示行）
+            content = child.get("content", "")
+            assert "earlier steps omitted" not in content
+            assert "项已省略" not in content
 
     def test_v2_card_over_limit_trimmed_with_hint(self):
-        """超限卡片被安全网裁剪：总元素 ≤195 + 折叠提示在面板首部."""
+        """超限卡片被安全网裁剪：总元素 ≤195 + 诚实双语提示在面板首部.
+
+        UX-1a：提示措辞不再「已折叠」（裁剪是删除非折叠——展开面板即证项
+        已不在），en 兑底 content + i18n_content 双语对（页脚元素同机制）。
+        """
         card = build_streaming_card_v2(status_lines=self._make_status_lines(300))
         assert _count_tag_objects(card) <= 195, (
             f"build_streaming_card_v2 output {_count_tag_objects(card)} exceeds 195 "
@@ -817,7 +825,14 @@ class TestEnforceCardElementLimit:
         panel = self._panel_of(card)
         assert panel is not None
         first = panel["elements"][0]
-        assert "已折叠" in first.get("content", "")
+        # en 兑底 content（house 约定，页脚同款）
+        assert "earlier steps omitted" in first.get("content", "")
+        assert "已折叠" not in first.get("content", "")
+        # i18n_content 双语对：zh_cn 诚实中文、en_us 与 content 同文
+        i18n = first.get("i18n_content", {})
+        assert "项已省略" in i18n.get("zh_cn", "")
+        assert "earlier steps omitted" in i18n.get("en_us", "")
+        assert first["content"] == i18n["en_us"]
 
     def test_trim_preserves_answer_and_spinner(self):
         """answer 元素与 loading spinner 永不裁剪 — 只裁面板子项."""

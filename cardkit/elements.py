@@ -269,7 +269,14 @@ def _build_tool_step_title(step: dict) -> dict:
     }
 
 def _build_reasoning_round_title(round_index: int, elapsed_ms: float, finalized: bool, failed: bool = False) -> dict:
-    """构建推理轮次标题 div. Colors: 进行中 orange-300, 已完成 green, 失败 red."""
+    """构建推理轮次标题 div. Colors: 进行中 orange-300, 已完成 green, 失败 red.
+
+    UX-2b（审计，2026-11-09）：轮次标题此前取 ``_T["round_n"]`` 双语对后丢弃
+    en、恒渲染 zh「第 N 轮」——en 客户端用户看中文轮次标题。改为 content=en
+    兜底 + ``i18n_content`` 双语对（house 约定同面板标题
+    ``_build_unified_panel_placeholder``/页脚 ``_build_footer_elements``）；
+    ``<font>``/``**`` 包装在两个语种文案上分别施加，颜色/字号属性语种无关。
+    """
     if failed:
         color = "red"
     elif finalized:
@@ -278,12 +285,15 @@ def _build_reasoning_round_title(round_index: int, elapsed_ms: float, finalized:
         color = "orange-300"
 
     en_label, zh_label = _T["round_n"]
-    text = zh_label.format(round_index)  # 用中文格式
+    en_text = en_label.format(round_index)
+    zh_text = zh_label.format(round_index)
     elapsed = _format_elapsed(elapsed_ms) if elapsed_ms > 0 else ""
     if elapsed:
-        text += f" · {elapsed}"
+        en_text += f" · {elapsed}"
+        zh_text += f" · {elapsed}"
 
-    content = f"<font color='{color}'>**{text}**</font>"
+    en_content = f"<font color='{color}'>**{en_text}**</font>"
+    zh_content = f"<font color='{color}'>**{zh_text}**</font>"
     return {
         "tag": "div",
         "icon": {
@@ -294,7 +304,8 @@ def _build_reasoning_round_title(round_index: int, elapsed_ms: float, finalized:
         },
         "text": {
             "tag": "lark_md",
-            "content": content,
+            "content": en_content,
+            "i18n_content": _i18n(en_content, zh_content),
             "text_size": _aux_text_size(),
         },
     }

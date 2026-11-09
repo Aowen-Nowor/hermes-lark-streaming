@@ -172,7 +172,17 @@ class TestPendingProgress:
             assert any("先暂存这条思考" in c for c in contents), f"首卡面板缺思考行: {contents}"
             # v2.0.5：工具行标题人性化（terminal → Terminal，V1 截图同款）
             assert any("Terminal" in c for c in contents), f"首卡面板缺工具行: {contents}"
-            assert any("第 1 轮" in c for c in contents), f"首卡面板缺思考轮次标题: {contents}"
+            # UX-2b：轮次标题双语对——zh 文案落 i18n_content（_flat 只取 content）
+            bilingual = []
+            for el in panel.get("elements", []):
+                text = el.get("text")
+                blob = str(el.get("content", ""))
+                if isinstance(text, dict):
+                    blob += " " + str(text.get("content", ""))
+                    i18n = text.get("i18n_content") or {}
+                    blob += " " + " ".join(str(v) for v in i18n.values())
+                bilingual.append(blob)
+            assert any("第 1 轮" in c for c in bilingual), f"首卡面板缺思考轮次标题: {bilingual}"
 
         await runner.complete(session, answer="暂存场景定稿")
         await runner.assert_card_sealed(session)

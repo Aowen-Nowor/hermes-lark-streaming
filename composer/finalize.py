@@ -38,12 +38,39 @@ _logger = logging.getLogger("hermes_lark_streaming.composer")
 _DEFAULT_FOOTER_FIELDS: list[list[str]] = [["status", "elapsed", "model"]]
 
 
+def _md_stream_view(text: str, state: Any) -> str:
+    """OPT-5：终值的流式 markdown 卫生化视图（有缓存字段则用，无则直算）.
+
+    与 engine._stream_answer/_patch_status 同一变换、同一缓存（oneshot 卡
+    special.py 同款待遇）——定稿/收口不把已卫生化的流式内容回退成原文。
+    """
+    from ..cardkit.cards import md_hygiene_cached
+
+    return md_hygiene_cached(text, getattr(state, "answer_md_cache", None))
+
+
+def _empty_answer_summary() -> str:
+    """UX-2c（审计，2026-11-09）：空 answer 摘要兑底——不再单语 zh.
+
+    旧兑底恒返「已完成」，en 客户端会话列表预览恒中文。走 i18n 表
+    status_completed（"Completed"/"已完成"）拼双语中性文案：
+    ``cardkit_close_streaming(summary: str)`` 的 settings payload 把同一串
+    写进 content 与 i18n_content 两语种（feishu/client.py:597-605），字符串
+    接口无法携带双语对——双语中性串是客户端 API 约束下唯一诚实的解；
+    非空 answer 的摘要取首行原文，本身语种中立，不受影响。
+    """
+    from ..cardkit.i18n import _T
+
+    en_done, zh_done = _T["status_completed"]
+    return f"{zh_done} · {en_done}"
+
+
 def _summary_of(state: Any) -> str:
     text = (getattr(state, "answer_text", "") or "").strip()
     if not text:
-        return "已完成"
+        return _empty_answer_summary()
     head = text.splitlines()[0].strip()
-    return head[:120] or "已完成"
+    return head[:120] or _empty_answer_summary()
 
 
 def _resolve_model_name() -> str:
@@ -125,7 +152,7 @@ async def _reseal_panel(
     client: Any,
     state: Any,
     *,
-    panel_title: str,
+    panel_title: str | tuple[str, str],
     expanded: bool,
 ) -> bool:
     """面板收口重渲染：流式期「进行中橙」→ 定稿「已完成绿」（v2.0.16）.
@@ -152,12 +179,17 @@ async def _reseal_panel(
     lines = list(getattr(state, "status_lines", None) or [])
     if not lines:
         return False
+    # OPT-5：面板行与流式期同一卫生化视图（同缓存）——收口重建不回退样式。
+    from ..cardkit.cards import md_hygiene_line_cached
+
+    line_cache = getattr(state, "md_lines_cache", None)
+    view = [md_hygiene_line_cached(ln, line_cache) for ln in lines]
     durations = dict(getattr(state, "tool_durations", None) or {})
     times = list(getattr(state, "line_times", None) or [])
     final_children = _render_status_children(
-        lines, durations=durations, line_times=times, turn_state="finalized")
+        view, durations=durations, line_times=times, turn_state="finalized")
     if _render_status_children(
-            lines, durations=durations, line_times=times,
+            view, durations=durations, line_times=times,
             turn_state="streaming") == final_children:
         return False  # 流式末渲染已无「进行中」轮，重建无视觉差异
     en_title, zh_title = _T["agent_process"]
@@ -174,6 +206,17 @@ async def _reseal_panel(
     if panel_title:
         _apply_panel_title(panel, panel_title)
     panel["element_id"] = UNIFIED_PANEL_ELEMENT_ID
+    # UX-1b（审计，2026-11-09）：重建面板先过 200 元素上限安全网——与建卡
+    # build_streaming_card_v2 出厂前同一机制（cards._enforce_card_element_limit）。
+    # 此前直拼 state.status_lines 全量重建且无裁剪：流式期曾被元素/字节
+    # 预算裁过的回合，定稿收口会把裁掉的行原样拼回 → add 超限 → 飞书对
+    # delete+add 原子 batch 整体拒收（300305/11310）→ 面板留在流式渲染态，
+    # 与定稿态不一致。enforcement 对包裹卡（panel 独占 body）计数：阈值 195
+    # 与建卡口径一致，余量 5 吸收面板外的 answer/页脚/spinner 兄弟元素；
+    # 裁剪/提示均就地改写本 panel dict（_enforce 返回包裹卡，panel 同引用）。
+    from ..cardkit.cards import _enforce_card_element_limit
+
+    _enforce_card_element_limit({"body": {"elements": [panel]}})
     state.seq += 1
     await call_with_seq_recovery(
         state,
@@ -201,7 +244,7 @@ async def finalize_card(
     answer_element_id: str,
     footer_fields: list[list[str]] | None = None,
     footer_show_label: bool = False,
-    panel_title: str = "",
+    panel_title: str | tuple[str, str] = "",
     panel_expanded: bool = True,
     model_name: str | None = None,
     reopen: Callable[[int], Any] | None = None,
@@ -220,14 +263,25 @@ async def finalize_card(
     # answer 元素骨架期无条件存在（空 content 占位），页脚 insert_before
     # 锚点不受影响。
     # v2.0.32：answer 终值 patch 接入 200850 重开自愈（reopen 闭包）。
-    if (state.answer_text or "").strip():
+    # OPT-4：终值与最近一次成功流式上传字节一致 → 跳过 patch（流式路径已把
+    # 同内容落卡，省一次全量上传）。last_streamed_answer 缺失（直调/旧测试
+    # state）或 answer 从未流过（空基线）→ 照旧 patch；reasoning 前插改写
+    # answer_text → 与基线不等 → patch 照发（基线自然失效）。
+    answer_text = state.answer_text or ""
+    last_streamed = getattr(state, "last_streamed_answer", None) or ""
+    if answer_text.strip() and answer_text != last_streamed:
+        # OPT-5：终值与流式期同一卫生化视图（同缓存），定稿不回退样式。
+        # 不 chunk/split（终值是单元素全量语义，同 _stream_answer）。
+        answer_view = _md_stream_view(answer_text, state)
         await call_with_seq_recovery(
             state,
             lambda seq: client.cardkit_stream_element(
-                state.card_id, answer_element_id, state.answer_text, sequence=seq),
+                state.card_id, answer_element_id, answer_view, sequence=seq),
             what="finalize:answer",
             reopen=reopen,
         )
+        # OPT-4：patch 成功即刷新基线（seal 复用本函数时同样受益）。
+        state.last_streamed_answer = answer_text
     try:
         await _seal_footer(
             client, state,

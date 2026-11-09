@@ -91,6 +91,14 @@ def normalize_clarify_choices(choices: list[str] | None) -> list[str]:
 _CRON_HEAD_PREFIX = "Cronjob Response: "
 _CRON_JOB_ID_RE = re.compile(r"^\(job_id:\s*(.*?)\)\s*$")
 
+# UX-3b（审计，2026-11-09）：cron 卡正文分块数上限。_split_long_text 按 2400
+# 字符/块无上限切分——超大 cron 产物（如整库 dump）会产出几十上百个 markdown
+# 元素 / 远超官方单卡 30KB → cardkit 建卡必被拒（元素 200 上限 300305/11310、
+# 体积 200860），oneshot 降级回落原生文本 = 长内容从未进卡。截断到 10 块
+# （≈24K 字符量级）保卡可送达，截断位置补双语标记行（trim hint 同款 i18n
+# 元素原语——content=en 兜底 + i18n_content 双语对）。
+_CRON_MAX_CHUNKS = 10
+
 
 def parse_cron_delivery(content: str) -> tuple[str, str, str]:
     """解析官方 cron 投递包装头 → ``(task_name, job_id, body)``.
@@ -142,6 +150,10 @@ def build_cron_card(content: str, *, title: str = "", job_id: str = "") -> dict[
     末尾追加灰色 notation 页脚行（_build_notice_row 同构）——溯源信息
     （原包装头的 ``(job_id: ...)`` 行）从正文上移到页脚，正文不再重复。
     缺省参数下与 V1 行为逐字节一致（既有测试冻结该契约）。
+
+    UX-3b（审计，2026-11-09）：正文块数上限 ``_CRON_MAX_CHUNKS``（10 块 ≈24K
+    字符）——超大 cron 产物此前无限切块，必然产出元素/体积双超限的拒收卡；
+    超限截断并在末尾追加双语标记行（cron_truncated，i18n_content 双语对）。
     """
     card: dict[str, Any] = {
         "schema": "2.0",
@@ -161,9 +173,21 @@ def build_cron_card(content: str, *, title: str = "", job_id: str = "") -> dict[
             for chunk in _split_long_text(_downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES))
             if chunk.strip()
         ]
+        # UX-3b：超上限截尾不截头——块序即正文阅读序，保最前 10 块。
+        truncated = False
+        if len(chunks) > _CRON_MAX_CHUNKS:
+            chunks = chunks[:_CRON_MAX_CHUNKS]
+            truncated = True
         if chunks and title.strip():
             card["body"]["elements"].append({"tag": "hr"})
         card["body"]["elements"].extend({"tag": "markdown", "content": chunk} for chunk in chunks)
+        if truncated:
+            en_marker, zh_marker = _T["cron_truncated"]
+            card["body"]["elements"].append({
+                "tag": "markdown",
+                "content": en_marker,
+                "i18n_content": _i18n(en_marker, zh_marker),
+            })
     if job_id.strip():
         card["body"]["elements"].append(
             _build_notice_row("time_outlined", f"Cronjob · job_id: {job_id.strip()}")
