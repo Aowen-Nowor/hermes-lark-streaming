@@ -19,6 +19,14 @@ name: Sync from Gitee
 #   - 连带修复：Release 幂等判定改查 GitHub Release 是否已存在（原逻辑查 tag，但 tag 先于判定
 #     由 Mirror 步骤从 Gitee 镜像，永远存在 → Release 永不创建）。
 #
+# v2.0.32 修复（CI 审计 2026-11-09，run #1506 日志实证）：
+#   - fetch 零重试：gitee ↔ GitHub Actions 跨网间歇性超时（Connection timed out after
+#     300040ms，run #1506 2026-10-30），单次尝试挂满 300s 后整轮作废，镜像/测试/Release 全 skipped。
+#     修复：http.lowSpeedLimit/Time 低速判死（60s 内 <1KB/s 即断，不再挂满 300s）+ 3 次重试递增等待。
+#   - 测试门禁失效：默认 shell 是 bash -e（无 pipefail），`pytest | tee` 后 `$?` 取的是 tee 的
+#     退出码——pytest 全红 exit_code 仍为 0，红测试照样放行 GitHub Release。
+#     修复：该步骤显式 shell: bash（-eo pipefail），pytest 退出码穿透管道，失败即整步失败。
+#
 # 所需 Secrets：GITEE_USERNAME / GITEE_TOKEN（同步+API）、FEISHU_WEBHOOK / FEISHU_SIGN_SECRET（通知）、
 #               GH_MIRROR_PAT（GitHub 侧 checkout+push，classic PAT 含 repo + workflow scope）。
 
@@ -57,8 +65,23 @@ jobs:
       - name: Add Gitee remote and fetch
         run: |
           git remote add gitee "https://${{ secrets.GITEE_USERNAME }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USERNAME }}/${{ github.event.repository.name }}.git"
+          # 低速判死：60s 内 <1KB/s 即断连重试（默认要挂满 300s 才超时，run #1506 实证）
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
           # --force：两平台同名 tag 对象不同源（V1 遗留），Gitee 为唯一事实源，同名 tag 强制以 Gitee 为准
-          git fetch gitee --prune --tags --force
+          # 3 次重试递增等待（30s/60s）：gitee ↔ GitHub Actions 跨网间歇性超时是已证实故障源
+          for attempt in 1 2 3; do
+            echo "==> gitee fetch 第 ${attempt}/3 次"
+            if git fetch gitee --prune --tags --force; then
+              echo "fetch 成功（第 ${attempt} 次尝试）"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 30))
+            fi
+          done
+          echo "❌ gitee fetch 连续 3 次失败，放弃本轮（下个调度周期或手动 dispatch 重试）"
+          exit 1
 
       - name: Record pre-sync SHA
         id: pre_sync
@@ -113,6 +136,10 @@ jobs:
       - name: Run full test suite (unit + e2e mock)
         if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
         id: run_tests
+        # 显式 shell: bash = -eo pipefail：pytest 退出码穿透 tee 管道（默认 bash -e 无 pipefail，
+        # $? 永远是 tee 的 0 → 红测试也判 0 并放行 Release）；pytest 失败时脚本在管道行中止，
+        # exit_code 不落盘 → 下游 Release 条件不满足 + 通知侧 fallback 为 1
+        shell: bash
         run: |
           python -m pytest tests/ --tb=short -q \
             --junitxml=unit_test_report.xml 2>&1 | tee unit_test_output.txt

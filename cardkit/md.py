@@ -23,6 +23,9 @@ _RE_H1_DEMOTE = re.compile(r"^# (.+)$", re.MULTILINE)
 _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 _RE_SHORT_MD_CHECK = re.compile(r'^#{1,6} |\n#{1,6} |```|!\[|\n{3,}')
 _RE_FENCE_LINE = re.compile(r"^\s*(`{3,})")  # 行首围栏标记（v2.0.21 围栏状态机）
+# v2.0.32（审计 P2-3）：切点候选——任意级别标题行首（含换行符，切点落在
+# 标题行之前，块边界即小节边界，阅读不断层）。
+_RE_HEADING_CUT = re.compile(r"\n#{1,6} ")
 
 __all__ = [
     "_MAX_CRON_TABLES",
@@ -147,13 +150,33 @@ def optimize_markdown_style(text: str) -> str:
         _logger.debug("optimize_markdown_style failed", exc_info=True)
         return text
 
+def _cuts_inside_table(text: str, idx: int) -> bool:
+    """v2.0.32（审计 P2-3）：切点是否落在代码块外的表格内部.
+
+    表格被从中间切开 → 前后两半都缺表头/残行，飞书两侧都渲染坏。
+    切点恰好是表格起点（idx == start）或终点（idx == end）不算内部。
+    永不抛异常。
+    """
+    try:
+        for start, end, _raw in _find_tables_outside_code_blocks(text):
+            if start < idx < end:
+                return True
+        return False
+    except Exception:  # noqa: BLE001 — 检查失败不阻塞切分（回旧行为）
+        return False
+
+
 def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
-    """将超长文本按段落/换行拆分为多个不超过 limit 字符的块.
+    """将超长文本按段落/标题/换行拆分为多个不超过 limit 字符的块.
 
     v2.0.21（审计 R6）：切点围栏感知——原实现可在围栏/表格中间切开，跨块
-    不闭合 → 前后两块都渲染坏。现在候选切点（段落 > 换行 > 硬切）逐个检查
-    围栏是否闭合，取第一个闭合的；三候选全部落在围栏内才硬切（极端罕见：
-    单个未闭合围栏长度 > limit/2，与原行为一致不再恶化）。
+    不闭合 → 前后两块都渲染坏。
+    v2.0.32（审计 P2-3，用户确认分块策略）：切点升级为「段落 > 标题行前 >
+    换行」三级优先，且每个候选点同时过**围栏闭合**与**表格完整**双检查
+    （表格从中间切开前后两半都渲染坏，围栏同理由 _fence_balanced 拒绝）；
+    三级候选全部落入围栏/表格内部才硬切（极端罕见：单个未闭合围栏或
+    超长表格长度 > limit/2，与 v2.0.21 行为一致不再恶化）。
+    块大小维持 2400（生产验证值；官方单元素内容上限无公开数值，不赌）。
     """
     if len(text) <= limit:
         return [text]
@@ -166,12 +189,18 @@ def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
         cut = text.rfind("\n\n", 0, limit)
         if cut >= limit // 2:
             candidates.append(cut)
+        # v2.0.32：标题行前切（最后一个落在 [limit//2, limit) 的标题起点）
+        head_cut = -1
+        for m in _RE_HEADING_CUT.finditer(text, 0, limit):
+            head_cut = m.start()
+        if head_cut >= limit // 2 and head_cut not in candidates:
+            candidates.append(head_cut)
         cut = text.rfind("\n", 0, limit)
-        if cut >= limit // 2:
+        if cut >= limit // 2 and cut not in candidates:
             candidates.append(cut)
         chosen = limit  # 兑底硬切（与原行为一致）
         for cand in candidates:
-            if _fence_balanced(text[:cand]):
+            if _fence_balanced(text[:cand]) and not _cuts_inside_table(text, cand):
                 chosen = cand
                 break
         chunks.append(text[:chosen])

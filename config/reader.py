@@ -196,18 +196,9 @@ class Config:
         footer = sec.get("footer", {})
         return _to_bool(footer.get("show_label", False))
 
-    @property
-    def native_streaming(self) -> bool:
-        """v2.0.13：hermes native streaming 通道开关（默认 True）.
-
-        True → 适配器声明 ``SUPPORTS_NATIVE_STREAMING``，答案流帧走官方
-        native 帧通道（send_stream_frame）：segment-break finalize 被官方
-        consumer 吞掉（gateway/stream_consumer_transport.py:389），工具边界
-        不再封卡 → 单卡全回合（Task 18 报告 P1-B）。
-        False → 整平台回到 edit-based 流（v2.0.12 行为）；部署灰度/一键回退。
-        """
-        sec = self._plugin_sec()
-        return _to_bool(sec.get("native_streaming", True), default=True)
+    # v2.0.31：native_streaming 配置键随原生通道回退一并退役——
+    # supports_native_streaming() 一律 False（edit-based 与内置飞书同款），
+    # 该键保留读取但不再被消费；下一大版可整体删除。
 
     @property
     def oneshot_cards(self) -> bool:
@@ -216,11 +207,30 @@ class Config:
         True → 三类出站帧不再落原生 post 文本，改渲染为静态定稿卡：
         1. cron 投递族（metadata 带 ``job_id``，成功/失败/队列排水同源）
         2. 回合外定稿（notify=True 且无活跃卡——非流式单发回复等）
-        3. 长文主动投递（无标记 plain 且 ≥200 字——send_message 工具族）
+        3. 主动投递（无标记 plain 且无活跃卡——与内置飞书同款直发卡片化）
         False → 全部落回原生路径（v2.0.13 行为，一键回退）。
         """
         sec = self._plugin_sec()
         return _to_bool(sec.get("oneshot_cards", True), default=True)
+
+    @property
+    def watchdog_idle_sec(self) -> float:
+        """v2.0.32（审计 P1-1，用户确认）：孤儿卡看门狗静默阈值（默认 300）.
+
+        背景：v2.0.21 硬编码 120s 在生产误封活跃回合（2026-11-08 16:05 铁证：
+        回合存活、网关上下文压缩 300s+ 静默——16:00:33 压缩启动 → 16:05:01
+        看门狗封卡 → 16:05:33 日志「compression still streaming after 300s」；
+        11-07 12:19 同族）。提到 300s：5×429 冷却 60s 裕度、与压缩首个检查点
+        同量级；长静默的工具执行/压缩期不再被误封。范围 60~1800 钉制——
+        下限防 429 冷却期误伤，上限防真孤儿卡跑马灯过久；负值/非数值/超界
+        按默认（card_duration_sec 下限钟制同款先例）。
+        """
+        sec = self._plugin_sec()
+        try:
+            val = float(sec.get("watchdog_idle_sec", 300.0))
+        except (TypeError, ValueError):
+            return 300.0
+        return min(1800.0, max(60.0, val))
 
     @property
     def clarify_suspend_sec(self) -> float:

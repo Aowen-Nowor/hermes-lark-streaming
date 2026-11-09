@@ -41,10 +41,23 @@ from .classify import (
 
 _logger = logging.getLogger("hermes_lark_streaming.composer")
 
-# v2.0.21（审计 R1）：孤儿卡看门狗静默阈值。120s = 429 冷却 60s 的 2 倍裕度；
-# 正常回合工具执行期网关进度气泡/native interim tick 持续重发快照刷新
-# last_activity，不会误伤（详见 _watchdog docstring）。
-_WATCHDOG_IDLE_SEC = 120.0
+# v2.0.21（审计 R1）：孤儿卡看门狗静默阈值。原值 120s（429 冷却 60s 的 2 倍裕度）
+# 在生产误封活跃回合（11-08 16:05 铁证：回合存活、网关上下文压缩 300s+ 静默
+# ——16:00:33 压缩启动 → 16:05:01 看门狗封卡 → 16:05:33 日志「compression
+# still streaming after 300s」；11-07 12:19 同族）。
+# v2.0.32（审计 P1-1，用户确认阈值方案）：提到 300s——5×429 冷却 60s 裕度、
+# 与网关压缩首个检查点（300s）同量级；长静默的工具执行/压缩期不再被误封。
+# 可经配置 ``watchdog_idle_sec`` 调整（60~1800s 钉制，见 Config.watchdog_idle_sec）；
+# 引擎侧以 _watchdog_idle_sec() 动态解析（Config 缺失/异常回落本常量）。
+_WATCHDOG_IDLE_SEC = 300.0
+
+# v2.0.32（审计 P1-3 方案B，用户确认）：主动续期阈值。官方 CardKit 流式会话
+# 寿命 ~10min（生产实证 11-07 12:01 建卡 → 12:11:08 撞 200850，600s 整；
+# 15:08 建卡 → 15:18:35 同族）。会话龄 ≥540s 时下一帧更新前先 settings
+# streaming_mode:true 续期（client.cardkit_reopen_streaming），防患于未然——
+# 主流程预防，非兜底；撞上 200850 仍由 call_with_seq_recovery 的重开自愈
+# 兑底闭环（双层，同一主链）。长回合 >10min 不再中断打字机。
+_STREAM_RENEW_AGE_SEC = 540.0
 
 try:  # hermes 运行时存在；导入失败时 composer 退化为纯直通（tests / 无 hermes 环境）
     from gateway.platforms.base import SendResult  # type: ignore
@@ -78,6 +91,10 @@ class CardTurnState:
     # 钩子先于文本帧到达时的排队区（tool_name → 待认领标签，cap 4）
     pending_tool_durations: dict[str, list[str]] = field(default_factory=dict)
     seq: int = 0                       # CardKit sequence 递增
+    # v2.0.32（审计 P1-3 方案B）：当前流式会话起点（monotonic）。建卡时起算，
+    # 主动续期/200850 自愈重开成功时刷新（seq.py._mark_session_renewed）；
+    # 0 = 未知（不参与续期判定）。
+    stream_session_at: float = 0.0
     created_at: float = field(default_factory=time.monotonic)
     # v2.0.5：turn 起点（首个进度帧/首帧到达），驱动面板标题「· 总耗时」。
     # 与 created_at 区分：created_at 随建卡重置，turn_started_at 只随 turn 重置。
@@ -119,11 +136,16 @@ class FrameComposer:
         build_final_card: Callable[..., dict[str, Any]],
         config: Any | None = None,
         clarify_suspend_sec: float | None = None,
+        model_resolver: Callable[[str], str | None] | None = None,
     ) -> None:
         self._get_client = get_client          # () -> FeishuClient | None
         self._build_card = build_card          # build_streaming_card_v2(**kwargs)
         self._build_final_card = build_final_card
         self._config = config
+        # v2.0.31：页脚 model 字段的会话级解析器（chat_id → 实际模型名）。
+        # adapter 注入——/model 会话切换在 config.yaml 单一事实源之外
+        # （_resolve_gateway_model 只读 config），不注入则页脚退回 config 值。
+        self._model_resolver = model_resolver
         # v2.0.26：clarify 暂停窗口（秒）。显式参数 > Config.clarify_suspend_sec
         # > 0（关闭——测试/无 config 环境走 v2.0.25 现状语义，存量断言零影响）。
         # 生产 adapter 传插件 Config（默认 1.2s）→ 边界 finalize → send_clarify
@@ -158,6 +180,18 @@ class FrameComposer:
             return int(getattr(self._config, "card_duration_sec", 600) or 600)
         except Exception:  # noqa: BLE001 — 配置异常按默认 TTL
             return 600
+
+    def _watchdog_idle_sec(self) -> float:
+        """v2.0.32（审计 P1-1）：看门狗静默阈值动态解析（可配置，钉制 60~1800s）.
+
+        Config 缺失/异常回落模块常量 _WATCHDOG_IDLE_SEC（300s）；配置值域外
+        钉制同 card_duration_sec/print_step 先例（上游配置异常不炸主流程）。
+        """
+        try:
+            val = float(getattr(self._config, "watchdog_idle_sec", _WATCHDOG_IDLE_SEC))
+        except Exception:  # noqa: BLE001
+            return _WATCHDOG_IDLE_SEC
+        return min(1800.0, max(60.0, val))
 
     def _gc(self) -> None:
         """v2.0.9 P0-2 重写：旧实现的运算符优先级使条件实际为
@@ -222,6 +256,10 @@ class FrameComposer:
         cls: ClassifyResult,
     ) -> SendResult | None:
         self._loop = asyncio.get_running_loop()  # v2.0.7：供线程安全回灌入口使用
+        # 【锚点归一】网关流式消费者不走 send(reply_to=) 而是打 metadata.reply_to_message_id；
+        # 本引擎 _create_card 只看 reply_to 槽位。入口统一回退，建卡时才能以引用发表。
+        if not (reply_to or "").strip() and isinstance(metadata, dict):
+            reply_to = str(metadata.get("reply_to_message_id") or "").strip() or None
         # v2.0.11 P0：同 chat 帧串行化——建卡/定稿的挂起窗口内，后续帧在锁上
         # 排队而非并发进建卡分支；锁内 active_state 复查即双重检查。
         async with self._chat_lock(chat_id):
@@ -238,6 +276,9 @@ class FrameComposer:
                 return None  # CH_PLAIN → 原生
             except Exception as exc:  # noqa: BLE001 — 降级红线：任何失败走原生
                 self._degrade(chat_id, "send", exc)
+                # v2.0.32（P0-2）：降级瞬间把远端卡优雅收口（footer+关流式），
+                # 消灭「降级后远端卡永久流式态」跑马灯。
+                await self._seal_degraded_card(chat_id)
                 return None
 
     # ── reasoning 流回灌（v2.0.7，插件 stream-hook 守护线程 → 事件循环）───
@@ -416,6 +457,8 @@ class FrameComposer:
                 return await self._patch_answer(st, content)
             except Exception as exc:  # noqa: BLE001 — 降级红线：任何失败走原生
                 self._degrade(chat_id, "edit", exc)
+                # v2.0.32（P0-2）：同 send 降级路径——远端卡优雅收口。
+                await self._seal_degraded_card(chat_id)
                 return None
 
     # ── native streaming 帧通道（v2.0.13，Task 18 P1-B）──────────────────────
@@ -571,6 +614,8 @@ class FrameComposer:
                 return True
             except Exception as exc:  # noqa: BLE001 — 降级红线：native 帧失败回落
                 self._degrade(chat_id, "stream_frame", exc)
+                # v2.0.32（P0-2）：同 send/edit 降级路径——远端卡优雅收口。
+                await self._seal_degraded_card(chat_id)
                 return False
 
     async def _absorb_status_lines(self, st: CardTurnState, lines: list[str]) -> None:
@@ -588,8 +633,8 @@ class FrameComposer:
         self._migrate_tool_durations(st, st.status_lines, merged)
         new_times = _reconcile_line_times(st.status_lines, st.line_times, merged)
         self._attach_pending_durations(st, st.status_lines, merged)
-        st.status_lines = merged[-12:]
-        st.line_times = new_times[-12:]
+        st.status_lines = merged
+        st.line_times = new_times
         await self._patch_status(st)
 
     async def _on_stream(self, chat_id: str, content: str, *, reply_to: str | None = None) -> SendResult | None:
@@ -609,7 +654,7 @@ class FrameComposer:
         # v2.0.5：暂存行过同一套合并语义（幂等/pending→preview 取代/思考累积），
         # 否则快照式暂存会把同一次调用的 pending 与 preview 双双带进首卡面板。
         prev = self._states.get(chat_id)
-        raw_pending = list(prev.pending_status)[-12:] if prev is not None else []
+        raw_pending = list(prev.pending_status) if prev is not None else []
         # v2.0.6：暂存行先过同一套逻辑分段（每条暂存可能是多段快照，
         # 围栏块保持一体），再统一合并——与活跃卡片路径语义一致。
         staged: list[str] = []
@@ -659,6 +704,8 @@ class FrameComposer:
         st.seq = 0
         st.created_at = time.monotonic()
         st.last_activity = time.monotonic()
+        # v2.0.32（P1-3 方案B）：新卡即新流式会话，续期计时从建卡起算。
+        st.stream_session_at = time.monotonic()
         st.finalized = False
         st.degraded = False
         # v2.0.26：clarify 暂停族字段随回合重置（prev 复用连续性——上一回合
@@ -684,6 +731,7 @@ class FrameComposer:
                 lambda seq: client.cardkit_stream_element(
                     card_id, _answer_element_id(), st.answer_text, sequence=seq),
                 what="create:answer-seed",
+                reopen=self._reopen_closure(st),
             )
         _logger.info(
             "composer: card created chat=%s card=%s msg=%s status_lines=%d",
@@ -698,6 +746,53 @@ class FrameComposer:
         await self._stream_answer(st)
         return SendResult(success=True, message_id=st.card_message_id)
 
+    # ── 200850 流式会话治理（v2.0.32，审计 P0-1/P1-3 方案B）─────────────
+    def _reopen_closure(self, st: CardTurnState) -> Callable[[int], Any] | None:
+        """构造 settings streaming_mode:true 重开闭包（200850 自愈/主动续期共用）.
+
+        client 缺失返回 None（seq.py 保持旧语义原样上抛）。永不抛异常。
+        """
+        client = self._get_client()
+        if client is None or not st.card_id:
+            return None
+
+        def _reopen(seq: int) -> Any:
+            return client.cardkit_reopen_streaming(st.card_id, sequence=seq)
+
+        return _reopen
+
+    async def _renew_stream_if_due(self, st: CardTurnState) -> None:
+        """主动续期（P1-3 方案B，用户确认）：会话龄 ≥540s 先重开再更新.
+
+        官方 ~10min 流式会话寿命（生产实证 11-07 两起 200850），长回合在
+        第 10 分钟撞墙 → 整回合降级纯文本。主流程预防：下一帧更新前发现
+        会话将到期，先 settings 重开（seq+1 消耗，跳号允许 s98），把寿命
+        归零。续期失败仅 INFO（预防性步骤；真撞 200850 时
+        call_with_seq_recovery 的重开自愈仍闭环，双层同链）。置
+        stream_session_at=now 防止每帧重复尝试（退避语义）。
+        """
+        if not st.card_id or st.stream_session_at <= 0:
+            return
+        if time.monotonic() - st.stream_session_at < _STREAM_RENEW_AGE_SEC:
+            return
+        reopen = self._reopen_closure(st)
+        if reopen is None:
+            return
+        try:
+            st.seq += 1
+            await reopen(st.seq)
+            st.stream_session_at = time.monotonic()
+            _logger.info(
+                "composer: streaming session renewed card=%s age>=%.0fs",
+                str(st.card_id)[:12], _STREAM_RENEW_AGE_SEC,
+            )
+        except Exception:  # noqa: BLE001 — 预防性续期失败不阻断本帧更新
+            st.stream_session_at = time.monotonic()
+            _logger.info(
+                "composer: streaming renew skipped card=%s",
+                str(st.card_id)[:12], exc_info=True,
+            )
+
     async def _stream_answer(self, st: CardTurnState) -> None:
         # v2.0.17：空 content 守卫——飞书 stream_element 的 content 必填非空
         # （s152 真飞书探针 2026-10-14：content="" → 99992402 field validation
@@ -710,6 +805,8 @@ class FrameComposer:
         client = self._get_client()
         if client is None:
             raise RuntimeError("card client unavailable")
+        # v2.0.32（P1-3 方案B）：会话将到期先主动续期（主流程预防）。
+        await self._renew_stream_if_due(st)
         st.seq += 1
         st.last_activity = time.monotonic()
         await call_with_seq_recovery(
@@ -717,6 +814,7 @@ class FrameComposer:
             lambda seq: client.cardkit_stream_element(
                 st.card_id, _answer_element_id(), st.answer_text, sequence=seq),
             what="stream:answer",
+            reopen=self._reopen_closure(st),
         )
 
     async def _on_progress(self, chat_id: str, cls: ClassifyResult, *, reply_to: str | None = None) -> SendResult | None:
@@ -777,8 +875,8 @@ class FrameComposer:
         if merged is None:
             return SendResult(success=True, message_id=st.card_message_id)
         new_times = _reconcile_line_times(st.status_lines, st.line_times, merged)
-        st.status_lines = merged[-12:]
-        st.line_times = new_times[-12:]
+        st.status_lines = merged
+        st.line_times = new_times
         await self._patch_status(st)
         return SendResult(success=True, message_id=st.card_message_id)
 
@@ -802,12 +900,15 @@ class FrameComposer:
         # v2.0.24：首个状态行到达时全量更新补插面板（懒渲染，s172 实证）；
         # 此处 status_lines 恒非空（调用点均已过 merge 非空门），面板必在。
         st.panel_on_card = _card_has_panel(card)
+        # v2.0.32（P1-3 方案B）：全量更新同样打在流式会话上，到期先续期。
+        await self._renew_stream_if_due(st)
         st.seq += 1
         st.last_activity = time.monotonic()
         await call_with_seq_recovery(
             st,
             lambda seq: client.cardkit_update(st.card_id, card, sequence=seq),
             what="update:status",
+            reopen=self._reopen_closure(st),
         )
 
     async def _finalize(self, st: CardTurnState, content: str) -> SendResult:
@@ -823,6 +924,20 @@ class FrameComposer:
         st.finalized = True
         if content:
             st.answer_text = content
+        # 网关最终预影搬运（show_reasoning=true 时最终 response 最前是推理块）：
+        # 与内置飞书一致的“定稿一次性补”语义——推理收进折叠面板，不留答案正文。
+        # 剥出的推理文本以 💬 思考行并入面板（渲染层按轮次分组 + markdown 渲染）。
+        try:
+            clean_answer, reasoning_text = _extract_reasoning_block(st.answer_text or "")
+            if reasoning_text:
+                st.answer_text = clean_answer
+                row = f"{_THINKING_PREFIX} {reasoning_text}"
+                # 避免与面板里已有的同文思考行重复（与网关进度气泡的中继去重同语义）
+                if row not in st.status_lines:
+                    st.status_lines.append(row)
+                    st.line_times.append(time.monotonic())
+        except Exception:  # noqa: BLE001 — 推理搬运纯装饰，失败维持原答案
+            _logger.debug("composer: reasoning block relocate skipped chat=%s", st.chat_id, exc_info=True)
         st.last_activity = time.monotonic()
         await finalize_card(
             client, st, answer_element_id=_answer_element_id(),
@@ -830,6 +945,8 @@ class FrameComposer:
             footer_show_label=self._footer_show_label(),
             panel_title=_panel_title(st.status_lines, elapsed_ms=_turn_elapsed_ms(st)),
             panel_expanded=self._panel_expanded(),
+            model_name=self._resolve_footer_model(st.chat_id),
+            reopen=self._reopen_closure(st),
         )
         _logger.info(
             "composer: card finalized chat=%s card=%s answer_len=%d status_lines=%d",
@@ -937,6 +1054,44 @@ class FrameComposer:
             chat_id, where, exc,
         )
 
+    async def _seal_degraded_card(self, chat_id: str) -> None:
+        """v2.0.32（审计 P0-2）：降级瞬间优雅收口远端卡（跑马灯永挂根治）.
+
+        事故实证（11-07 12:11:08 / 15:18:35）：200850 撞墙 → _degrade 只置本端
+        旗标，远端卡 streaming_mode 仍开、spinner 永挂，用户手动删卡才消失。
+        本方法与看门狗 seal 同款语义：复用 finalize_card（answer 终值 + 页脚 +
+        关流式 + 摘要），给用户一个体面的终态卡；后续帧走原生文本，内容永不丢。
+        与降级同锁（调用点均在 chat 锁内），远端 API 失败仅 debug——本端已
+        停止消费该卡，官方 ~10min 流式会话自愈为最终防线，主链不依赖。
+        """
+        st = self._states.get(chat_id)
+        if st is None or not st.card_id:
+            return  # 占位/无卡降级（如 client 缺失）无远端卡可收口
+        client = self._get_client()
+        if client is None:
+            return
+        try:
+            from .finalize import finalize_card
+
+            await finalize_card(
+                client, st, answer_element_id=_answer_element_id(),
+                footer_fields=self._footer_fields(),
+                footer_show_label=self._footer_show_label(),
+                panel_title=_panel_title(st.status_lines, elapsed_ms=_turn_elapsed_ms(st)),
+                panel_expanded=self._panel_expanded(),
+                model_name=self._resolve_footer_model(st.chat_id),
+                reopen=self._reopen_closure(st),
+            )
+            _logger.info(
+                "composer: degraded card sealed chat=%s card=%s",
+                chat_id[:12], str(st.card_id)[:12],
+            )
+        except Exception:
+            _logger.debug(
+                "composer: degrade seal skipped card=%s",
+                str(st.card_id)[:12], exc_info=True,
+            )
+
     # ── 孤儿卡看门狗（v2.0.21，审计 R1）───────────────────────────────────
     def _spawn_watchdog(self, chat_id: str) -> None:
         """建卡后武装看门狗定时器（见 _watchdog_due；重复武装无害——复查挡）.
@@ -973,7 +1128,7 @@ class FrameComposer:
                 # 保持监视（resume 后 _arm_watchdog 重新武装由帧路径承接）。
                 self._arm_watchdog(chat_id)
                 return
-            if time.monotonic() - st.last_activity >= _WATCHDOG_IDLE_SEC:
+            if time.monotonic() - st.last_activity >= self._watchdog_idle_sec():
                 asyncio.ensure_future(self._watchdog_seal(chat_id))
             else:
                 # 回合仍活跃（tick/快照帧持续刷新 last_activity）——再等一个周期
@@ -993,9 +1148,11 @@ class FrameComposer:
 
         不误伤正常回合：工具执行期网关进度气泡（accumulate 模式 edit_interval
         周期快照）/native interim tick 持续重发刷新 last_activity；429 冷却
-        60s < 阈值；到期回调静默不达标时重新武装。
+        60s < 阈值；到期回调静默不达标时重新武装。v2.0.32（P1-1）：阈值
+        120s → 300s 可配置（11-08 16:05 压缩期误封实证——回合存活、网关
+        上下文压缩 300s+ 静默被误判孤儿；300s 与压缩首个检查点同量级）。
 
-        触发（静默 ≥120s 且未终态）：复用 finalize_card 优雅落定（footer+
+        触发（静默 ≥ 阈值且未终态）：复用 finalize_card 优雅落定（footer+
         关流式；空 answer 合法终态），状态置 degraded+finalized——后续帧若
         真到来：native 路径 active_state None → 建新卡承载（内容永不丢），
         edit 灰度路径 super().edit_message 官方原生 PATCH 兑底。装饰性
@@ -1006,7 +1163,8 @@ class FrameComposer:
                 st = self._states.get(chat_id)
                 if st is None or st.finalized or st.degraded:
                     return
-                if time.monotonic() - st.last_activity < _WATCHDOG_IDLE_SEC:
+                idle_sec = self._watchdog_idle_sec()
+                if time.monotonic() - st.last_activity < idle_sec:
                     return  # 双保险：ensure_future 窗口内回合恢复活跃
                 st.degraded = True
                 st.finalized = True
@@ -1022,6 +1180,7 @@ class FrameComposer:
                         footer_show_label=self._footer_show_label(),
                         panel_title=_panel_title(st.status_lines, elapsed_ms=_turn_elapsed_ms(st)),
                         panel_expanded=self._panel_expanded(),
+                        reopen=self._reopen_closure(st),
                     )
                 except Exception:
                     _logger.debug(
@@ -1031,7 +1190,7 @@ class FrameComposer:
                 _logger.warning(
                     "composer: watchdog sealed idle card chat=%s card=%s idle>=%.0fs "
                     "(no finalize frame — likely out-of-turn notice)",
-                    chat_id[:12], str(st.card_id)[:12], _WATCHDOG_IDLE_SEC,
+                    chat_id[:12], str(st.card_id)[:12], idle_sec,
                 )
         except Exception:
             _logger.debug("composer: watchdog failed chat=%s", chat_id, exc_info=True)
@@ -1062,6 +1221,20 @@ class FrameComposer:
             return bool(self._config.footer_show_label)  # type: ignore[union-attr]
         except Exception:  # noqa: BLE001
             return False
+
+    def _resolve_footer_model(self, chat_id: str) -> str | None:
+        """v2.0.31：页脚 model 字段取会话实际模型——/model 切换在 config 之外.
+
+        注入的 model_resolver（adapter 会话存根）优先；未注入/返回空 →
+        None → finalize 回退官方 _resolve_gateway_model（config 单一事实源）。
+        """
+        try:
+            resolver = getattr(self, "_model_resolver", None)
+            if resolver is not None:
+                return resolver(chat_id) or None
+        except Exception:  # noqa: BLE001 — 页脚装饰字段，失败回退 config 值
+            _logger.debug("composer: session model resolve failed chat=%s", chat_id, exc_info=True)
+        return None
 
     def _panel_expanded(self) -> bool:
         """面板展开态（v2.0.16 面板收口重建用；与流式骨架同源同默认）。"""
@@ -1170,6 +1343,51 @@ def _is_progress_frame_text(text: str) -> bool:
     return True
 
 
+# ── 网关推理预影搬运（show_reasoning=true 定稿一次性补）─────────────────────
+def _extract_reasoning_block(text: str) -> tuple[str, str | None]:
+    """从最终 answer 中剥出网关推理预影，返回 ``(clean_answer, reasoning_text)``。
+
+    网关在回路结束时把最后一次推理拼在正文最前（`run_turn_persistence._hmwa_prepend_reasoning`），
+    格式由 `locales/gateway.reasoning.block` 的当前语言模板决定：
+    - en: ``💭 **Reasoning:**\n```\n{reasoning}\n```\n\n{response}``
+    - zh: ``💭 **推理：**\n```\n{reasoning}\n```\n\n{response}``
+    另外两种显示风格（reasoning_style=blockquote/subtext）只是把那段推理
+    包在引用/次级文本里再拼正文，与 code 块保持一致的 peel 语义。
+
+    本解析只在“块出现在回答最前方且围栏闭合”时触发：
+    - 抑制正文自身含 markdown 分隔块而误伤（正文里只有内容，不会有
+      ``💭 **推理：**`` 块头在第 0 行）；
+    - 中英双语模板同款识别；
+    - 多语言未来模板改文案时，下版随 Hermes 更新跟上即可（保守失败方向
+      是不动正文，推理留在 answer，内容永不丢）。
+    永不抛异常；未命中时原样返回。
+    """
+    try:
+        t = (text or "").lstrip()
+        if not t.startswith("💭"):
+            return text, None
+        lines = t.splitlines()
+        if not lines:
+            return text, None
+        head = lines[0].strip()
+        if "推理" not in head and "Reasoning" not in head:
+            return text, None
+        # 代码块风格：第二行应为 ```
+        rest = "\n".join(lines[1:]).strip()
+        if not rest.startswith("```"):
+            return text, None
+        end = rest.find("\n```")
+        if end < 0:
+            return text, None
+        reasoning = rest[3:end].strip()
+        if not reasoning:
+            return text, None
+        clean = rest[end + 4:].strip()
+        return clean, reasoning
+    except Exception:  # noqa: BLE001 — 推理搬运纯装饰，失败维持原文
+        return text, None
+
+
 def _split_native_composite(text: str) -> tuple[str, list[str]]:
     """拆 hermes native 复合帧：``{answer}`` + 分隔符 + ``{工具进度行}``.
 
@@ -1211,6 +1429,18 @@ def _split_native_composite(text: str) -> tuple[str, list[str]]:
         if not head or not tail:
             return text, []
         if _is_progress_frame_text(tail):
+            return head, split_progress_segments(tail) or [tail]
+        # 兜底清洗（流式工具双贴根因）：分隔符存在即官方复合帧信号；
+        # 严格语法对新工具/中文动词连结符变异的尾行会整帧回滚为正文，
+        # 答案区被工具行污染、面板又被独立进度气泡线签一份。
+        # 这层只在尾段已有“emoji 工具样式行”时触发拆分，
+        # 纯正文的 markdown 分隔线不会命中（无 emoji 首行）。
+        tail_lines = [ln for ln in tail.splitlines() if ln.strip()]
+        if any(_is_named_tool_line(ln.strip()) for ln in tail_lines) or (
+            tail_lines and sum(1 for ln in tail_lines if _EMOJI_RE.match(ln.strip())) >= 1
+            # 至少一半行是 emoji 开头，视为工具进度尾巴而非正文段落
+            and sum(1 for ln in tail_lines if _EMOJI_RE.match(ln.strip())) * 2 >= len(tail_lines)
+        ):
             return head, split_progress_segments(tail) or [tail]
         return text, []
     except Exception:  # noqa: BLE001 — 拆分纯装饰，失败整体按正文

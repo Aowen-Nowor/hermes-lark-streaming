@@ -61,15 +61,18 @@ class TestUpgradePlainToProgress:
         assert upgraded.kind == "tool"
 
     async def test_no_upgrade_for_long_text(self, runner):
-        """长文本（>300 字符）不是进度行 → 不升格（cron 长答案保护）。"""
+        """超长文本（>4000 字符）不是进度行 → 不升格（整页答案保护）。
+        v2.0.31 起 300 上限被回合内宽吸收取代，仅保留 4000 兜底。"""
         session = await runner.start_message("建卡。")
-        long_text = "✅ " + "x" * 400
+        long_text = "✅ " + "x" * 4000
         assert _upgrade_plain_to_progress(runner.composer, session.chat_id, long_text) is None
 
     async def test_no_upgrade_for_plain_prose(self, runner):
-        """普通无 emoji 短文本 → 不升格。"""
+        """普通无 emoji 短文本：v2.0.31 回合内宽吸收——活跃卡在场也升格进面板
+        （route-trace 实锤 `🔧 Editing ...` 等超长工具行漏启发式 → 双贴）；
+        反之无活跃卡则维持原分类（plain）。"""
         session = await runner.start_message("建卡。")
-        assert _upgrade_plain_to_progress(runner.composer, session.chat_id, "这是一句普通的话") is None
+        assert _upgrade_plain_to_progress(runner.composer, session.chat_id, "这是一句普通的话") is not None
 
     async def test_finalized_card_still_upgrades(self, runner):
         """已定稿卡片 + 进度文本 → 仍升格（v2.0.4：下一个 _on_progress 暂存/建新卡；
@@ -143,12 +146,12 @@ class TestProgressSnapshotMerge:
         assert st.status_lines == ["💬 思考第一段", '🔧 a："x"']
 
     async def test_status_lines_capped_at_12(self, runner):
-        """快照超过 12 行 → 保留最近 12 行。"""
+        """面板不再 12 行截断（内置发啥收啥）；200 元素硬上限兜底。"""
         session = await runner.start_message("建卡。")
         snapshot = "\n".join(f"🔧 tool{i}" for i in range(20))
         await runner.send_raw(snapshot, {"_interim_send": True})
         st = runner.get_state(session)
-        assert len(st.status_lines) == 12
+        assert len(st.status_lines) == 20
         assert st.status_lines[-1] == "🔧 tool19"
 
     async def test_progress_before_card_creates_card_and_merges(self, runner):

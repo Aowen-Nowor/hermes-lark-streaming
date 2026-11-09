@@ -27,8 +27,8 @@ dependencies = [
     #    connect for 22 minutes in production on 2026-07-21. hermes itself
     #    pins lark-oapi==1.6.8 (feishu extra); this floor + the startup check
     #    (plugin/__init__.py _check_lark_oapi_floor) cover hand-managed envs.
-    "lark-oapi>=1.6.4",
-    "PyYAML>=6.0",
+    "lark-oapi>=1.6.4,<2.0",
+    "PyYAML>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
@@ -54,7 +54,7 @@ version = {attr = "hermes_lark_streaming.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["cardkit*", "feishu*", "config*", "aowen*", "plugin*", "composer*"]
+include = ["cardkit*", "feishu*", "config*", "plugin*", "composer*"]
 
 [tool.setuptools.package-data]
 hermes_lark_streaming = ["plugin.yaml"]

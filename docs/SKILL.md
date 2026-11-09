@@ -62,7 +62,6 @@ plugins:
 
 ```yaml
 feishu_streaming:
-  native_streaming: true        # native 帧通道（false 回 edit-based）
   oneshot_cards: true           # 回合外投递卡片化
   card_ttl_sec: 1800            # 活跃状态 TTL（下限 60 钳制）
   footer_fields:                # 页脚字段（默认 status/elapsed/model）
@@ -127,7 +126,7 @@ export FEISHU_E2E_APP_ID=cli_xxx FEISHU_E2E_APP_SECRET=xxx FEISHU_E2E_CHAT_ID=oc
 **升级**（已有安装，拉新版本）：
 ```bash
 cd ~/.hermes/plugins/hermes-lark-streaming
-git fetch --tags && git checkout v2.0.29       # 按版本 checkout tag；或 hermes plugins update
+git fetch --tags && git checkout v2.0.32       # 按版本 checkout tag；或 hermes plugins update
 <VENV_PYTHON> -m py_compile $(git diff --name-only HEAD@{1} HEAD | grep '\.py$')  # 语法门禁
 find . -name __pycache__ -type d -prune -exec rm -rf {} +   # 清缓存（热替换旧字节码必做）
 pkill -f 'python -m gateway.run'; sleep 3; rm -f ~/.hermes/gateway.lock
@@ -227,7 +226,7 @@ hermes gateway restart
 | 启动即退、无日志 | `~/.hermes/gateway.lock` 残留 | 删锁重启 |
 | SSH 断开后进程消失 | 未用 `setsid` 脱离会话 | 用第 2 节原样命令 |
 | 插件加载了但 API 全 404/attribute error | lark-oapi < 1.4.24（无 async cardkit） | 升级 lark-oapi |
-| **装完发现是 V1（kind: standalone / 有 patching/ 目录）** | 安装源不是 V2 正式版 | 卸载后按第 1 节重装 + 第 5 节 checkout v2.0.29 tag；V1 用户升级见第 6 节 |
+| **装完发现是 V1（kind: standalone / 有 patching/ 目录）** | 安装源不是 V2 正式版 | 卸载后按第 1 节重装 + 第 5 节 checkout v2.0.32 tag；V1 用户升级见第 6 节 |
 | 卡片建出来了但旧观感/字号不对 | `card_style` 配置残留（完全 opt-in） | 删掉该配置段并重启，或按 README 配置 |
 | 密码 SSH 登不上 | 服务器 sshd 加固为仅公钥 | 用密钥认证（paramiko `pkey=` / `ssh -i`） |
 | 改了代码行为不变 | `__pycache__` 旧字节码 | 清缓存重启（第 5 节命令） |

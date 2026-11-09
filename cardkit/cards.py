@@ -47,16 +47,9 @@ _ELEMENT_LIMIT_MARGIN = 5
 # 标题/图标解析见 tool_icons.py（V1 state/tooluse.py 移植）。
 
 
-# v2.0.8：单条思考正文显示上限（V1 _REASONING_DISPLAY_LIMIT 同款）
-_REASONING_DISPLAY_LIMIT = 2000
-
-
-def _truncate_reasoning_body(text: str) -> str:
-    """思考正文截断（V1 elements._truncate_reasoning 同语义）."""
-    text = (text or "").strip()
-    if len(text) <= _REASONING_DISPLAY_LIMIT:
-        return text
-    return text[:_REASONING_DISPLAY_LIMIT] + f"……（已截断，共 {len(text)} 字）"
+# v2.0.8：单条思考正文显示上限（随面板收掉的第二刀，保留飞书硬限制那层兜着）
+# 之前是 V1 _REASONING_DISPLAY_LIMIT 经济同款，与内置“发啥收啥”是重复截断——
+# 网关侧 _hmwa_prepend_reasoning 已先收过一次（推理只贴 15 行），插件不再二次截断。
 
 
 def _round_elapsed_ms(lines: list[str], line_times: list[float]) -> dict[int, float]:
@@ -175,7 +168,9 @@ def _render_status_children(
             body = clean or text[len(_THINKING_PREFIX):].strip() or text
             # v2.0.12：思考正文走 lark_md 渲染（**bold** 等 markdown 语义生效），
             # 命令摘要仍走 plain_text（命令非 markdown 语义，见 _render 注释）。
-            detail = _build_reasoning_body_detail(_truncate_reasoning_body(body))
+            # 内置发啥收啥：推理正文不再插件侧二次截断（网关侧已收 15 行），
+            # 正文靠飞书 200 元素硬上限兜底。
+            detail = _build_reasoning_body_detail(body)
             if detail is not None:
                 children.append(detail)
             continue
@@ -419,6 +414,6 @@ def build_streaming_card_v2(
         "body": {"elements": elements},
     }
     # v2.0.9 P2-5：200 元素上限安全网接线（此前函数定义+导出但从未调用）。
-    # 正常状态 ≤12 行 ≈ 30 元素，远低于阈值；裁剪仅在异常膨胀时生效
-    # （裁最旧面板子项 + 「⚡ 还有 N 项已折叠」提示），answer/页脚不裁。
+    # 这层保留——飞书硬限制在，没这道卡片建不出来；面板 12 行上限是抢跑的布局，
+    # 已收掉，由这层兜底。
     return _enforce_card_element_limit(card)

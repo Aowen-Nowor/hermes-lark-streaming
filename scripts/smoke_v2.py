@@ -162,12 +162,6 @@ def level3(hermes_root: str) -> None:
     from hermes_lark_streaming.plugin import clarify  # noqa: F401
 
     check("clarify 模块导入", True)
-    from hermes_lark_streaming.aowen import (  # noqa: F401
-        build_status_card,
-        handle_pre_gateway_dispatch,
-    )
-
-    check("aowen 模块导入（零 controller 依赖）", True)
     from hermes_lark_streaming.plugin import (  # noqa: F401
         check_lark_oapi_floor,
         ensure_streaming_config,

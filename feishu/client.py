@@ -106,6 +106,9 @@ CARDKIT_ELEMENT_LIMIT_DIRECT = 300305  # 直报码: 卡片元素数量超限（c
 CARDKIT_SCHEMA_ERROR = 300315  # 卡片 Schema 非法属性 (unknown property) OR element not found for insert_before
 CARDKIT_STREAMING_CLOSED = 300309  # 卡片流式模式已关闭
 CARDKIT_SEQUENCE_CONFLICT = 300317  # sequence 冲突
+# v2.0.32（审计 P0-1/P1-3）：流式会话超时——官方 ~10min 流式会话寿命到期后 stream_element 必返回此码（生产实证：11-07 12:01 建卡 → 12:11:08 必现 600s；15:08 建卡 → 15:18:35 同族）。
+# 官方恢复动作（开放平台 cardkit 文档，审计 R5 核对）= settings streaming_mode:true 同卡重开，sequence 跳号允许（s98 真飞书实证）。
+CARDKIT_STREAMING_TIMEOUT = 200850
 CARDKIT_ELEMENT_NOT_FOUND = 300313  # 元素不存在（add_elements 后服务端尚未持久化时的竞态）
 CARDKIT_ELEMENT_NOT_FOUND_ALT = 300314  # delete_elements 不存在的元素
 MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
@@ -126,6 +129,10 @@ CARDKIT_TRANSIENT_CODES = {
 _TRANSIENT_RETRY_DELAYS = (0.1, 0.3, 0.6)  # 3 次重试，递增延迟
 _TRANSIENT_MAX_RETRIES = len(_TRANSIENT_RETRY_DELAYS)
 
+# v2.0.32（审计 P2）：限频（99991400）与普通瞬态错误分道退避——0.1/0.3/0.6 对限频窗口太短（三连快重试只会继续撞墙然后放弃 → 整回合降级）；流式更新官方 10 QPS/卡豁免，能撞到限频的是 create/batch 突发，秒级退避足够等过窗口。
+_RATE_LIMIT_RETRY_DELAYS = (1.0, 3.0, 6.0)
+_RATE_LIMIT_CODE = 99991400
+
 _ELEMENT_NOT_FOUND_RETRY_DELAYS = (0.2, 0.2, 0.2)
 _ELEMENT_NOT_FOUND_MAX_RETRIES = len(_ELEMENT_NOT_FOUND_RETRY_DELAYS)
 
@@ -144,6 +151,10 @@ def is_schema_error(e: "FeishuAPIError") -> bool:
     if _RE_ELEMENT_NOT_FOUND.search(str(e)):
         return False
     return True
+
+def is_streaming_timeout_error(e: "FeishuAPIError") -> bool:
+    """判断是否为流式会话超时（200850，官方恢复动作 = settings 重开）."""
+    return getattr(e, "code", None) == CARDKIT_STREAMING_TIMEOUT
 
 def is_element_not_found_error(e: "FeishuAPIError") -> bool:
     """判断 FeishuAPIError 是否为"元素不存在"错误。"""
@@ -223,19 +234,16 @@ class FeishuClient:
         for attempt in range(max_retries + 1):
             try:
                 result = await coro_factory()
-                # v1.1.0: Record successful API call
-                try:
-                    from ..aowen import record_api_call
-                    record_api_call(operation)
-                except Exception:
-                    _logger.debug("metrics: record_api_call failed", exc_info=True)
                 return result
             except FeishuAPIError as e:
                 last_error = e
                 if not _is_transient_error(e):
                     raise
                 if attempt < max_retries:
-                    delay = _TRANSIENT_RETRY_DELAYS[attempt]
+                    # v2.0.32：限频码用秒级退避，其余瞬态码维持亚秒级
+                    delays = (_RATE_LIMIT_RETRY_DELAYS if e.code == _RATE_LIMIT_CODE
+                              else _TRANSIENT_RETRY_DELAYS)
+                    delay = delays[attempt]
                     _logger.info(
                         "transient retry: %s attempt=%d/%d code=%s delay=%.2fs",
                         operation, attempt + 1, max_retries, e.code, delay,
@@ -294,12 +302,6 @@ class FeishuClient:
                     m = re.search(r'log_id["\']?\s*[:=]\s*["\']?([A-Za-z0-9]{20,})', err)
                     if m:
                         log_id = m.group(1)
-            # v1.1.0: Record API error metrics
-            try:
-                from ..aowen import record_api_error
-                record_api_error(code, operation)
-            except Exception:
-                _logger.debug("metrics: record_api_error failed", exc_info=True)
             raise FeishuAPIError(
                 _sanitize_message(f"{operation}: code={code}, msg={msg}"),
                 code,
@@ -594,6 +596,31 @@ class FeishuClient:
             self._check(resp, "cardkit_close_streaming")
 
         await self._retry_transient("cardkit_close_streaming", _do)
+
+    async def cardkit_reopen_streaming(
+        self,
+        card_id: str,
+        *,
+        sequence: int = 0,
+    ) -> None:
+        """重开流式会话（官方 200850 恢复动作：settings streaming_mode=true）.
+
+        v2.0.32（审计 P0-1/P1-3）：官方语义（开放平台 cardkit 文档，审计 R5 核对；s96/s98/s146 真飞书探针同族实证）——流式会话超时（200850
+        "card streaming timeout"）或主动关闭后，同一卡片实体（14 天有效期内）通过 settings 再次置 ``streaming_mode=true`` 即重开流式，
+        sequence 继续递增（跳号允许）。两个用途：
+        1. 事后自愈：stream_element 撞 200850 时 seq.py 调用本方法后重发；
+        2. 主动续期（P1-3 方案B）：会话龄逼近官方 ~10min 寿命前调用，防患于未然（主流程预防，非兜底）。
+        """
+        settings: dict[str, Any] = {"config": {"streaming_mode": True}}
+
+        async def _do():
+            body_builder = SettingsCardRequestBody.builder().settings(self._dumps(settings))
+            body_builder = body_builder.sequence(sequence)
+            request = SettingsCardRequest.builder().card_id(card_id).request_body(body_builder.build()).build()
+            resp = await self._client.cardkit.v1.card.asettings(request)
+            self._check(resp, "cardkit_reopen_streaming")
+
+        await self._retry_transient("cardkit_reopen_streaming", _do)
 
     async def cardkit_update_summary(
         self,

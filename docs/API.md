@@ -30,8 +30,7 @@ gateway:
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `streaming_panel_expanded` | bool | `false` | 流式期状态面板展开 |
-| `native_streaming` | bool | `true` | native streaming 通道：适配器声明官方 `SUPPORTS_NATIVE_STREAMING`，答案流走 `send_stream_frame` 原生帧（工具边界不封卡，单卡全回合）；`false` 回 edit-based 流 |
-| `oneshot_cards` | bool | `true` | 回合外正式投递一次性卡：cron 投递族（metadata `job_id`）→ build_cron_card 标题+溯源页脚；回合外 final（notify 无活跃卡）与 ≥200 字无标记长文 → build_gateway_card 静态卡；`false` 全部落回原生路径 |
+| `oneshot_cards` | bool | `true` | 回合外正式投递一次性卡：cron 投递族（metadata `job_id`）→ build_cron_card 标题+溯源页脚；回合外 final（notify 无活跃卡）与主动投递（无标记 plain 无活跃卡，短回复也收）→ build_gateway_card 静态卡；预览/进度帧（`expect_edits`/`_interim_send`）永不进一次性卡；`false` 全部落回原生路径 |
 | `clarify_suspend_sec` | float | `1.2` | clarify 暂停窗口秒数：finalize 帧窗口内等 `send_clarify` 确认边界 → 同卡续流；到期无确认 → 真落定（普通回合仅 footer 延迟窗口时长）；`0` = 关闭（clarify 前卡先完成、回调后开新卡） |
 | `print_strategy` | str | `"delay"` | 打字机策略（透传 CardKit streaming_config） |
 | `print_step` | int | `4` | 打字机步长 |

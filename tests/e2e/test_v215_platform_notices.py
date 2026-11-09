@@ -227,7 +227,6 @@ class _FakeClient:
 def composer():
     from hermes_lark_streaming.cardkit.cards import build_streaming_card_v2
     from hermes_lark_streaming.composer.engine import FrameComposer
-    from hermes_lark_streaming.plugin import tool_timing
 
     client = _FakeClient()
     comp = FrameComposer(
@@ -236,10 +235,7 @@ def composer():
         build_final_card=lambda **kw: {},
         config=None,
     )
-    tool_timing.reset_for_tests()
-    tool_timing.bind_composer(comp)
     yield comp
-    tool_timing.reset_for_tests()
 
 
 async def _settle() -> None:
@@ -353,9 +349,11 @@ class TestAdapterSendWiring:
         assert comp.handled[0][3].channel == CH_PROGRESS
         assert client.sent_cards == []
 
-    async def test_nonspecific_long_line_with_active_card_still_native(self, monkeypatch):
-        """非通知长文 + 活跃卡：维持既有语义（R3 不适用 → 原生 post）.
+    async def test_nonspecific_long_line_with_active_card_upgrades_to_panel(self, monkeypatch):
+        """v2.0.31 回合内宽吸收：非通知长文 + 活跃卡 → 升格进度进面板（双贴修复）.
 
+        route-trace 实锤 `🔧 Editing C:/...` 等带全路径工具行超启发式上限，
+        漏网落原生文本 → 面板+散文本双贴；活跃卡期一律吸收。
         mock 先例照抄 test_v210 TestStatusLane._stub：占位基类 send 换记录器."""
         import hermes_lark_streaming.plugin.adapter as adp
 
@@ -369,6 +367,5 @@ class TestAdapterSendWiring:
         client, comp = _WiringClient(), _WiringComposer(active=True)
         adapter = _wiring_adapter(client, comp)
         result = await adapter.send("oc_c", _long_nonspecific_emoji_line(), metadata=None)
-        assert result == "native-sentinel"
-        assert comp.handled == [] and client.sent_cards == []
-        assert len(native) == 1
+        assert result == "composer-sentinel"
+        assert comp.handled and client.sent_cards == [] and native == []

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 from ..cardkit.seq import call_with_seq_recovery
@@ -202,8 +203,15 @@ async def finalize_card(
     footer_show_label: bool = False,
     panel_title: str = "",
     panel_expanded: bool = True,
+    model_name: str | None = None,
+    reopen: Callable[[int], Any] | None = None,
 ) -> None:
-    """把活跃卡片转为终态（四步，见模块 docstring）。"""
+    """把活跃卡片转为终态（四步，见模块 docstring）。
+
+    v2.0.32：``reopen`` 为 settings streaming_mode:true 重开闭包（engine 注入），
+    answer 终值 patch 撞 200850（长回合流式会话超时）时由 call_with_seq_recovery
+    主流程自愈后重发——定稿是最后一刀，撞墙即弃会前功尽弃。
+    """
     client.cardkit_stream_element  # noqa: B018 — 提前触发 attribute 错误便于诊断
     state.seq += 1
     # v2.0.9 P0-1：三步定稿全部走 300317 自愈（answer 终值/页脚/关流式）
@@ -211,19 +219,21 @@ async def finalize_card(
     # （99992402，s152 真飞书探针定案）；纯工具回合 answer 为空是合法终态。
     # answer 元素骨架期无条件存在（空 content 占位），页脚 insert_before
     # 锚点不受影响。
+    # v2.0.32：answer 终值 patch 接入 200850 重开自愈（reopen 闭包）。
     if (state.answer_text or "").strip():
         await call_with_seq_recovery(
             state,
             lambda seq: client.cardkit_stream_element(
                 state.card_id, answer_element_id, state.answer_text, sequence=seq),
             what="finalize:answer",
+            reopen=reopen,
         )
     try:
         await _seal_footer(
             client, state,
             footer_fields=footer_fields,
             show_label=footer_show_label,
-            model_name=_resolve_model_name(),
+            model_name=model_name if model_name is not None else _resolve_model_name(),
         )
     except Exception:
         _logger.warning(

@@ -45,7 +45,7 @@ class TestRepoLayoutContract:
     def test_runtime_modules_live_in_plugin_package(self) -> None:
         """四个 hermes 集成层模块收进 plugin/（直接子级子包，加载器契约内）。"""
         plugin_dir = _REPO_ROOT / "plugin"
-        for name in ("adapter.py", "clarify.py", "reasoning_feed.py", "tool_timing.py"):
+        for name in ("adapter.py", "clarify.py"):
             assert (plugin_dir / name).is_file(), f"plugin/{name} missing"
 
     def test_root_init_reexports_register_surface(self) -> None:

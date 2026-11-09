@@ -42,7 +42,6 @@ from .test_v208_stream_quality import _FakeClient, _seed_active, _settle
 def composer():
     """v2.0.10 本地副本（fixture 不随模块导入注册；结构同 v208）."""
     from hermes_lark_streaming.cardkit.cards import build_streaming_card_v2
-    from hermes_lark_streaming.plugin import tool_timing
 
     client = _FakeClient()
     comp = FrameComposer(
@@ -51,10 +50,7 @@ def composer():
         build_final_card=lambda **kw: {},
         config=None,
     )
-    tool_timing.reset_for_tests()
-    tool_timing.bind_composer(comp)
     yield comp
-    tool_timing.reset_for_tests()
 
 # 官方 enumerations-for-icons 清单冻结样本（2026-10 抓取存档 /tmp/feishu_icons.md；
 # 215KB 全量 1141 token，此处固化本插件实际引用的 19 个作回归防线）

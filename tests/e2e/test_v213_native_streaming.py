@@ -258,7 +258,8 @@ class TestAdapterNativeSurface:
     def test_class_declares_native_streaming(self):
         from hermes_lark_streaming.plugin.adapter import FeishuStreamingAdapter
 
-        assert getattr(FeishuStreamingAdapter, "SUPPORTS_NATIVE_STREAMING", False) is True
+        # 回退 edit-based 流：与内置飞书一致，不再声明原生流式
+        assert getattr(FeishuStreamingAdapter, "SUPPORTS_NATIVE_STREAMING", True) is False
         assert hasattr(FeishuStreamingAdapter, "supports_native_streaming")
         assert hasattr(FeishuStreamingAdapter, "send_stream_frame")
 
@@ -281,7 +282,8 @@ class TestAdapterNativeSurface:
         adapter = self._bare_adapter()
         adapter._card_config = None
         adapter._card_client = object()  # 已初始化的 client
-        assert adapter.supports_native_streaming(chat_type="dm", metadata={}) is True
+        # 回退后一律 False（编辑流）
+        assert adapter.supports_native_streaming(chat_type="dm", metadata={}) is False
 
     def test_probe_respects_config_switch(self):
         """feishu_streaming.native_streaming: false → probe False（灰度回退）."""

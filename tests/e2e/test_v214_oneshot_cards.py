@@ -14,7 +14,7 @@ V1 曾以 monkey-patch _deliver_result 卡片化（patching/gateway.py:853），
 v2 移除补丁层后能力断档。
 
 修复：adapter._send_oneshot_card 三规则（R1 job_id / R2 回合外 final /
-R3 ≥200 字 plain）→ 一次性静态定稿卡（build_cron_card / build_gateway_card），
+R3 plain（与内置同款直发卡片化））→ 一次性静态定稿卡（build_cron_card / build_gateway_card），
 无状态不参与回合，降级红线回落原生路径。
 
 官方格式冻结源：cron/scheduler_delivery.py:2024-2031（包装头逐行镜像）。
@@ -249,7 +249,8 @@ class TestOneshotGates:
         adapter = _bare_adapter(client, comp)
         result = await adapter._send_oneshot_card(
             "oc_c", "短消息", None, classify_send("短消息", None))
-        assert result is None and client.sent_cards == []
+        # 与内置一致：短回复也卡片化（不再有 ≥200 门槛）
+        assert result is not None and len(client.sent_cards) == 1
 
     async def test_config_off_returns_none(self):
         client, comp = _FakeClient(), _FakeComposer()
@@ -305,13 +306,12 @@ class TestOneshotSendWiring:
         assert len(comp.handled) == 1
 
     async def test_send_reply_to_skips_oneshot(self):
-        """reply_to 语义（回复锚点）不适用一次性卡 → 直接进既有通道."""
+        """reply_to 用户消息锚点同样走一次性卡（引用发表，与内置回复同款）。"""
         client, comp = _FakeClient(), _FakeComposer()
         adapter = _bare_adapter(client, comp)
         meta = {"job_id": "j9", "notify": True}
         result = await adapter.send("oc_c", _WRAPPED, reply_to="om_anchor", metadata=meta)
-        assert result == "composer-sentinel"
-        assert client.sent_cards == [] and client.replies == []
+        assert result.success is True and result.message_id == "om_fake_reply1"
 
     async def test_send_short_plain_skips_oneshot(self):
         """短 plain（<200）维持既有路由（升格启发式 / 原生）——本例进 composer."""

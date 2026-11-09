@@ -18,7 +18,6 @@
   R7【P2】过期/重启后点澄清卡零反馈。修复：_expired_response 提示卡。
   R8【P2】footer.fields 畸形行静默消失。修复：逐行校验 + warning + 回落。
   R10【P3】两处 footer 默认字段对齐为 status/elapsed/model(+reasoning)。
-  R12【P3】reasoning_feed 冻结上限截断无标记。修复：「……（已截断）」。
 """
 
 from __future__ import annotations
@@ -36,7 +35,6 @@ from hermes_lark_streaming.composer.engine import FrameComposer
 from hermes_lark_streaming.composer.finalize import finalize_card
 from hermes_lark_streaming.config import Config
 from hermes_lark_streaming.plugin import clarify as clarify_mod
-from hermes_lark_streaming.plugin import reasoning_feed
 
 from .test_v213_native_streaming import _FullClient
 
@@ -331,71 +329,6 @@ class TestMdFenceAware:
 
     def test_split_short_text_unchanged(self):
         assert _split_long_text("short") == ["short"]
-
-
-# ---------------------------------------------------------------------------
-# R12 reasoning_feed 截断标记
-# ---------------------------------------------------------------------------
-
-
-class TestReasoningFeedTruncateMark:
-    def _flush_text(self, buffered: str) -> str:
-        """把 buffered 塞进 _flush_locked 可消费的 buf 结构，返回投递文本."""
-        delivered: list[str] = []
-
-        class _Composer:
-            def submit_progress_from_thread(self, chat: str, raw: str, *, final: bool = False) -> bool:
-                delivered.append(raw)
-                return True
-
-        reasoning_feed._BOUND.append(_Composer())
-        try:
-            buf = {"text": buffered, "sent": "", "last_delta": 0.0, "last_flush": 0.0,
-                   "lock": __import__("threading").Lock()}
-            reasoning_feed._flush_locked("chatX", buf, time.monotonic(), final=True)
-        finally:
-            reasoning_feed._BOUND.clear()
-        return delivered[0] if delivered else ""
-
-    def test_frozen_buffer_gets_truncate_mark(self):
-        text = "思考" * 1500  # 3000 字 > 2000 上限
-        raw = self._flush_text(text)
-        assert raw.startswith("\U0001f4ac ")
-        body = raw[len("\U0001f4ac "):]
-        assert body.endswith("……（已截断）")
-        assert len(body) < 2000  # 预留标记位，渲染层不二次截断
-
-    def test_normal_buffer_no_mark(self):
-        raw = self._flush_text("正常长度的思考内容")
-        assert "已截断" not in raw
-
-    def test_frozen_reflush_idempotent(self):
-        text = "思考" * 1500
-        buf = {"text": text, "sent": "", "last_delta": 0.0, "last_flush": 0.0,
-               "lock": __import__("threading").Lock()}
-        seen: list[str] = []
-
-        class _Composer:
-            def submit_progress_from_thread(self, chat: str, raw: str, *, final: bool = False) -> bool:
-                seen.append(raw)
-                return True
-
-        import hermes_lark_streaming.plugin.reasoning_feed as rf
-
-        class _Bind:
-            def __enter__(self):
-                rf._BOUND.append(_Composer())
-                return self
-
-            def __exit__(self, *a: object) -> None:
-                rf._BOUND.clear()
-
-        with _Bind():
-            rf._flush_locked("c", buf, time.monotonic(), final=True)
-            first = buf["sent"]
-            rf._flush_locked("c", buf, time.monotonic(), final=True)  # sent 相同 → 幂等
-        assert first.endswith("……（已截断）")
-        assert len(seen) == 1  # 第二次 flush 幂等跳过
 
 
 # ---------------------------------------------------------------------------

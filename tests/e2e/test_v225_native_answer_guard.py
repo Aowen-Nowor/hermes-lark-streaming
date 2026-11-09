@@ -217,10 +217,10 @@ class TestSplitNativeCompositeV225:
         assert p == ["🔍 Searching..."]
 
     def test_composite_tail_generic_emoji_line_not_split(self):
-        """复合尾含通用 emoji 行 → 不拆（内容留正文，方向安全）."""
+        """复合尾含通用 emoji 行 → 兜底拆（工具双贴根因：分隔符指示复合帧）."""
         a, p = _split_native_composite("答案\n\n---\n🌤️ 成都天气不错")
-        assert a == "答案\n\n---\n🌤️ 成都天气不错"
-        assert p == []
+        assert a == "答案"
+        assert p == ["🌤️ 成都天气不错"]
 
     def test_answer_internal_hr_with_cursor_not_split(self):
         """正文自带 markdown 分隔线 + 光标（interim 无进度形态）→ 整帧 answer."""

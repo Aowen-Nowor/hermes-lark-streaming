@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 _logger = logging.getLogger("hermes_lark_streaming")
@@ -82,7 +83,12 @@ except Exception:  # noqa: BLE001 — 纯 SDK / 卡片引擎独立使用 / 测�
 
 PLATFORM_NAME = "feishu-streaming"
 
-# ── 活跃适配器注册表（供 /aowen 状态卡等模块级设施获取运行状态）──────────
+# v2.0.32（审计 P2 内存卫生）：入站锚/session_key 缓存上限。键均为 chat_id，每项百字节级；
+# 无上限增长在长命网关进程里无意义地积累（退出的会话永不释放）。
+# 超限淘汰最旧一半（锚缓存按时间戳，session 表按插入序）——活跃会话远小于上限，淘汰不会触及。
+_ANCHOR_CACHE_MAX = 256
+
+# ── 活跃适配器注册表（供状态卡等模块级设施获取运行状态）────────────
 import weakref
 
 _ACTIVE_ADAPTERS: weakref.WeakSet[Any] = weakref.WeakSet()
@@ -168,20 +174,27 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
 
     PLATFORM_LABEL = "Feishu / Lark (Streaming Cards)"
 
-    # v2.0.13（Task 18 P1-B）：声明 hermes native streaming 能力（官方探测点
-    # gateway/stream_consumer_transport.py:_resolve_native_streaming:151-164
-    # 检查类常量 + supports_native_streaming probe）。开启后答案流帧走
-    # send_stream_frame（native 帧通道）：segment-break finalize 被官方吞掉
-    # （transport:389 ``finalize = finalize and is_turn_final``）且 native =
-    # cumulative transport（stream_consumer.py:906 ``_end_segment`` 直接
-    # return）→ 工具边界不再封卡，单卡全回合（多卡片同族缺陷的通道级根治；
-    # 事实先例：Task 18 取证 16:54 轮次——call#1 前奏被工具边界 seal 成独立卡）。
-    # 失败语义：任何帧 False/异常 → 官方禁用 native 回落 edit/send 现有链路
-    # （transport:399-426），降级红线官方契约保证。
-    SUPPORTS_NATIVE_STREAMING = True
+    # 回退原生流式（与内置飞书平台一致的 edit-based 流）：
+    # 原生帧通道的快照不含网关最终拼的推理预影，推理会被吞掉；
+    # edit-based 流的最终编辑是全量终值（含预影），才能进卡片收口搬运。
+    # 工具边界的“多卡片同族防御”由 composer 的 per-chat 帧串行化 + edit 路径兜底，
+    # 不再依赖原生通道的 cumulative 语义。
+    SUPPORTS_NATIVE_STREAMING = False
 
     def __init__(self, config: Any) -> None:
         super().__init__(config)
+        # v2.0.31 入站锚点存根：内置飞书的 _reply_anchor_for_event（base.py:158）
+        # 对自定义平台名（feishu-streaming ≠ feishu）不走 feishu 话题分支，
+        # 且网关进度/流式通道的 send() 实测 reply_to=None metadata=None
+        #（2026-11-07 anchor-trace 实锤 17:52:55）→ 建卡永远无锚直发。
+        # 与内置飞书行为对齐：入站事件到达时记下 message_id，出站 send()
+        # 无显式锚时回退最近入站锚（仅限无 metadata 的回合内帧；
+        # cron/notify 等带标记投递不回退，防错锚到旧用户消息）。
+        self._inbound_anchor: dict[str, tuple[str, float]] = {}
+        # v2.0.31 页脚 model 会话化：chat_id → session_key（入站时记录），
+        # 供 _resolve_session_model 查会话级 /model override。
+        self._session_keys: dict[str, str] = {}
+
         # v2.0.4（原服务器 v2.0.2 热补丁回流仓库）：平台身份对齐注册名。内置基类
         # 硬编码 Platform.FEISHU，使 source.platform(feishu) 与 adapter 注册键
         # (feishu-streaming) 错配：_owning_profile/_delivery_adapter_for 查不到
@@ -206,21 +219,11 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             build_card=self._card_factory.streaming,
             build_final_card=self._card_factory.final,
             config=self._card_config,
+            model_resolver=self._resolve_session_model,
         )
-        # v2.0.7：reasoning 隐藏流 → 面板思考行（第 N 轮）落点注册
-        try:
-            from .reasoning_feed import bind_composer
-
-            bind_composer(self._composer)
-        except Exception:  # 思考回灌是增强能力，失败不影响卡片主链（BLE 未启用，noqa 触发 RUF100）
-            _logger.debug("feishu-streaming: reasoning feed bind skipped", exc_info=True)
-        # v2.0.8：post_tool_call 官方钩子 → 单工具耗时（「Terminal (2.3 s)」）落点注册
-        try:
-            from .tool_timing import bind_composer as _bind_tool_timing
-
-            _bind_tool_timing(self._composer)
-        except Exception:  # 耗时是增强能力，失败不影响卡片主链
-            _logger.debug("feishu-streaming: tool timing bind skipped", exc_info=True)
+        # 不再注册 reasoning 隐藏流 / 工具耗时等增强钩子——
+        # 本插件定位与内置飞书平台一致：仅做消息→卡片封装。
+        # 这是全量恢复内置行为、去掉与上游的非必要耦合。
         _ACTIVE_ADAPTERS.add(self)
 
     # ── 初始化辅助 ──────────────────────────────────────────────────────
@@ -245,10 +248,14 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
                 f"feishu-streaming: built-in FeishuAdapter surface drift — missing: {missing}. "
                 "Refusing to start with a broken inheritance chain."
             )
-        if not hasattr(self, "_handle_card_action_event") and not hasattr(type(self), "_handle_card_action_event"):
+        # clarify/审批/选择器走内置 _CARD_ACTION_ROUTES 同步路由
+        # （_on_card_action_trigger），不再经 _handle_card_action_event 旁路；
+        # 探测路由表本体存在即可，缺失则 clarify 等交互卡回调会失配。
+        routes = getattr(super(), "_CARD_ACTION_ROUTES", None)
+        if routes is None:
             _logger.warning(
-                "feishu-streaming: built-in FeishuAdapter has no _handle_card_action_event "
-                "— clarify card callbacks will be inert on this hermes version"
+                "feishu-streaming: built-in FeishuAdapter has no _CARD_ACTION_ROUTES "
+                "— interactive card callbacks (clarify/approval/picker) may be inert on this hermes version"
             )
 
     def _get_card_client(self) -> Any:
@@ -265,7 +272,88 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         return self._card_client
 
     # ── 出站语义层重写 ──────────────────────────────────────────────────
+    def _resolve_outbound_anchor(
+        self, chat_id: str, reply_to: str | None, metadata: dict[str, Any] | None,
+    ) -> str | None:
+        """v2.0.31 入站锚回退（纯函数，可单测）.
+
+        进度/流式通道实测 send(reply_to=None, metadata=None)（anchor-trace
+        17:52:55）——metadata.reply_to_message_id 回路覆盖不了进度首帧。
+        与内置飞书"回复触发消息"同语义：无显式锚、且 metadata 为空
+        （回合内帧，非 cron/notify 投递）时，回退最近入站用户消息 ID。
+        10 分钟 TTL 防陈旧锚；om_ 前缀校验防合成 task_id 误锚。
+        """
+        if (reply_to or "").strip():
+            return reply_to
+        if metadata:
+            return None
+        # 防御：bare __new__ 构造（旧测试/独立使用）可能无该属性
+        cached = getattr(self, "_inbound_anchor", {}).get(chat_id)
+        if cached and (time.monotonic() - cached[1]) < 600 and cached[0].startswith("om_"):
+            return cached[0]
+        return None
+
+    async def _handle_message_with_guards(self, event: Any) -> None:
+        """v2.0.31 入站锚存根：记录触发消息 ID 供出站 send() 无锚时回退.
+
+        内置飞书的回复锚来自网关 _reply_anchor_for_event；本平台名
+        （feishu-streaming）不在其 feishu 分支内，且进度/流式通道实测
+        send(reply_to=None, metadata=None)——锚断在建卡前。此处对齐内置
+        语义：入站事件先记锚，再走基类管线（只加记录，不改任何路由）。
+        """
+        mid = str(getattr(event, "message_id", "") or "")
+        chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
+        if mid.startswith("om_") and chat_id:
+            self._inbound_anchor[chat_id] = (mid, time.monotonic())
+            # v2.0.32：超限淘汰最旧一半（长命网关进程内存卫生）
+            if len(self._inbound_anchor) > _ANCHOR_CACHE_MAX:
+                oldest = sorted(self._inbound_anchor,
+                                key=lambda k: self._inbound_anchor[k][1])
+                for k in oldest[: len(oldest) // 2]:
+                    self._inbound_anchor.pop(k, None)
+        # v2.0.31 页脚 model 会话化：记录本 chat 的 session_key（官方
+        # build_session_key 单一事实源；失败不影响入站管线）。
+        try:
+            from gateway.session import build_session_key
+
+            sk = str(build_session_key(event.source) or "")
+            if chat_id and sk:
+                self._session_keys[chat_id] = sk
+                # v2.0.32：超限淘汰最旧一半（dict 插入序即时间序）
+                if len(self._session_keys) > _ANCHOR_CACHE_MAX:
+                    for k in list(self._session_keys)[: len(self._session_keys) // 2]:
+                        self._session_keys.pop(k, None)
+        except Exception:  # noqa: BLE001 — 页脚装饰数据，尽力而为
+            _logger.debug("feishu-streaming: session key capture skipped", exc_info=True)
+        await super()._handle_message_with_guards(event)
+
+    def _resolve_session_model(self, chat_id: str) -> str | None:
+        """v2.0.31：页脚 model 字段取会话实际模型（/model override 优先）.
+
+        会话级 /model 切换持久化在 session store（gateway/session.py:1166
+        get_model_override），config.yaml 单一事实源看不到它。解析顺序：
+        会话 override.model → None（engine 回退 _resolve_gateway_model）。
+        """
+        sk = getattr(self, "_session_keys", {}).get(chat_id)
+        if not sk:
+            return None
+        try:
+            runner = getattr(self, "gateway_runner", None)
+            store = getattr(runner, "session_store", None) or getattr(self, "_session_store", None)
+            override = store.get_model_override(sk) if store is not None else None
+        except Exception:  # noqa: BLE001 — 页脚装饰字段，失败回退 config 值
+            _logger.debug("feishu-streaming: session model override lookup failed", exc_info=True)
+            return None
+        if isinstance(override, dict):
+            return str(override.get("model") or "").strip() or None
+        return None
+
     async def send(
+        self, chat_id: str, content: str, reply_to: str | None = None, metadata: dict[str, Any] | None = None,
+    ) -> Any:
+        return await self._send_impl(chat_id, content, reply_to, metadata)
+
+    async def _send_impl(
         self, chat_id: str, content: str, reply_to: str | None = None, metadata: dict[str, Any] | None = None,
     ) -> Any:
         from ..composer.classify import CH_PLAIN, classify_send
@@ -282,19 +370,30 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             if upgraded is not None:
                 cls = upgraded
                 _logger.debug("feishu-streaming: plain send upgraded to progress (progress lane)")
-        # v2.0.14：回合外正式投递 → 一次性静态定稿卡（cron 投递族 /
-        # 回合外 final / 长文 plain）。三规则见 _send_oneshot_card；
+        # 【锚点归一】Hermes 流式消费者把用户触发消息 ID 放在 metadata.reply_to_message_id
+        # （见 stream_consumer.py:266，initial_reply_to_id 回路），不是 send() 的 reply_to 形参。
+        # 回合建卡 _create_card 只认 reply_to 槽位 —— 从 metadata 回退出来，才能以引用发表卡片。
+        if not (reply_to or "").strip() and isinstance(metadata, dict):
+            reply_to = str(metadata.get("reply_to_message_id") or "").strip() or None
+        # 【入站锚回退】进度/流式通道实测无锚（anchor-trace 17:52:55 实锤）：
+        # 仅当 send 无显式锚、且 metadata 为空（回合内帧，非 cron/notify 投递）
+        # 时回退最近入站用户消息 ID——与内置飞书"回复触发消息"同语义。
+        reply_to = self._resolve_outbound_anchor(chat_id, reply_to, metadata)
+        # 回合外/用户会话定稿 → 一次性静态定稿卡（cron 投递族 /
+        # 回合外 final / 主动 plain）。三规则见 _send_oneshot_card；
         # 返回 None（不适用/降级）时维持下方既有路由，消息永不丢。
-        if reply_to is None:
-            try:
-                oneshot = await self._send_oneshot_card(chat_id, content, metadata, cls)
-            except Exception:  # 降级红线：任何失败走原生路径
-                _logger.warning(
-                    "feishu-streaming: oneshot card failed — native fallback", exc_info=True,
-                )
-                oneshot = None
-            if oneshot is not None:
-                return oneshot
+        # 回合回复带 reply_to=om_ 用户消息锚点时同样走卡：锚点 om_ 在 _send_oneshot_card
+        # 里用 reply_card 引用发表；短回复（emoji）无活跃卡时也兜底建卡，
+        # 不再被“短文本保持原生”门槛吞掉。
+        try:
+            oneshot = await self._send_oneshot_card(chat_id, content, metadata, cls, reply_to=reply_to)
+        except Exception:  # 降级红线：任何失败走原生路径
+            _logger.warning(
+                "feishu-streaming: oneshot card failed — native fallback", exc_info=True,
+            )
+            oneshot = None
+        if oneshot is not None:
+            return oneshot
         if cls is None or cls.channel == CH_PLAIN:
             return await super().send(
                 chat_id, content, reply_to=reply_to, metadata=_strip_internal(metadata),
@@ -314,6 +413,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         content: str,
         metadata: dict[str, Any] | None,
         cls: Any,
+        reply_to: str | None = None,
     ) -> Any | None:
         """v2.0.14：回合外正式投递一次性静态定稿卡（无状态，永不参与回合）.
 
@@ -333,8 +433,9 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
            （parse_cron_delivery 解析 scheduler_delivery.py:2025 官方格式）。
         R2 回合外定稿：notify=True（CH_FINAL）且无活跃卡 → 卡片
            （有活跃卡 = 回合定稿语义，保持既有 finalize 路径不变）。
-        R3 长文主动投递：无任何标记（CH_PLAIN）且无活跃卡且 ≥200 字
-           → 卡片（send_message 工具族长文；短文本保持原生，避免过度卡片化）。
+        # R3 主动投递：无任何标记（CH_PLAIN）且无活跃卡 → 卡片（send_message 工具族 / 普通回复，与内置飞书同款直发）
+        #   内置飞书对消息本身没有字数限制；此前的 ≥200 门槛是插件自创“避免过度卡片化”的阈值，
+        #   已按“与内置一致”要求收掉：短回复也卡片化。
 
         无状态红线：不注册 composer state、不取 per-chat 锁、永不升格、
         永不进面板——一次性卡与回合卡互不干扰（v2.0.11 多卡片根因不涉及）。
@@ -347,8 +448,16 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         ):
             return None
         meta = metadata if isinstance(metadata, dict) else {}
+        # 流式预览/进度帧（expect_edits / _interim_send）永不进一次性卡：
+        # 这些是网关正在打字的 previews，要走 composer 状态机建卡/入面板，
+        # 进 oneshot 会被静态卡先干一次、后面的 preview 编辑又干一次 → 双贴。
+        # 宽门槛后才暴露的回归面（2026-11-07 用户观察）。
+        if meta.get("expect_edits") or meta.get("_interim_send"):
+            return None
         job_id = str(meta.get("job_id") or "").strip()
         channel = getattr(cls, "channel", "") if cls is not None else ""
+        if channel in ("progress", "interim"):
+            return None
         try:
             has_active = self._composer.active_state(chat_id) is not None
         except Exception:  # noqa: BLE001 — 状态查询失败按无活跃卡处理
@@ -357,8 +466,10 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             gate = "cron"
         elif channel == "final" and not has_active:
             gate = "final"
-        elif channel == "plain" and not has_active and len((content or "").strip()) >= 200:
+        elif channel == "plain" and not has_active and (content or "").strip():
             gate = "longform"
+        elif channel == "stream" and not has_active and (content or "").strip():
+            gate = "final"
         else:
             return None
         client = self._get_card_client()
@@ -378,6 +489,8 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         if thread_id.startswith("om_"):
             # 话题/线程续投：官方 thread_id 在飞书即 root 消息 id → 线程内回复卡
             message_id = await client.reply_card(thread_id, card)
+        elif str(reply_to or "").strip().startswith("om_"):
+            message_id = await client.reply_card(str(reply_to).strip(), card)
         else:
             message_id = await client.send_card_to_chat(chat_id, card)
         _logger.info(
@@ -400,27 +513,14 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
     def supports_native_streaming(
         self, chat_type: str | None = None, metadata: dict[str, Any] | None = None,
     ) -> bool:
-        """官方 native 探测点（每回合 _start_transports 调用，v2.0.13）.
+        """官方 native 探测点（每回合 _start_transports 调用，v2.0.13）。
 
-        官方调用签名（stream_consumer_transport.py:161）
-        ``probe(chat_type=..., metadata=...)``；TypeError 时降参重试由官方处理。
-
-        灰度开关：插件配置 ``feishu_streaming.native_streaming``（默认 True）。
-        False → 整平台回到 edit-based 流（v2.0.12 行为）。CardKit 凭证缺失
-        一并返回 False（建卡必败，不值得开 native——官方种子帧失败同样回落，
-        这里提前返回省一次无谓的 seed 尝试）。永不抛异常。
+        回退原生流式后一律返回 False（与内置飞书 edit-based 流一致），
+        网关走 edit/send 现有链路（transport:399-426 回落），
+        最终拼好的全量 response（含推理预影）才能进卡片收口。
+        永不抛异常。
         """
-        try:
-            if self._card_config is not None and not bool(
-                getattr(self._card_config, "native_streaming", True)
-            ):
-                return False
-        except Exception:  # 配置读取失败按默认开启（装饰性判断，仅 debug 留痕）
-            _logger.debug("feishu-streaming: native probe config read failed", exc_info=True)
-        try:
-            return self._get_card_client() is not None
-        except Exception:  # noqa: BLE001
-            return False
+        return False
 
     async def send_stream_frame(
         self,
@@ -518,52 +618,46 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             _logger.debug("feishu-streaming: delete state cleanup failed", exc_info=True)
         return await super().delete_message(chat_id, message_id)
 
-    # ── 澄清卡片（闭环见 clarify.py）────────────────────────────────────
+    # ── 澄清卡片：逻辑归位内置（发卡/状态/回调/retire 全继承）─────────
+    # 本插件只做流式卡挂起——composer 是插件自己的状态，内置不知道；
+    # 其余一律 super()：与内置 feishu 平台共用同一 clarify 协议
+    # （状态存 _clarify_state、token=数字下标/other、同步路由
+    # _CARD_ACTION_ROUTES → _handle_clarify_card_action、retire 收尾）。
+    # 曾自建的 clarify.py 平行协议（自有状态字典 + select/input_submit
+    # token + _handle_card_action_event 旁路入口）与内置同步路由撞键：
+    # 点击先被内置 handler 按空状态静默丢弃，插件入口成死代码（2026-11-06 实测）。
     async def send_clarify(
         self, chat_id: str, question: str, choices: list | None, clarify_id: str,
         session_key: str | None = None, metadata: dict[str, Any] | None = None, **kwargs: Any,
     ) -> Any:
-        from . import clarify as _clarify
-
-        client = self._get_card_client()
-        if client is not None:
-            # v2.0.26（clarify 暂停，用户验收：clarify 期间流式卡应等待回调、
-            # 回答后同一张卡续流，而非「先完成 → 回调后开新卡」）：clarify 卡
-            # 发出前把活跃流式卡置为等待态——finalize 暂停窗口内到达时确认
-            # 边界 finalize（取消落定定时器），面板追加暂停行。失败/无活跃卡
-            # （返回 False）不阻断 clarify 卡：回调后建新卡的 v2.0.25 行为
-            # 自然承接（内容永不丢）。
-            try:
-                await self._composer.suspend_for_clarify(chat_id, question)
-            except Exception:
-                _logger.debug(
-                    "feishu-streaming: clarify suspend skipped chat=%s", chat_id, exc_info=True)
-            try:
-                result = await _clarify.send_clarify_card(
-                    self, client, chat_id, question, choices, clarify_id, metadata=metadata,
-                )
-                if result is not None:
-                    return result
-            except Exception:
-                _logger.warning("feishu-streaming: clarify card failed — text fallback", exc_info=True)
+        # v2.0.26（clarify 暂停，用户验收：clarify 期间流式卡应等待回调、
+        # 回答后同一张卡续流，而非「先完成 → 回调后开新卡」）：clarify 卡
+        # 发出前把活跃流式卡置为等待态——finalize 暂停窗口内到达时确认
+        # 边界 finalize（取消落定定时器），面板追加暂停行。失败/无活跃卡
+        # （返回 False）不阻断 clarify 卡：回调后建新卡的 v2.0.25 行为
+        # 自然承接（内容永不丢）。
+        try:
+            composer = getattr(self, "_composer", None)
+            if composer is not None:
+                await composer.suspend_for_clarify(chat_id, question)
+        except Exception:
+            _logger.debug(
+                "feishu-streaming: clarify suspend skipped chat=%s", chat_id, exc_info=True)
         return await super().send_clarify(
             chat_id, question, choices, clarify_id, session_key=session_key,
             metadata=metadata, **kwargs,
         )
 
     async def _handle_card_action_event(self, data: Any) -> None:
-        """卡片动作回调：clarify 动作本实现消费；其余抑制 /card 合成命令."""
-        from . import clarify as _clarify
+        """卡片动作回调（仅兜底未命中路由的动作）.
 
+        clarify/审批/更新提示/选择器四类动作由内置
+        ``_on_card_action_trigger`` 按 ``_CARD_ACTION_ROUTES`` 同步路由
+        先行消费，不会到达这里；本方法只负责抑制其余动作的
+        ``/card`` 合成命令（网关必然拒绝，留痕即可）。
+        """
         event = getattr(data, "event", None)
-        action_value = getattr(getattr(event, "action", None), "value", {}) or {}
-        if isinstance(action_value, dict) and action_value.get("hermes_clarify_action"):
-            try:
-                return _clarify.handle_clarify_card_action(self, self._get_card_client, data)
-            except Exception:
-                _logger.warning("feishu-streaming: clarify callback failed", exc_info=True)
-                return
-        # 非 clarify 卡片动作：hermes 会合成 "/card <tag> <value>" 命令，
+        # 非路由卡片动作：hermes 会合成 "/card <tag> <value>" 命令，
         # 网关必然拒绝（Unknown command）——抑制并留痕。
         action_tag = str(getattr(getattr(event, "action", None), "tag", "") or "button")
         _logger.debug(
@@ -620,8 +714,20 @@ def _upgrade_plain_to_progress(
             return None
         if not content or _is_notice_text(content):
             return None
+        # v2.0.31 回合内宽吸收（双贴修复）：活跃卡片期（回合进行中）的无标记
+        # plain 帧一律视为工具进度——启发式（emoji/300字）覆盖不了真实形态
+        #（`🔧 Editing C:/...` 带全路径超 300、`💻 terminal\n```长命令``` 超
+        # 600，2026-11-07 route-trace 实锤），漏网即落原生文本 → 面板+散文本
+        # 双贴。回合内判定 = 无任何 metadata 标记（cron/notify 帧不进来，
+        # 上面已拦）+ composer 有活跃卡或暂存。长度 4000 兜底防整页答案误吸收。
         if not is_progress_text(content):
-            return None
+            if meta or len(content) > 4000:
+                return None
+            try:
+                if composer.active_state(chat_id) is None:
+                    return None
+            except Exception:  # noqa: BLE001 — 状态查询失败维持原分类
+                return None
         # v2.0.4（s70 回流）：不再要求"必须有活跃卡片"——工具帧常早于答案首帧
         #（卡片尚未建立），升格后由 engine._on_progress 暂存并立即建卡。非 turn
         # 场景（cron/standalone/notify 投递）带 notify=True → CH_FINAL，不受影响。
@@ -710,33 +816,6 @@ def register(ctx: Any) -> None:
     )
     _logger.info("feishu-streaming: platform registered (zero monkey-patch)")
 
-    # /aowen 指令：官方 hook API 注册（非补丁）
-    try:
-        from ..aowen import handle_pre_gateway_dispatch
-
-        ctx.register_hook("pre_gateway_dispatch", handle_pre_gateway_dispatch)
-        _logger.info("feishu-streaming: /aowen commands registered (help, status, monitor)")
-    except Exception:
-        _logger.debug("feishu-streaming: /aowen hook registration skipped", exc_info=True)
-
-    # v2.0.7：reasoning 隐藏流观察者（on_stream_delta/on_stream_end）——
-    # 需 config `plugins.stream_reasoning_deltas: true` 才有数据投递；
-    # 钩子回调内部自兑底，注册失败仅降级为「无思考行」。
-    try:
-        from . import reasoning_feed
-
-        reasoning_feed.register_hooks(ctx)
-    except Exception:
-        _logger.debug("feishu-streaming: reasoning feed registration skipped", exc_info=True)
-
-    # v2.0.8：post_tool_call 官方钩子（单工具耗时 →「Terminal (2.3 s)」）——
-    # 钩子回调内部自兑底，注册失败仅降级为「无耗时」。
-    try:
-        from . import tool_timing
-
-        tool_timing.register_hooks(ctx)
-    except Exception:
-        _logger.debug("feishu-streaming: tool timing registration skipped", exc_info=True)
 
 
 def _prewarm_config() -> None:

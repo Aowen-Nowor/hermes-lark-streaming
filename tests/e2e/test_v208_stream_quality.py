@@ -2,7 +2,7 @@
 
 用户验收问题与根因：
 1. 「思考、推理的部分，只有前面一部分的格式是对的，后面格式就不对了」
-   → reasoning_feed / 网关中继的 ``💬 {text}`` 自带换行，
+   → 网关中继的 ``💬 {text}`` 自带换行，
    ``split_progress_segments`` 按行直拆把首行后的内容打碎成独立 raw 行
    （只有首行保留思考样式）。修复：多行思考吸附为单一逻辑段。
 2. 「"SpaceX买" 不知道是什么内容」→ 模型可见间歇文本（commentary）经
@@ -40,7 +40,6 @@ from hermes_lark_streaming.composer.engine import (
     _merge_progress_lines,
     _reconcile_line_times,
 )
-from hermes_lark_streaming.plugin import tool_timing
 
 MULTI_LINE_THINK = (
     "My previous response was cut off mid-stream while listing news. "
@@ -90,10 +89,7 @@ def composer():
         build_final_card=lambda **kw: {},
         config=None,
     )
-    tool_timing.reset_for_tests()
-    tool_timing.bind_composer(comp)
     yield comp
-    tool_timing.reset_for_tests()
 
 
 async def _settle() -> None:
@@ -185,13 +181,13 @@ class TestMultiLineThinking:
         assert merged2 == [full]  # 原地取代，不膨胀
 
     def test_reasoning_body_truncated_at_2000(self):
-        from hermes_lark_streaming.cardkit.cards import _truncate_reasoning_body
+        """推理不再插件侧二次截断（网关侧 15 行已收）；长文本完整渲染。"""
+        from hermes_lark_streaming.cardkit.cards import _render_status_children
 
         long_text = "啊" * 2500
-        out = _truncate_reasoning_body(long_text)
-        assert len(out) < 2500
-        assert "已截断" in out
-        assert _truncate_reasoning_body("短文本") == "短文本"
+        kids = _render_status_children([f"💬 {long_text}"], durations={}, line_times=[1.0], turn_state="finalized")
+        body = kids[-1]["text"]["content"]
+        assert len(body) >= 2500
 
 
 # ---------------------------------------------------------------------------
@@ -427,60 +423,6 @@ class TestNoticeRouting:
 
 
 # ---------------------------------------------------------------------------
-# 5. tool_timing 模块 + 钩子载荷
-# ---------------------------------------------------------------------------
-
-
-class TestToolTimingModule:
-    def test_post_tool_call_payload_submits(self, composer, monkeypatch):
-        chat = "oc_hook"
-        comp = composer
-
-        async def run():
-            st = await _seed_active(comp, chat)
-            st.status_lines = ["💻 运行命令 echo hi"]
-            st.line_times = [1.0]
-            comp._loop = asyncio.get_running_loop()
-            assert comp.submit_tool_duration_from_thread(chat, "terminal", 2300.0)
-            await _settle()
-
-        asyncio.get_event_loop().run_until_complete(run())
-        st = comp._states[chat]
-        assert st.tool_durations.get("💻 运行命令 echo hi") == "2.3 s"
-
-    def test_zero_duration_ignored(self, composer, monkeypatch):
-        called = []
-
-        def fake_submit(chat, tool, ms):
-            called.append((chat, tool, ms))
-            return True
-
-        monkeypatch.setattr(tool_timing, "_current_chat_id", lambda: "oc_z")
-        comp = composer
-        monkeypatch.setattr(comp, "submit_tool_duration_from_thread", fake_submit)
-        tool_timing.on_post_tool_call(tool_name="terminal", duration_ms=0)
-        tool_timing.on_post_tool_call(tool_name="", duration_ms=100)
-        assert called == []
-
-    def test_register_hooks_invokes_ctx(self):
-        class _Ctx:
-            def __init__(self):
-                self.names = []
-
-            def register_hook(self, name, cb):
-                self.names.append(name)
-
-        ctx = _Ctx()
-        tool_timing.register_hooks(ctx)
-        assert ctx.names == ["post_tool_call"]
-
-    def test_max_line_chars_raised(self):
-        from hermes_lark_streaming.plugin import reasoning_feed
-
-        assert reasoning_feed._MAX_LINE_CHARS == 2000
-
-
-# ---------------------------------------------------------------------------
 # 6. 引擎端到端：多行思考进面板不打碎（回归守卫）
 # ---------------------------------------------------------------------------
 
@@ -500,7 +442,7 @@ class TestEngineMultiLineThinking:
             await comp.handle_send(chat, raw, None, None,
                                    ClassifyResult(CH_PROGRESS, kind="thinking",
                                                   raw_content=raw))
-            # 增长 flush（模拟 reasoning_feed 下一次累积全文）
+            # 增长 flush（模拟下一次累积全文）
             grown = f"{THINK_PREFIX} {MULTI_LINE_THINK}\n股市：OpenAI 年化收入 $50B"
             await comp.handle_send(chat, grown, None, None,
                                    ClassifyResult(CH_PROGRESS, kind="thinking",
