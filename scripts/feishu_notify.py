@@ -58,13 +58,19 @@ def _sign() -> dict:
     return {"timestamp": ts, "sign": base64.b64encode(digest).decode("utf-8")}
 
 
-def send_card(title: str, header_template: str, md_text: str, link: tuple[str, str] | None = None) -> None:
-    """发送 Card 2.0 消息卡。webhook 未配置 → 告警退出 0；送达失败 → exit 1（见文件头修复说明）。"""
+def send_card(title: str, header_template: str, sections: list[str], link: tuple[str, str] | None = None) -> None:
+    """发送 Card 2.0 消息卡。webhook 未配置 → 告警退出 0；送达失败 → exit 1（见文件头修复说明）。
+
+    布局约定（v2.0.32-CI2）：sections 每项独立成 div 元素——飞书段与段之间自带间距，
+    替代单 blob 长文（用户反馈：全部段落挤一个 lark_md 里层次不清）。
+    """
     webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
     if not webhook:
         print("[feishu_notify] FEISHU_WEBHOOK 未配置，跳过飞书通知")
         return
-    elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": md_text}}]
+    elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": s}} for s in sections if s
+    ]
     if link:
         text, url = link
         elements.append({"tag": "hr"})
@@ -135,8 +141,11 @@ def cmd_github_event() -> None:
         url = issue.get("html_url") or f"{base}/issues/{num}"
         template = {"opened": "green", "reopened": "orange", "closed": "grey"}.get(action, "grey")
         title_line = f"🆕 GitHub Issue #{num}" if action == "opened" else f"GitHub Issue #{num}"
-        body = f"**{title}**\n仓库 `{repo}` · 作者 {user} · 动作 **{action}**"
-        send_card(title_line, template, body, _link("🔗 查看 Issue", url))
+        send_card(
+            title_line, template,
+            [f"**{title}**", f"仓库 `{repo}` · 作者 {user} · 动作 **{action}**"],
+            _link("🔗 查看 Issue", url),
+        )
     elif name == "pull_request":
         pr = event.get("pull_request", {})
         num, title = pr.get("number"), pr.get("title", "")
@@ -149,8 +158,11 @@ def cmd_github_event() -> None:
             action_label = action
             template = {"opened": "green", "reopened": "orange", "closed": "grey"}.get(action, "grey")
         title_line = f"🆕 GitHub PR #{num}" if action == "opened" else f"GitHub PR #{num}"
-        body = f"**{title}**\n仓库 `{repo}` · 作者 {user} · 动作 **{action_label}**"
-        send_card(title_line, template, body, _link("🔗 查看 PR", url))
+        send_card(
+            title_line, template,
+            [f"**{title}**", f"仓库 `{repo}` · 作者 {user} · 动作 **{action_label}**"],
+            _link("🔗 查看 PR", url),
+        )
     else:
         print(f"[feishu_notify] 未支持的事件类型 {name}，跳过")
 
@@ -241,7 +253,7 @@ def cmd_gitee_digest() -> None:
         parts.append(f"**Issue（{len(issues)}）**\n" + "\n".join(_line("Issue", e) for _, e in issues[:10]))
         if len(issues) > 10:
             parts.append(f"…另有 {len(issues) - 10} 个 Issue")
-    send_card(f"🪩 Gitee 动态（{len(items)} 条更新）", "yellow", "\n\n".join(parts), _link("🔗 打开 Gitee", f"https://gitee.com/{owner}/{repo}"))
+    send_card(f"🪩 Gitee 动态（{len(items)} 条更新）", "yellow", parts, _link("🔗 打开 Gitee", f"https://gitee.com/{owner}/{repo}"))
     _write_state(state_file)
 
 
@@ -302,26 +314,27 @@ def cmd_ci_report() -> None:
 
     ok = exit_code == "0"
     template = "green" if ok else "red"
-    status = "✅ 通过" if ok else "❌ 失败"
+    status = "✅ 测试通过" if ok else "❌ 测试失败"
     summary = f"{total} 用例 · {failed} 失败" if total else "未运行"
     trigger_label = "⏰ 定时同步" if trigger == "schedule" else "👆 手动触发"
 
-    body_lines = [
-        f"**插件版本**: v{_plugin_version()}　**测试**: {status}（{summary}）　**触发**: {trigger_label}",
+    sections = [
+        f"**{status}**（{summary}）",
+        f"插件版本 **v{_plugin_version()}** · 触发 {trigger_label}",
     ]
     changed: list[str] = []
     if Path("changed_files.txt").exists():
         changed = [x.strip() for x in Path("changed_files.txt").read_text(encoding="utf-8").splitlines() if x.strip()]
     if changed:
-        shown = "\n".join(f"- `{f}`" for f in changed[:10])
-        if len(changed) > 10:
+        shown = "\n".join(f"- `{f}`" for f in changed[:8])
+        if len(changed) > 8:
             shown += f"\n- …共 {len(changed)} 个文件"
-        body_lines.append(f"**变更文件**\n{shown}")
+        sections.append(f"**变更文件（{len(changed)}）**\n{shown}")
     failure_lines = unit_l + e2e_l
     if failure_lines:
-        body_lines.append("**失败用例**\n" + "\n".join(failure_lines[:15]))
+        sections.append("**失败用例**\n" + "\n".join(failure_lines[:15]))
     link = _link("🔗 查看 Actions", f"{server}/{repo}/actions/runs/{run_id}") if repo and run_id else None
-    send_card("Gitee→GitHub 同步报告", template, "\n\n".join(body_lines), link)
+    send_card("Gitee→GitHub 同步报告", template, sections, link)
 
 
 # ---------------------------------------------------------------------------
@@ -333,15 +346,15 @@ def cmd_hermes_release() -> None:
     """hermes-agent 上游新版提醒（继承面兼容性需人工 E2E 验证）。"""
     latest = os.environ.get("HERMES_LATEST", "unknown")
     last = os.environ.get("HERMES_LAST", "none")
-    body = (
-        f"**hermes-agent** 发布新版本：**{latest}**（上次已记录：{last}）\n\n"
+    sections = [
+        f"**hermes-agent** 发布新版本：**{latest}**（上次已记录：{last}）",
         "建议动作：\n"
         "1. 在测试服务器 checkout 新版本并重启网关；\n"
         "2. 跑 `scripts/e2e_v2.py --scenario full,reply` 真飞书验证；\n"
         "3. 插件继承面 fail-fast 探测会在启动日志明确报出失配点（若有）；\n"
-        "4. 验证通过后再升级生产网关。"
-    )
-    send_card(f"⬆️ hermes-agent 新版本 {latest}", "orange", body, _link("🔗 查看发布页", "https://github.com/NousResearch/hermes-agent/releases"))
+        "4. 验证通过后再升级生产网关。",
+    ]
+    send_card(f"⬆️ hermes-agent 新版本 {latest}", "orange", sections, _link("🔗 查看发布页", "https://github.com/NousResearch/hermes-agent/releases"))
 
 
 # ---------------------------------------------------------------------------
