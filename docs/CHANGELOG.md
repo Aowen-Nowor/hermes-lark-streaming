@@ -1,6 +1,18 @@
 # 更新日志
 
-## v2.0.33（2026-11-09，未发布）
+## v2.0.34（2026-11-10）
+
+> 审计方法：用户三症状（2026-11-10 日志包 logs-v33 + hermes-agent@8b50838 源码 + 插件 v2.0.33 代码三方互证，原始帧形状逐字节取证，hermes locales 模板直接核验）→ 按用户裁决收敛修复面（第一原则不注册钩子）→ 实施。
+
+| 类型 | 变更 |
+|------|------|
+| 修复 | **en locale 工具预览行全部失效（症状②，用户报 tool_search 未识别）**：`_TOOL_PREVIEW_RE` 分隔符类补 ASCII 半角冒号——hermes preview 模板 zh 全角 `：`（locales/zh.yaml:841）、en 半角 `:`（locales/en.yaml:864），bridge 工具（tool_search/tool_describe）无 curated 动词必走 preview 模板，en 环境（用户实际环境）此前全部切不出工具名 → 灰色通报行兑底（"Searching tools · session search past..." 未识别成 tool_search 标题+内容；agent.log:21570 生产实证）。配套 `tool_search` 补官方 search 图标（原落默认 code_outlined 语义不符） |
+| 修复 | **网关停机/重启通知建流式卡永久跑马灯（症状③）**：`_NOTICE_RES` 补 gateway.shutdown.* 生命周期通知规则（en+zh，含 cron 中断通告，模板逐字节核验）——通知 `⚠️ Hermes is shutting down — …` 此前命中进度启发式（⚠️ emoji 开头 ≤300）→ 回合外 early-create 流式卡（面板标题误计「agent loop · 1 个工具」同源）→ 网关 ~1.1s 后进程退出、无 finalize → 永久跑马灯（agent.log:21619 card=7706182798772669698 全日志唯一命中，13 起 shutdown notification 全部无 finalized）。归入通知语义：活跃卡并入面板 / 无卡原生文本，永不建卡。进程退出兑底由 v2.0.33 FIX-1 disconnect→seal_all_on_shutdown 承担（plugin-check 回执实证事故时服务器跑 b0c38d0 未含该修复，升级 v2.0.33+ 即得） |
+| 已知 | 症状①（Mem0 add 橙色不变绿、折叠面板无内容）按用户裁决主动不修：工具真实完成态（绿/红+耗时）与结果内容仅存在于钩子/结构化帧通道（gateway tool.complete / post_tool_call），本插件零钩子架构（用户裁决：第一原则不注册钩子）——hermes 文本流对 mem0 类工具只发 pending 行 `⚙️ mem0_add...`（route-trace 逐字节实证），结果 90 chars 从不入流（executor 完成日志 vs 卡 status_lines 恒 1 双证）。mem0 类工具行保持 pending 语义为最终行为 |
+| 版本 | `plugin.yaml: version 2.0.34`；README 徽章 2.0.34 + tests 771→857（补上 v2.0.33 漏更的测试徽章）；SKILL checkout 示例同步 |
+| 验证 | pytest 857 passed（830 基线 + 27 新回归：en/zh preview 行解析与假阳性护栏、生命周期通知 6 模板分类、tool_search 图标/标题、mem0 pending 现状锁定）；ruff 零新增（改动文件仅 3 项存量）；smoke 13/13 |
+
+## v2.0.33（2026-11-09）
 
 > 审计方法：三路并行深审（健壮性/时序竞态、性能、UX+官方语义）产出 16 项发现，逐项 file:line + 生产日志双证据；15 项实施、1 项主动暂缓（见「已知」）。全部改动带回归测试，其中 9 例对修复前代码验证为红（防回归实效）。
 

@@ -30,8 +30,8 @@ progress 模板（``agent/display.py`` + ``gateway/run_turn_runner.py`` +
        📚 列出技能                      （无预览动词）
 
 3. 既有合成格式继续兼容：``{emoji} {tool}...``（pending）、
-   ``{emoji} {tool}："{preview}"``（preview）、``💬 {text}``（thinking）、
-   ``{emoji} {tool}``（裸 head）。
+   ``{emoji} {tool}："{preview}"``（preview，zh 全角冒号 / en 半角冒号
+   ``:``，v2.0.34）、``💬 {text}``（thinking）、``{emoji} {tool}``（裸 head）。
 
 动词表来自 hermes locales ``display.verb.*``（zh + en 双语），用于把动词行
 反查回工具名（图标/标题渲染需要工具名）。匹配永不抛异常。
@@ -63,7 +63,14 @@ _EMOJI_RE = re.compile(
     "^[\U0001f300-\U0001faff\u2600-\u27bf\U0001f1e6-\U0001f1ff\u2b00-\u2bff\u23e9-\u23fa]"
 )
 # 工具预览行：{emoji} {tool}："..." / {emoji} {tool}("...")（组 3 = 引号内预览）
-_TOOL_PREVIEW_RE = re.compile(r"^(\S+)\s+([A-Za-z_][\w.\-]*)\s*[：（(](.*)$")
+# v2.0.34：分隔符类补 ASCII 半角冒号 ``:``——hermes preview 模板 zh 为全角
+# ``：``（locales/zh.yaml:841），en 为半角 ``:``（locales/en.yaml:864
+# ``tool_preview: "{emoji} {tool}: \"{preview}\""``）。bridge 工具
+# （tool_search/tool_describe，tools/tool_labels.py _bridge_labels）无
+# curated 动词必走 preview 模板，en 环境此前全部切不出工具名 → 灰色通报行
+# 兜底（生产实证：用户报 tool_search 行 "Searching tools · session search
+# past..." 未识别成标题+内容；agent.log:21570 tool_search completed）。
+_TOOL_PREVIEW_RE = re.compile(r"^(\S+)\s+([A-Za-z_][\w.\-]*)\s*[：（(:](.*)$")
 # 工具待运行行：{emoji} {tool}...（组 2 = 工具名）
 _TOOL_PENDING_RE = re.compile(r"^(\S+)\s+([A-Za-z_][\w.\-]*)\.\.\.$")
 # 裸工具头行：{emoji} {tool}（tool_head 模板；单发时按 pending 渲染）

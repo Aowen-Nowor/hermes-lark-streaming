@@ -51,11 +51,31 @@ CH_PLAIN = "plain"        # 普通消息（cron / 后台 / 无标记发送）→
 # finalize → 跑马灯不止。官方先例：内置 Discord 适配器同清单正则抑制
 # （plugins/platforms/discord/adapter.py _DISCORD_NONCONVERSATIONAL_*）。
 # V2 语义对齐 V1 defer_background_review：活跃卡 → 并入面板；无卡 → 原生文本。
+#
+# v2.0.34 网关生命周期通知（用户症状③「shutdown 卡永久跑马灯」，logs-v33
+# 取证）：停机/重启通知经 gateway/run_shutdown.py
+# _notify_active_sessions_of_shutdown → adapter.send(msg,
+# metadata=_interim_metadata(...)) 强制 _interim_send（run_shutdown.py:
+# 1006-1013，官方 #98432），模板 locales gateway.shutdown.*（逐字节核验）：
+#   en notice_shutdown/restart: "⚠️ Hermes is shutting down|restarting — your current task …"
+#   zh notice_shutdown/restart: "⚠️ Hermes 正在关闭——/正在重启——你当前的任务将被中断。…"
+#   en cron_interrupted: "⚠️ Scheduled job '{job}' was cut short because Hermes is {action}; …"
+#   zh cron_interrupted: "⚠️ 定时任务 '{job}' 因 Hermes {action}而被中断；…"
+# ⚠️ emoji 开头 ≤300 字符此前命中 _is_progress_text → CH_PROGRESS →
+# _on_progress 无卡分支 early-create 流式卡 → 网关 ~1.1s 后进程退出、无
+# finalize → 永久跑马灯（agent.log:21619 card=7706182798772669698 全日志唯一
+# 命中；面板标题误计「agent loop · 1 个工具」同源）。归入本清单 → notice 语义
+# （活跃卡并入面板 / 无卡原生文本），永不建卡；锚定 i18n 模板特征短语，
+# en+zh 双语与动词表同口径。进程退出兜底另见 v2.0.33 disconnect 收口。
 _NOTICE_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*💾\s*Self-improvement review:\s+\S", re.IGNORECASE),
     re.compile(r"^\s*⏳\s+Working\s+—\s+\d+\s+min(?:\s|$)", re.IGNORECASE),
     re.compile(r"^\s*(?:✅|❌)\s+Hermes update\s+(?:finished|failed|timed out)", re.IGNORECASE),
     re.compile(r"^\s*♻️?\s+Gateway\s+(?:restarted successfully|online\b)", re.IGNORECASE),
+    # v2.0.34：gateway.shutdown.*（en + zh 双语，锚定模板特征短语）
+    re.compile(r"^\s*⚠\uFE0F?\s+Hermes\s+is\s+(?:shutting\s+down|restarting)\b", re.IGNORECASE),
+    re.compile(r"^\s*⚠\uFE0F?\s+Hermes\s+(?:正在关闭|正在重启)——"),
+    re.compile(r"^\s*⚠\uFE0F?\s+(?:Scheduled\s+job|定时任务)\s+'", re.IGNORECASE),
 )
 
 

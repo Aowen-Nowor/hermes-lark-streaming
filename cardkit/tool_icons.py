@@ -62,6 +62,10 @@ _TOOL_ICONS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("read", "open"), "file-link-text_outlined"),
     (("write", "edit"), "edit_outlined"),
     (("web_search", "web-search", "search"), "search_outlined"),
+    # v2.0.34：tool_search（hermes 工具发现桥工具，tools/tool_search_catalog.py
+    # TOOL_SEARCH_NAME="tool_search"）——此前落默认 code_outlined，搜索语义
+    # 不符（症状②修复配套；tool_describe 同族罕见，不做推测性覆盖）
+    (("tool_search",), "search_outlined"),
     (("web_fetch", "web-fetch", "fetch"), "language_outlined"),
     (("grep",), "doc-search_outlined"),
     (("glob",), "folder_outlined"),
