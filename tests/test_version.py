@@ -4,9 +4,11 @@ Covers:
   - hermes_lark_streaming.__version__ matches the version in plugin.yaml
   - Fallback to "unknown" when plugin.yaml is missing
   - Fallback to "unknown" when plugin.yaml has no version: field
-  - pyproject.toml dynamic-version wiring (v2.0.12: setup.py removed —
-    setuptools resolves the dynamic version from __init__.__version__,
-    whose single source of truth remains plugin.yaml)
+  - pyproject.toml metadata-only contract (v2.0.12: setup.py removed;
+    2.0.34 post-release: [build-system] removed as well — hermes pm renames
+    virtual members uniquely per path copy, so the same plugin enabled in
+    several profiles can no longer collide in `uv lock`; the version's
+    single source of truth remains plugin.yaml)
   - requires-python aligned with hermes official (">=3.11,<3.15"; hermes
     pyproject comment: "we *only* support 3.14")
 """
@@ -129,11 +131,13 @@ class TestInitVersion:
 
 
 # ---------------------------------------------------------------------------
-# pyproject.toml  –  dynamic version wiring & python floor (v2.0.12)
+# pyproject.toml  –  metadata-only contract & python floor
 # ---------------------------------------------------------------------------
 # setup.py was removed in v2.0.12 (repo-root hygiene: only __init__.py /
-# __main__.py may live at root). The dynamic version moved into
-# [tool.setuptools.dynamic] via attr resolution.
+# __main__.py may live at root). [build-system] followed in the 2.0.34
+# post-release batch: with no build backend the plugin is a virtual uv
+# workspace member, which hermes pm renames uniquely per path copy
+# (`hermes-plugin-<path-hash>`), so any number of profile copies coexist.
 
 
 class TestPyprojectVersionContract:
@@ -143,12 +147,36 @@ class TestPyprojectVersionContract:
         """setup.py no longer exists at repo root (root hygiene contract)."""
         assert not (_REPO_ROOT / "setup.py").exists()
 
-    def test_dynamic_version_wired_to_plugin_yaml_source(self) -> None:
-        """[tool.setuptools.dynamic] resolves version from the package attr,
-        whose single source of truth is plugin.yaml."""
-        text = _PYPROJECT.read_text(encoding="utf-8")
-        assert "dynamic = [\"version\"]" in text
-        assert 'version = {attr = "hermes_lark_streaming.__version__"}' in text
+    def test_build_system_absent(self) -> None:
+        """No build backend anywhere in pyproject.toml (metadata-only plugin).
+
+        A [project] table without [build-system] makes hermes pm treat every
+        path copy as a virtual workspace member and rename it to a unique
+        ``hermes-plugin-<path-hash>`` — a buildable member keeps its declared
+        name, so the same plugin enabled in two profiles used to abort every
+        ``hermes pm install`` with uv's "Two workspace members are both
+        named ...". The loader imports __init__.py from the plugin directory;
+        nothing builds or pip-installs this plugin as a wheel.
+        """
+        import tomllib
+
+        data = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+        assert "build-system" not in data
+        assert "setuptools" not in data.get("tool", {})
+
+    def test_dynamic_version_declared(self) -> None:
+        """[project] keeps ``dynamic = ["version"]``.
+
+        uv rejects any [project] table whose version is neither set nor
+        dynamic (hermes pm would inject 0.0.0 into its workspace copy).
+        The single source of truth remains plugin.yaml; with no build
+        backend nothing resolves the dynamic value — virtual members
+        accept that.
+        """
+        import tomllib
+
+        data = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+        assert data["project"].get("dynamic") == ["version"]
 
     def test_requires_python_matches_hermes_official(self) -> None:
         """requires-python is frozen to hermes official ">=3.11,<3.15".

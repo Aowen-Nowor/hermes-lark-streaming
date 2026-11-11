@@ -54,9 +54,18 @@ class TestRepoLayoutContract:
         assert hasattr(hermes_lark_streaming, "FeishuStreamingAdapter")
         assert hasattr(hermes_lark_streaming, "__version__")
 
-    def test_pyproject_includes_plugin_package(self) -> None:
-        text = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        assert '"plugin*"' in text
+    def test_runtime_subpackages_live_at_repo_root(self) -> None:
+        """cardkit/feishu/config/plugin/composer 五个运行时子包直接位于仓库根。
+
+        加载器从插件目录直接导入子包；v2.0.34 后 pyproject 为 metadata-only
+        （无 setuptools 打包清单），子包布局由目录本身承载（原
+        test_pyproject_includes_plugin_package 的 packages.find 契约随
+        [build-system] 一并退役）。
+        """
+        for name in ("cardkit", "feishu", "config", "plugin", "composer"):
+            assert (_REPO_ROOT / name / "__init__.py").is_file(), (
+                f"{name}/ missing"
+            )
 
 
 # ---------------------------------------------------------------------------
