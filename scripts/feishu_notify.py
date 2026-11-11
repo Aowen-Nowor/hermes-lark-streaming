@@ -308,14 +308,23 @@ def cmd_ci_report() -> None:
     run_id = os.environ.get("RUN_ID", "")
     server = os.environ.get("SERVER_URL", "https://github.com")
     trigger = os.environ.get("TRIGGER", "")
+    force_reverify = os.environ.get("FORCE_REVERIFY", "").strip().lower() == "true"
     unit_t, unit_f, unit_l = _summarize_junit("unit_test_report.xml")
     e2e_t, e2e_f, e2e_l = _summarize_junit("e2e_report.xml")
     total, failed = unit_t + e2e_t, unit_f + e2e_f
 
     ok = exit_code == "0"
     template = "green" if ok else "red"
-    status = "✅ 测试通过" if ok else "❌ 测试失败"
     summary = f"{total} 用例 · {failed} 失败" if total else "未运行"
+    if force_reverify:
+        # 重验收口卡（无新代码的 force_tests dispatch）：标题与状态行明示
+        # "重验"，跟真实同步的报告区分开（用户裁决 2026-11-11 方案1：
+        # 连续失败后群里需要一条已恢复绿卡，读卡人才知道伤已收口）。
+        title = "Gitee→GitHub 重验报告"
+        status = "✅ 重验通过（无新代码）" if ok else "❌ 重验失败"
+    else:
+        title = "Gitee→GitHub 同步报告"
+        status = "✅ 测试通过" if ok else "❌ 测试失败"
     trigger_label = "⏰ 定时同步" if trigger == "schedule" else "👆 手动触发"
 
     sections = [
@@ -334,7 +343,7 @@ def cmd_ci_report() -> None:
     if failure_lines:
         sections.append("**失败用例**\n" + "\n".join(failure_lines[:15]))
     link = _link("🔗 查看 Actions", f"{server}/{repo}/actions/runs/{run_id}") if repo and run_id else None
-    send_card("Gitee→GitHub 同步报告", template, sections, link)
+    send_card(title, template, sections, link)
 
 
 # ---------------------------------------------------------------------------

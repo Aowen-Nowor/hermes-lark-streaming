@@ -248,10 +248,12 @@ jobs:
 
       # ── 同步+测试结果报告 → 飞书 ──
       # 通知条件（2026-11-11 定案）：有新代码同步 或 本 run 有步骤失败，才发报告。
-      # force_tests 无变更的重验不再推报告（#1560/#1561 雷同推送根因）；
+      # 重验（force_tests 且无新代码）成功也发一条收口卡（用户裁决 2026-11-11
+      # 方案1：连续失败后群里没有"已恢复"绿卡，读卡人无从判断是否还坏着；
+      # 该卡有明确信息量=重验通过，与 #1560/#1561 裁掉的雷同重复不同）；
       # fetch 失败/测试失败走 failure() 必然显红——原条件在 fetch 失败时静默无通知。
       - name: Notify Feishu (sync report)
-        if: always() && (failure() || steps.detect.outputs.has_changes == 'true')
+        if: always() && (failure() || steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true)
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_SIGN_SECRET: ${{ secrets.FEISHU_SIGN_SECRET }}
@@ -260,4 +262,5 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           SERVER_URL: ${{ github.server_url }}
           TRIGGER: ${{ github.event_name }}
+          FORCE_REVERIFY: ${{ inputs.force_tests == true && steps.detect.outputs.has_changes != 'true' }}
         run: python3 scripts/feishu_notify.py ci-report
