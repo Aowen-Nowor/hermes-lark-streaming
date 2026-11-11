@@ -45,7 +45,12 @@ dependencies = [
     "PyYAML>=6.0,<7.0",
 ]
 
-[project.optional-dependencies]
+# Dev tooling is a PEP 735 dependency-group, not a package extra: the plugin
+# is metadata-only (no build backend, no wheel, no package consumers), so
+# [project.optional-dependencies] has no installer left to hang on. Install
+# with `pip install --group dev` (pip >= 25.1) or `uv sync --group dev`;
+# CI (sync-from-gitee.yml) installs from this single source of truth.
+[dependency-groups]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21.0",
