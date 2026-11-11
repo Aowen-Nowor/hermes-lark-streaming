@@ -4,8 +4,16 @@ name: Sync from Gitee
 #
 # v2.0.27 变更：
 #   - 镜像策略：remote-to-remote 强制对齐（Gitee 唯一事实源，零 merge commit）；
-#     同时镜像 refactor/v2.0.0（V2 开发分支）与 github_sync（默认分支，V2 由用户手动同步）+ 全部 tag。
-#     （V1 版只同步 github_sync——那是 V1 默认分支，V2 发布后 GitHub 永远停在 1.8.x。）
+#     只镜像 github_sync（主分支）+ 全部 tag。（V1 版同样只同步 github_sync——那是 V1 默认分支。）
+#
+# v2.0.34 后分支模型定案（用户裁决 2026-11-11）：
+#   - Gitee refactor/v2.0.0 = 开发分支，只存在于 Gitee（GitHub 不需要、不再镜像、已删除）
+#   - Gitee github_sync = 主分支：开发完成后由维护者手动同步（fast-forward 推送）
+#   - 本工作流只镜像 github_sync + tags 到 GitHub；变更检测/测试/Release 全部以
+#     github_sync 位移为基准（原 refactor 位移基准随分支删除一并退役）
+#   - 飞书 ci-report 发送条件收窄为「有新代码同步 或 本 run 有步骤失败」：
+#     重验型 dispatch（force_tests 且无变更）不再推重复报告（#1560/#1561 两条雷同推送的根因）；
+#     fetch/测试失败时 failure() 必然发失败报告——顺带修掉 fetch 失败静默无通知的缺陷
 #   - 测试：全量 pytest（Python 3.14 对齐 hermes 官方），含 mock e2e；真飞书 E2E 不在 CI 跑
 #     （限流/凭据面，验收走服务器 scripts/e2e_v2.py）。
 #   - Release：测试通过后按 plugin.yaml 版本自动创建 GitHub Release（幂等）。
@@ -29,7 +37,7 @@ name: Sync from Gitee
 #   - 测试/发布树错位：run 的工作树停留在 dispatch 时的旧 checkout（run #1546 实证：检出 b0c38d0，
 #     Mirror 已把 a51cc0a 推上 GitHub，但 pytest 与 plugin.yaml 仍读旧树——版本号命中既有 Release 被跳过，
 #     且变更事件被本轮消费后下轮 has_changes=false，新版本 Release 永远缺位＝v2.0.30/31 未发布的结构性根因）。
-#     修复：Detect changes 后重新检出 origin/refactor/v2.0.0（=刚镜像的 Gitee tip）再测试；
+#     修复：Detect changes 后重新检出刚镜像的 Gitee tip 再测试（现为 origin/github_sync）；
 #     Release 以 target_commitish=new_sha 钉住被测提交。
 #
 # 所需 Secrets：GITEE_USERNAME / GITEE_TOKEN（同步+API）、FEISHU_WEBHOOK / FEISHU_SIGN_SECRET（通知）、
@@ -91,16 +99,16 @@ jobs:
       - name: Record pre-sync SHA
         id: pre_sync
         run: |
-          if git rev-parse -q --verify "refs/remotes/origin/refactor/v2.0.0" >/dev/null; then
-            echo "sha=$(git rev-parse origin/refactor/v2.0.0)" >> $GITHUB_OUTPUT
+          if git rev-parse -q --verify "refs/remotes/origin/github_sync" >/dev/null; then
+            echo "sha=$(git rev-parse origin/github_sync)" >> $GITHUB_OUTPUT
           else
             echo "sha=none" >> $GITHUB_OUTPUT
           fi
 
       - name: Mirror branches and tags (Gitee is source of truth)
         run: |
-          # remote-to-remote 直推：不经工作树、不产生 merge commit，GitHub 各 ref 强制对齐 Gitee
-          git push --force origin "refs/remotes/gitee/refactor/v2.0.0:refs/heads/refactor/v2.0.0"
+          # remote-to-remote 直推：不经工作树、不产生 merge commit，GitHub github_sync 强制对齐 Gitee
+          # （分支模型定案 2026-11-11：refactor/v2.0.0 是 Gitee 独有开发分支，不再镜像 GitHub）
           git push --force origin "refs/remotes/gitee/github_sync:refs/heads/github_sync"
           git push --force origin "refs/tags/*:refs/tags/*"
 
@@ -108,7 +116,7 @@ jobs:
         id: detect
         run: |
           OLD="${{ steps.pre_sync.outputs.sha }}"
-          NEW=$(git rev-parse gitee/refactor/v2.0.0)
+          NEW=$(git rev-parse gitee/github_sync)
           echo "new_sha=$NEW" >> $GITHUB_OUTPUT
           if [ "$OLD" != "$NEW" ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
@@ -133,7 +141,7 @@ jobs:
         if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
         uses: actions/checkout@v4
         with:
-          ref: refactor/v2.0.0        # Mirror 步骤刚推送到 origin 的 Gitee 事实源 tip
+          ref: github_sync            # Mirror 步骤刚推送到 origin 的 Gitee 主分支 tip
           fetch-depth: 0
           token: ${{ secrets.GH_MIRROR_PAT }}
 
@@ -189,7 +197,7 @@ jobs:
       - name: Prepare release notes
         if: steps.detect.outputs.has_changes == 'true' && steps.run_tests.outputs.exit_code == '0' && steps.check_tag.outputs.tag_exists == 'false'
         run: |
-          echo "完整更新日志：https://raw.githubusercontent.com/${{ github.repository }}/refactor/v2.0.0/docs/CHANGELOG.md" > release_notes.md
+          echo "完整更新日志：https://raw.githubusercontent.com/${{ github.repository }}/github_sync/docs/CHANGELOG.md" > release_notes.md
 
       - name: Create GitHub Release
         if: steps.detect.outputs.has_changes == 'true' && steps.run_tests.outputs.exit_code == '0' && steps.check_tag.outputs.tag_exists == 'false'
@@ -230,8 +238,11 @@ jobs:
           key: gitee-digest-state-${{ github.run_number }}
 
       # ── 同步+测试结果报告 → 飞书 ──
+      # 通知条件（2026-11-11 定案）：有新代码同步 或 本 run 有步骤失败，才发报告。
+      # force_tests 无变更的重验不再推报告（#1560/#1561 雷同推送根因）；
+      # fetch 失败/测试失败走 failure() 必然显红——原条件在 fetch 失败时静默无通知。
       - name: Notify Feishu (sync report)
-        if: always() && (steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true)
+        if: always() && (failure() || steps.detect.outputs.has_changes == 'true')
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_SIGN_SECRET: ${{ secrets.FEISHU_SIGN_SECRET }}

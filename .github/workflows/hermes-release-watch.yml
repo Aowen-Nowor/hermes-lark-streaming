@@ -72,11 +72,13 @@ jobs:
       HERMES_LATEST: ${{ needs.watch.outputs.latest }}
       HERMES_LAST: ${{ needs.watch.outputs.last }}
     steps:
-      - name: Checkout plugin (refactor/v2.0.0 tip)
-        # 平台镜像仓 refactor 分支含完整插件与测试套件；PAT 才能拉 full history
+      - name: Checkout plugin (github_sync tip)
+        # 生产主分支 github_sync 含完整插件与测试套件（分支模型定案 2026-11-11：
+        # GitHub 只保留 github_sync，refactor/v2.0.0 是 Gitee 独有开发分支已删除）；
+        # 兼容性验证测的就是生产代码；PAT 才能拉 full history
         uses: actions/checkout@v4
         with:
-          ref: refactor/v2.0.0
+          ref: github_sync
           token: ${{ secrets.GH_MIRROR_PAT }}
           fetch-depth: 0
 
