@@ -1,10 +1,21 @@
 name: Hermes Release Watch
 
-# hermes-agent 上游发新版 → 飞书提醒人工验证继承面（v2.0.27）。
+# hermes-agent 上游发新版 → 自动兼容性验证 → 飞书推送最终结论。
+# （2026-11-11 用户验收语义改版：推送必须是「更新内容 + 插件是否兼容」的
+# 结果，而不是建议人工去做哪些测试。）
+#
+# 流程：检测新版本 → 拉取新版 hermes-agent 源码 + 本插件最新代码 →
+# scripts/compat_probe.py 五步探测（S1 源码导入 / S2 插件绑定 / S3 继承面
+# fail-fast / S4 官方表面清单 / S5 新版环境回归测试）→ 推送 ✅/❌ 结论卡
+# （含 release notes 摘要与失配点明细）。无论结论如何都记录 last-seen——
+# 已测过的版本不重复推送。
+#
 # 取代 V1 hermes-integration-test.yml：其运行的 tests/integration/ 兼容套件
-# 已随 V2 架构删除（V2 的继承面验证 = 服务器真飞书 E2E，CI 无法复现），
-# 且该工作流钉死 Python 3.11（hermes 官方唯一受支持运行时为 3.14）。
-# 所需 Secrets：FEISHU_WEBHOOK / FEISHU_SIGN_SECRET。
+# 已随 V2 架构删除，且该工作流钉死 Python 3.11（hermes 官方唯一受支持
+# 运行时为 3.14，本工作流 setup-python 3.14 对齐）。
+#
+# 所需 Secrets：FEISHU_WEBHOOK / FEISHU_SIGN_SECRET / GH_MIRROR_PAT（读
+# 私有镜像仓与插件 refactor 分支 full history 的 checkout）。
 
 on:
   schedule:
@@ -17,8 +28,12 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
+    outputs:
+      latest: ${{ steps.check.outputs.latest }}
+      last: ${{ steps.check.outputs.last }}
+      has_new: ${{ steps.check.outputs.has_new }}
     steps:
-      - name: Checkout (scripts/feishu_notify.py)
+      - name: Checkout (scripts/)
         uses: actions/checkout@v4
 
       - name: Restore last seen release
@@ -49,21 +64,97 @@ jobs:
             echo "无新版本 ($LATEST)"
           fi
 
-      - name: Notify Feishu
-        if: steps.check.outputs.has_new == 'true'
+  compat:
+    needs: watch
+    if: needs.watch.outputs.has_new == 'true'
+    runs-on: ubuntu-latest
+    env:
+      HERMES_LATEST: ${{ needs.watch.outputs.latest }}
+      HERMES_LAST: ${{ needs.watch.outputs.last }}
+    steps:
+      - name: Checkout plugin (refactor/v2.0.0 tip)
+        # 平台镜像仓 refactor 分支含完整插件与测试套件；PAT 才能拉 full history
+        uses: actions/checkout@v4
+        with:
+          ref: refactor/v2.0.0
+          token: ${{ secrets.GH_MIRROR_PAT }}
+          fetch-depth: 0
+
+      - name: Restore last seen release
+        uses: actions/cache/restore@v4
+        with:
+          path: .hermes-last-release
+          key: hermes-last-release-${{ github.run_number }}
+          restore-keys: |
+            hermes-last-release-
+
+      - name: Checkout hermes-agent ${{ env.HERMES_LATEST }}
+        uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.HERMES_LATEST }}
+          path: hermes-agent
+          fetch-depth: 1
+
+      - name: Setup Python 3.14 (hermes 官方唯一受支持运行时)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install plugin + hermes deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'lark-oapi>=1.6.4' PyYAML pytest
+          # hermes 官方依赖全集（S1 导入链需要；-e 源码模式对齐"新版源码"语义）
+          pip install -e ./hermes-agent
+
+      - name: Run compat probe (S1-S5)
+        id: probe
+        run: |
+          set -o pipefail
+          python3 scripts/compat_probe.py --hermes-dir ./hermes-agent --json compat_report.json | tee compat_probe.log
+          echo "verdict=$(python3 -c "import json;print(json.load(open('compat_report.json'))['verdict'])")" >> $GITHUB_OUTPUT
+          # 明细摘要：各步一行（PASS/FAIL + 截断 detail），飞书卡承载
+          python3 - <<'PY' >> $GITHUB_OUTPUT
+          import json
+          r = json.load(open('compat_report.json'))
+          lines = []
+          for s in r["steps"]:
+              mark = "✅" if s["ok"] else "❌"
+              first = s["detail"].strip().splitlines()[0][:120] if s["detail"].strip() else ""
+              lines.append(f"{mark} {s['step']}：{first}")
+          tail = "\n".join(r.get("tests_stdout_tail", "").splitlines()[-3:])
+          if tail:
+              lines.append(tail)
+          print(f"summary<<EOF\n{chr(10).join(lines)}\nEOF")
+          PY
+
+      - name: Fetch release notes
+        if: always()
+        run: |
+          BODY=$(curl -sf "https://api.github.com/repos/NousResearch/hermes-agent/releases/tags/${HERMES_LATEST}" | jq -r '.body // empty' | head -c 600)
+          # 控制字符/超长换行拍平成飞书可读摘要
+          NOTES=$(printf '%s' "$BODY" | tr '\r' ' ' | awk 'BEGIN{RS=""; ORS="\n"} {print}' | head -c 600)
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          echo "${NOTES:-（release notes 为空）}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        id: notes
+
+      - name: Notify Feishu (兼容性结论)
+        if: always()
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_SIGN_SECRET: ${{ secrets.FEISHU_SIGN_SECRET }}
-          HERMES_LATEST: ${{ steps.check.outputs.latest }}
-          HERMES_LAST: ${{ steps.check.outputs.last }}
+          COMPAT_VERDICT: ${{ steps.probe.outputs.verdict }}
+          HERMES_NOTES: ${{ steps.notes.outputs.notes }}
         run: python3 scripts/feishu_notify.py hermes-release
 
-      - name: Save seen release
-        if: steps.check.outputs.has_new == 'true'
-        run: echo "${{ steps.check.outputs.latest }}" > .hermes-last-release
+      - name: Save seen release (无论兼容结论——已测过的版本不重复推送)
+        if: always()
+        run: echo "${{ env.HERMES_LATEST }}" > .hermes-last-release
 
       - name: Persist to cache
-        if: steps.check.outputs.has_new == 'true'
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: .hermes-last-release

@@ -343,18 +343,55 @@ def cmd_ci_report() -> None:
 
 
 def cmd_hermes_release() -> None:
-    """hermes-agent 上游新版提醒（继承面兼容性需人工 E2E 验证）。"""
+    """hermes-agent 新版本兼容性报告（自动测试后的最终结论，2026-11-11 用户验收语义）.
+
+    用户裁决：推送必须给出「更新内容 + 插件是否兼容」的结果，而不是建议
+    人工去做哪些测试。工作流（hermes-release-watch.yml）在检测到新版本后
+    自动拉取新版源码与本插件最新代码跑 scripts/compat_probe.py（S1 源码
+    导入 / S2 插件绑定 / S3 继承面 fail-fast / S4 官方表面清单 / S5 回归
+    测试），本命令消费其结论与明细。
+
+    环境变量：
+      HERMES_LATEST / HERMES_LAST   新版 tag / 上次已记录版本
+      COMPAT_VERDICT                pass | fail（探测脚本结论）
+      COMPAT_SUMMARY                探测明细（多行，工作流从报告 JSON 渲染）
+      HERMES_NOTES                  release notes 摘要（工作流截断）
+    """
     latest = os.environ.get("HERMES_LATEST", "unknown")
     last = os.environ.get("HERMES_LAST", "none")
+    verdict = os.environ.get("COMPAT_VERDICT", "").strip().lower()
+    summary = os.environ.get("COMPAT_SUMMARY", "").strip()
+    notes = os.environ.get("HERMES_NOTES", "").strip()
+
+    if verdict == "pass":
+        head = f"✅ **结论：插件兼容 hermes-agent {latest}**"
+        color = "green"
+    elif verdict == "fail":
+        head = f"❌ **结论：插件与 hermes-agent {latest} 存在失配**"
+        color = "red"
+    else:
+        # verdict 缺失 = 兼容性测试未能产出结论（工作流异常）：如实呈现，
+        # 不冒充结论、也不退回旧的"建议动作"文案。
+        head = "⚠️ **结论：兼容性验证未完成（CI 异常）**"
+        color = "orange"
+
     sections = [
-        f"**hermes-agent** 发布新版本：**{latest}**（上次已记录：{last}）",
-        "建议动作：\n"
-        "1. 在测试服务器 checkout 新版本并重启网关；\n"
-        "2. 跑 `scripts/e2e_v2.py --scenario full,reply` 真飞书验证；\n"
-        "3. 插件继承面 fail-fast 探测会在启动日志明确报出失配点（若有）；\n"
-        "4. 验证通过后再升级生产网关。",
+        head,
+        f"**版本**：{latest}（上次已记录：{last}）",
     ]
-    send_card(f"⬆️ hermes-agent 新版本 {latest}", "orange", sections, _link("🔗 查看发布页", "https://github.com/NousResearch/hermes-agent/releases"))
+    if notes:
+        sections.append(f"**更新内容**：\n{notes}")
+    if summary:
+        sections.append(f"**验证明细**：\n{summary}")
+    if verdict != "pass" and verdict:
+        sections.append(
+            "升级生产网关前请先处理失配项；插件继承面 fail-fast 探测也会在"
+            "启动日志拒绝带伤启动（内容永不丢红线不涉及）。"
+        )
+    send_card(
+        f"⬆️ hermes-agent {latest} 兼容性报告", color, sections,
+        _link("🔗 查看发布页", "https://github.com/NousResearch/hermes-agent/releases"),
+    )
 
 
 # ---------------------------------------------------------------------------

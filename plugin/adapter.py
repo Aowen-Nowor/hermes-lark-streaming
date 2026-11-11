@@ -357,7 +357,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
     async def _send_impl(
         self, chat_id: str, content: str, reply_to: str | None = None, metadata: dict[str, Any] | None = None,
     ) -> Any:
-        from ..composer.classify import CH_PLAIN, classify_send
+        from ..composer.classify import CH_INTERIM, CH_PLAIN, classify_send
 
         try:
             cls = classify_send(content, metadata)
@@ -371,6 +371,20 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             if upgraded is not None:
                 cls = upgraded
                 _logger.debug("feishu-streaming: plain send upgraded to progress (progress lane)")
+        # v2.0.34-hotfix（用户症状①，logs11.11 22:33 轮三方互证）：对话性
+        # commentary 判定必须在锚点归一【之前】用原始 reply_to 形参——
+        # hermes gateway/stream_consumer_fallback._send_commentary 对 feishu
+        # 平台（_needs_reply_anchor 清单）显式传 reply_to=触发消息 om_ 锚；
+        # 后台状态通知 _send_status_text（run_turn_progress.py:1139）不传
+        # reply_to 形参（仅 metadata._interim_send）。两者在飞书 DM 上
+        # metadata 同形（都只有 _interim_send），回复锚形参是唯一官方语义级
+        # 区分点。群聊 thread 场景后台通知的 metadata.reply_to_message_id
+        # 若参与判定会误标——原始形参不受锚点归一/入站锚回退污染。
+        if (
+            cls is not None and cls.channel == CH_INTERIM and cls.kind == "advisory"
+            and bool((reply_to or "").strip())
+        ):
+            cls.meta["conversational_commentary"] = True
         # 【锚点归一】Hermes 流式消费者把用户触发消息 ID 放在 metadata.reply_to_message_id
         # （见 stream_consumer.py:266，initial_reply_to_id 回路），不是 send() 的 reply_to 形参。
         # 回合建卡 _create_card 只认 reply_to 槽位 —— 从 metadata 回退出来，才能以引用发表卡片。

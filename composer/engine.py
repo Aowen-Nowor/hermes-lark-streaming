@@ -470,7 +470,7 @@ class FrameComposer:
                 if cls.channel == CH_PROGRESS:
                     return await self._on_progress(chat_id, cls, reply_to=reply_to)
                 if cls.channel == CH_INTERIM:
-                    return await self._on_interim(chat_id, content, cls)
+                    return await self._on_interim(chat_id, content, cls, reply_to=reply_to)
                 if cls.channel == CH_FINAL:
                     return await self._on_final_send(chat_id, content)
                 return None  # CH_PLAIN → 原生
@@ -1117,9 +1117,32 @@ class FrameComposer:
         # （全量快照）而非 edit —— 面板更新由本引擎的 cardkit_update 驱动。
         return SendResult(success=True)
 
-    async def _on_interim(self, chat_id: str, content: str, cls: ClassifyResult) -> SendResult | None:
+    async def _on_interim(
+        self, chat_id: str, content: str, cls: ClassifyResult, *, reply_to: str | None = None,
+    ) -> SendResult | None:
         st = self.active_state(chat_id)
         text = (content or "").strip()
+        if st is None and text and cls.meta.get("conversational_commentary"):
+            # v2.0.34-hotfix（用户症状①，logs11.11 22:33 轮三方互证）：turn 首段
+            # 前导文本经 hermes commentary 通道独立投递（gateway
+            # _send_commentary → adapter.send(reply_to=触发锚, _interim_send)），
+            # 在 delta 流式停止的回合里它先于首个工具进度行到达 → 无活跃卡 →
+            # 原样直发 = 用户看到的独立"第一条文本消息"。
+            # 修复：early-create 回合卡（与 _on_progress 占位建卡同款语义），
+            # commentary 本体按 V1 语义以 💬 思考行并入下方面板分支；正文留空
+            # 待 final send 全量覆盖收口同一张卡（_finalize 覆盖语义不变）。
+            # 判定依据 adapter 层打的 conversational_commentary 标（原始
+            # reply_to 形参——官方语义级：commentary 带锚、后台通知不带），
+            # 💾/⏳/⚠️ 生命周期通知（无锚）永不建卡——跑马灯红线不动。
+            try:
+                await self._create_card(chat_id, "", reply_to=reply_to)
+            except Exception:  # noqa: BLE001 — 建卡失败维持原生直发（内容永不丢）
+                _logger.debug(
+                    "composer: commentary early-create failed — native fallback chat=%s",
+                    chat_id, exc_info=True,
+                )
+                return None
+            st = self.active_state(chat_id)
         if st is None or not text:
             return None  # 无卡片：原生（含 💾/⏳ 后台通知——永不建卡，跑马灯根因修复）
         # v2.0.8：非 emoji 播报（模型可见间歇文本 commentary，如「SpaceX买」碎片）
