@@ -82,3 +82,9 @@ filterwarnings = [
     "ignore:pkg_resources is deprecated as an API:DeprecationWarning",
     "ignore:Deprecated call to:DeprecationWarning",
 ]
+# uv/pm: explicit empty package set — a metadata-only member is still built by uv's
+# implicit legacy setuptools backend when the workspace installs it, and setuptools
+# refuses flat-layout auto-discovery here (multiple top-level dirs: cardkit, composer,
+# config, feishu, plugin, assets). Declaring no packages makes that build a no-op.
+[tool.setuptools]
+packages = []
