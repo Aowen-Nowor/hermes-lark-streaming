@@ -5,10 +5,10 @@ Covers:
   - Fallback to "unknown" when plugin.yaml is missing
   - Fallback to "unknown" when plugin.yaml has no version: field
   - pyproject.toml metadata-only contract (v2.0.12: setup.py removed;
-    2.0.34 post-release: [build-system] removed as well — hermes pm renames
-    virtual members uniquely per path copy, so the same plugin enabled in
-    several profiles can no longer collide in `uv lock`; the version's
-    single source of truth remains plugin.yaml)
+    2.0.34 post-release: [build-system] removed so hermes pm renames virtual
+    members uniquely per path copy; explicit [tool.setuptools] packages=[]
+    keeps uv's implicit legacy build a no-op instead of attempting flat-layout
+    auto-discovery; the version's single source of truth remains plugin.yaml)
   - requires-python aligned with hermes official (">=3.11,<3.15"; hermes
     pyproject comment: "we *only* support 3.14")
 """
@@ -147,22 +147,22 @@ class TestPyprojectVersionContract:
         """setup.py no longer exists at repo root (root hygiene contract)."""
         assert not (_REPO_ROOT / "setup.py").exists()
 
-    def test_build_system_absent(self) -> None:
-        """No build backend anywhere in pyproject.toml (metadata-only plugin).
+    def test_build_system_absent_and_setuptools_package_discovery_disabled(self) -> None:
+        """Keep virtual-member renaming and disable implicit flat-layout builds.
 
         A [project] table without [build-system] makes hermes pm treat every
         path copy as a virtual workspace member and rename it to a unique
-        ``hermes-plugin-<path-hash>`` — a buildable member keeps its declared
-        name, so the same plugin enabled in two profiles used to abort every
-        ``hermes pm install`` with uv's "Two workspace members are both
-        named ...". The loader imports __init__.py from the plugin directory;
-        nothing builds or pip-installs this plugin as a wheel.
+        ``hermes-plugin-<path-hash>``. uv may still invoke its implicit legacy
+        setuptools backend while installing the workspace, so the explicit
+        empty package list is required: without it setuptools rejects this
+        repository's multiple top-level runtime directories. The loader
+        imports __init__.py directly; no plugin wheel is produced.
         """
         import tomllib
 
         data = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
         assert "build-system" not in data
-        assert "setuptools" not in data.get("tool", {})
+        assert data.get("tool", {}).get("setuptools", {}).get("packages") == []
 
     def test_dynamic_version_declared(self) -> None:
         """[project] keeps ``dynamic = ["version"]``.

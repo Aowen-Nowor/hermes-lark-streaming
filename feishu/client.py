@@ -118,6 +118,18 @@ CARDKIT_CARD_SIZE = 200860
 CARDKIT_ELEMENT_NOT_FOUND = 300313  # 元素不存在（add_elements 后服务端尚未持久化时的竞态）
 CARDKIT_ELEMENT_NOT_FOUND_ALT = 300314  # delete_elements 不存在的元素
 MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
+REPLY_ANCHOR_INVALID = 99992354  # reply 目标不是合法消息 ID
+_REPLY_ANCHOR_TERMINAL_CODES = {
+    MSG_NOT_FOUND,
+    REPLY_ANCHOR_INVALID,
+    230011,  # 消息已撤回
+    231003,  # 消息已删除
+}
+
+
+def is_definitive_reply_anchor_error(exc: BaseException) -> bool:
+    """仅锚点确定不可用时才允许换通道直发；传输结果未知不属于此类。"""
+    return getattr(exc, "code", None) in _REPLY_ANCHOR_TERMINAL_CODES
 
 # v1.3.1 fix: 300315 错误码有两种含义：
 _RE_ELEMENT_NOT_FOUND = re.compile(r"not find elementID", re.IGNORECASE)
@@ -169,12 +181,13 @@ def is_card_size_error(e: FeishuAPIError) -> bool:
 
 def is_element_not_found_error(e: "FeishuAPIError") -> bool:
     """判断 FeishuAPIError 是否为"元素不存在"错误。"""
-    if e.code == CARDKIT_ELEMENT_NOT_FOUND:
+    code = getattr(e, "code", None)
+    if code == CARDKIT_ELEMENT_NOT_FOUND:
         return True
-    if e.code == CARDKIT_ELEMENT_NOT_FOUND_ALT:
+    if code == CARDKIT_ELEMENT_NOT_FOUND_ALT:
         return True
     # 300315 + "not find elementID" = insert_before 引用不存在的元素
-    if e.code == CARDKIT_SCHEMA_ERROR and _RE_ELEMENT_NOT_FOUND.search(str(e)):
+    if code == CARDKIT_SCHEMA_ERROR and _RE_ELEMENT_NOT_FOUND.search(str(e)):
         return True
     return False
 
@@ -579,7 +592,19 @@ class FeishuClient:
             _logger.debug("perf: feishu_batch_update card=%s elapsed=%.0fms actions=%d", card_id[:12], elapsed_ms, len(actions))
             self._check(resp, "cardkit_batch_update")
 
-        await self._retry_transient("cardkit_batch_update", _do)
+        # 纯 add_elements 不是幂等操作：网络错误时首次请求可能已落卡，
+        # 自动重放会插入重复元素。由上层用固定 ID 定点更新处理可恢复场景。
+        has_blind_add = any(
+            isinstance(action, dict) and action.get("action") == "add_elements"
+            for action in actions
+        ) and not any(
+            isinstance(action, dict) and action.get("action") == "delete_elements"
+            for action in actions
+        )
+        if has_blind_add:
+            await _do()
+        else:
+            await self._retry_transient("cardkit_batch_update", _do)
 
     async def cardkit_close_streaming(
         self,

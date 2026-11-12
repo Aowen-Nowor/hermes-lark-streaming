@@ -197,11 +197,14 @@ class TestPrintStrategy:
 class TestGetHermesConfigPath:
     """_get_hermes_config_path() 动态路径解析测试 — 多 Profile 场景."""
 
-    def test_default_path_when_no_env(self) -> None:
-        """无 HERMES_HOME 环境变量时，使用 ~/.hermes/config.yaml."""
-        with patch.dict(os.environ, {}, clear=True):
+    def test_default_path_when_no_env(self, tmp_path: Path) -> None:
+        """无 HERMES_HOME 时跟随 Hermes 平台默认目录，而非一律 ~/.hermes。"""
+        with patch.dict(os.environ, {"LOCALAPPDATA": str(tmp_path)}, clear=False):
             os.environ.pop("HERMES_HOME", None)
             path = _get_hermes_config_path()
+        if os.name == "nt":
+            assert path == tmp_path / "hermes" / "config.yaml"
+        else:
             assert path == Path.home() / ".hermes" / "config.yaml"
 
     def test_custom_path_from_env(self) -> None:
@@ -223,19 +226,51 @@ class TestGetHermesConfigPath:
         with patch.dict(os.environ, {"HERMES_HOME": "/path/b"}):
             path_b = _get_hermes_config_path()
         assert path_a != path_b
-        assert str(path_a).startswith("/path/a")
-        assert str(path_b).startswith("/path/b")
+        assert path_a == Path("/path/a/config.yaml")
+        assert path_b == Path("/path/b/config.yaml")
+
+    def test_context_local_home_override_wins(self, tmp_path: Path) -> None:
+        """Hermes context-local profile override 优先于进程 HERMES_HOME。"""
+        override = tmp_path / "context-profile"
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path / "process-home")}), \
+                patch("hermes_lark_streaming.config.reader.get_hermes_home", return_value=override):
+            assert _get_hermes_config_path() == override / "config.yaml"
 
 
 class TestConfigSingleton:
     """v1.2.0: Config 单例模式 + /aowen config reload 全局生效."""
 
     def test_singleton_same_instance(self) -> None:
-        """Config() 多次调用返回同一实例."""
+        """Config() 多次调用返回同一实例。"""
         from hermes_lark_streaming.config.reader import Config
         cfg1 = Config()
         cfg2 = Config()
         assert cfg1 is cfg2
+
+    def test_profiles_use_isolated_instances_and_values(self, tmp_path: Path) -> None:
+        """同一进程内切换 profile 时，不串用首个 profile 的配置或缓存。"""
+        import yaml
+        from hermes_lark_streaming.config.reader import Config
+
+        home_a, home_b = tmp_path / "a", tmp_path / "b"
+        home_a.mkdir(); home_b.mkdir()
+        (home_a / "config.yaml").write_text(yaml.dump({
+            "feishu_streaming": {"oneshot_cards": False},
+        }))
+        (home_b / "config.yaml").write_text(yaml.dump({
+            "feishu_streaming": {"oneshot_cards": True},
+        }))
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(home_a)}):
+            cfg_a = Config()
+            assert cfg_a.oneshot_cards is False
+        with patch.dict(os.environ, {"HERMES_HOME": str(home_b)}):
+            cfg_b = Config()
+            assert cfg_b.oneshot_cards is True
+        with patch.dict(os.environ, {"HERMES_HOME": str(home_a)}):
+            assert Config() is cfg_a
+            assert Config().oneshot_cards is False
+        assert cfg_b is not cfg_a
 
     def test_reload_clears_cache_for_all_holders(self, tmp_path: object) -> None:
         """v1.2.0 修复: /aowen config reload 后 controller 持有的实例缓存也清掉.

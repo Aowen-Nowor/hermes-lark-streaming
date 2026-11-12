@@ -189,8 +189,13 @@ def level3(hermes_root: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--with-sdk", action="store_true")
-    ap.add_argument("--with-hermes", nargs="?", const="/home/z/my-project/audit/hermes-agent")
+    ap.add_argument(
+        "--with-hermes", nargs="?", const=None, default=None,
+        help="Hermes 源码目录；指定该开关时必须同时提供目录，不使用作者机默认路径。",
+    )
     args = ap.parse_args()
+    if "--with-hermes" in sys.argv and args.with_hermes is None:
+        ap.error("--with-hermes requires an explicit Hermes source directory")
 
     level1()
     if args.with_sdk:

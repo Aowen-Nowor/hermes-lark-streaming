@@ -1,5 +1,30 @@
 # 更新日志
 
+## v2.0.35（2026-11-12，本地验证中，未发布）
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| 安全 | E2E 仅凭凭证存在就切到真实飞书 | 普通回归或 compat probe 可能误发连通性文本和卡片 | pytest E2E、独立场景脚本与兼容探针统一默认 mock；只有精确 `FEISHU_E2E_REAL=1` 且 APP_ID/SECRET/CHAT_ID 齐全才允许 real，其他取值一律不授权 |
+| 修复 | 配置路径、缓存和凭证读取未完整遵循 profile 作用域 | 写死 home 或裸读进程环境可能落到默认 profile，命名 profile 间出现配置/凭证串用 | 使用官方 `get_hermes_home()` / `hermes_home_key()` 与 scoped secret；配置缓存按 profile 隔离，standalone/最小环境保留本地兼容回退 |
+| 架构 | 注册期自动注入或迁移配置 | 插件启用不应隐式改写用户配置，旧文档的“零注入”与实际行为不一致 | `register()` 只做依赖检查和平台注册；可选 `feishu_streaming` 由用户显式配置，V1 migration/cleanup 仅经显式入口执行 |
+| 功能 | `.env` 凭证不能完整驱动自定义平台，standalone 发送绕过卡片层 | 自定义平台未声明内置同款的 env 桥接，standalone 直接使用内置发送会退化为纯文本 | 注册官方 `EnvCred` / env-enable、授权字段与 home channel；standalone sender 构造 `FeishuStreamingAdapter`，返回 `feishu-streaming` 平台身份并复用卡片出站 |
+| 修复 | 定稿重试可能重复页脚，关流失败后无法只补关流 | 非幂等 `add_elements` 在“服务端已应用、响应丢失/sequence 冲突”时不能盲目重放；官方 `partial_update_element` 禁止携带 `tag`（300312） | 页脚带稳定 element ID 并记录 add 已尝试；后续只定点更新，`partial_element` 剔除 `tag`，只有明确元素不存在才重新 add；重复 finalize 与 watchdog 按缺失阶段补页脚或 close_streaming |
+| 修复 | 降级卡已成功写入全文并关流，原生链路仍可能再次投递 | 调用方只收到笼统失败，无法区分“内容已安全落卡”和“需要原生重发” | send/edit/native 在 degraded seal 成功后返回已消费成功；真正未完成时才回退，避免双份正文 |
+| 修复 | reply/直发响应结果未知时直接再发一张卡或触发自动重试 | 首次投递可能已在服务端生效，盲目直发、Hermes 自动重试或原生回退都会制造重复消息 | 已确认锚点不可用才允许直发；reply/直发未知结果统一 `retryable=False`，不伪造成功，也不进入 Hermes/原生二次投递；降级正文落卡与关流成功分开判定 |
+| 修复 | 中文/繁体后台通知被误当进度，commentary 无 reply_to 时被误归后台 | 通知模板覆盖不全，且把 reply_to 当作唯一对话性判据会随上游帧形状变化失效；任意插件 interim 又可能没有后续 finalize | 补齐精确后台模板；只有确认回合锚的 commentary 才可 early-create，未确认通知回原生；standalone 标记非回合投递，普通独立正文不再被宽吸收进面板 |
+| 修复 | 本地 CLI 诊断和 smoke 参数错误仍可能返回成功 | 状态、凭证、依赖和写入失败没有统一反映到退出码，Windows 运行时解释器发现也不完整 | status/verify/doctor/cleanup 在缺凭证、缺 Hermes、写失败等情况下返回非零；补充 Windows/Linux 托管环境解释器发现，smoke 的 `--with-hermes` 强制显式路径 |
+| 安全 | Gitee API 异常可能把 access token 打进日志 | 异常 URL 的 query 会包含原始或 URL 编码后的凭证 | 通知脚本在输出异常前同时脱敏原始与编码后的 token，日志仅保留 `<redacted>` |
+| CI | 测试/兼容探针失败可能被流水线吞掉，发布目标与被测提交不一致 | 管道退出码、无结论输出和镜像顺序处理不严会把未验证代码当成已验证 | 记录真实 pytest/probe 退出码，只有明确 pass/fail 才推进对应状态；先检出并测试 Gitee tip 再镜像，已有 Release 的 target 必须匹配被测 SHA；远端认证改用一次性 header，不嵌入 URL；GitHub Actions 全部固定到完整 commit SHA |
+| 优化 | watchdog 定时器与建卡前 pending 可能累积 | 短回合重复 arm、无客户端假成功和无限暂存会增加事件循环与内存压力 | 每 chat 单 watchdog 句柄并校验 card/turn，终态/清理路径统一取消；无客户端返回不可重试失败，pending 按合并语义去重并限制为最新 64 行 |
+| 文档 | 安装、迁移、配置与排障文档仍含手工环境操作和过期契约 | 人类与 Agent 可能照文档写 secret 到 YAML、手工维护运行环境、使用危险进程/锁操作或误跑真实 E2E | 重写 README、SKILL、API；统一真实 Gitee URL 与官方 install/update/uninstall/config 命令，补齐 V1→V2、回滚、完整配置、mock/real 红线、故障排查及脱敏 Issue 模板 |
+| 验收 | 合并修复不能只依赖子代理汇报 | A/B/C 并行实现后必须同一代码复核 | 全量 mock `946 passed`；`python scripts/smoke_v2.py` 13/13；实际 `hermes plugins validate` Passed（存量 private imports 与 dump_all_env 警告保留） |
+| 真飞书 | mock 不能证明真实卡片渲染与 reply 关系 | 卡片行为、页脚定点更新和边界窗口需专用会话实写验证 | 经授权以 `FEISHU_E2E_REAL=1` 执行 connect/answer/full/reply/oneshot/progress/interim/burst/clarify/plain/native：`67/67` PASS（native 边界脚本等待后重跑，未算作插件失败）；另固定 ID 页脚二次 `partial_update_element` 真卡通过（card_id=7707223425866664892）。关键 `om_`：connect=om_x100b606c886608a…、answer=om_x100b606c881520a…、full=om_x100b606c89acb4a…、reply=om_x100b606c89218cb…、oneshot=om_x100b606c86f6b4b… |
+
+> 审计方法：以当前工作区代码/测试、Hermes 0.23.1 实际 CLI `--help`、内置 Feishu 的 `EnvCred`/注册实现及官方插件文档交叉核对；投递故障按“服务端已应用但响应未知”审查，文档中的命令、默认值和出站契约逐项回查实现。初审后另做独立规格/质量两轮审查，补测 Hermes 自动重试、原生回退、单次 final、非回合插件通知和 standalone 分类入口并逐项修复。版本仍在本地验证，不把 mock 结果冒充真实飞书验收。
+>
+> 已知限制：本条目**未发布**。已在专用会话完成主要真实飞书 E2E，但“服务端已应用、响应丢失”故障注入、慢网络停机 seal、全语言通知模板和当前网关内非 mock turn 仍属后续验收范围。mock 不能证明飞书客户端最终视觉与引用关系；内置适配器继承面仍受 Hermes 上游变更影响，失配时应明确报错而不是静默降级。V1 cleanup 依赖原 V1 代码仍在，缺失时须先恢复原代码与备份。
+---
+
 ## v2.0.34（2026-11-10）
 
 > 审计方法：用户三症状（2026-11-10 日志包 logs-v33 + hermes-agent@8b50838 源码 + 插件 v2.0.33 代码三方互证，原始帧形状逐字节取证，hermes locales 模板直接核验）→ 按用户裁决收敛修复面（第一原则不注册钩子）→ 实施。

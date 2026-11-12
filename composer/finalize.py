@@ -110,24 +110,67 @@ async def _seal_footer(
     )
     if not elements:
         return
+    # 固定 ID 让“请求已应用、响应撞 300317”的恢复路径改为定点覆盖；
+    # 盲目重放 add_elements 会在同一张卡上插入两份页脚。
+    for index, element in enumerate(elements):
+        element["element_id"] = f"finalize_footer_{index}"
     state.seq += 1
-    # v2.0.9 P0-1：页脚插入同样走 300317 自愈（网络重试同 seq 重发场景）
-    await call_with_seq_recovery(
-        state,
-        lambda seq: client.cardkit_batch_update(
-            state.card_id,
-            [{
-                "action": "add_elements",
-                "params": {
-                    "type": "insert_before",
-                    "target_element_id": _LOADING_ELEMENT_ID,
-                    "elements": elements,
+    add_action = {
+        "action": "add_elements",
+        "params": {
+            "type": "insert_before",
+            "target_element_id": _LOADING_ELEMENT_ID,
+            "elements": elements,
+        },
+    }
+    update_actions = [
+        {
+            "action": "partial_update_element",
+            "params": {
+                "element_id": element["element_id"],
+                "partial_element": {
+                    key: value for key, value in element.items() if key != "tag"
                 },
-            }],
-            sequence=seq,
-        ),
-        what="finalize:footer-add",
-    )
+            },
+        }
+        for element in elements
+    ]
+
+    async def _update_or_add_missing() -> None:
+        state.seq += 1
+        try:
+            await call_with_seq_recovery(
+                state,
+                lambda seq: client.cardkit_batch_update(
+                    state.card_id, update_actions, sequence=seq,
+                ),
+                what="finalize:footer-update",
+            )
+        except Exception as update_exc:
+            from ..feishu.client import is_element_not_found_error
+
+            if not is_element_not_found_error(update_exc):
+                raise
+            # 只有服务端明确否认元素存在，才证明 add 不会制造重复页脚。
+            state.seq += 1
+            await call_with_seq_recovery(
+                state,
+                lambda seq: client.cardkit_batch_update(
+                    state.card_id, [add_action], sequence=seq,
+                ),
+                what="finalize:footer-add-missing",
+            )
+
+    if not getattr(state, "footer_add_attempted", False):
+        state.footer_add_attempted = True
+        try:
+            await client.cardkit_batch_update(
+                state.card_id, [add_action], sequence=state.seq,
+            )
+        except Exception:
+            await _update_or_add_missing()
+    else:
+        await _update_or_add_missing()
     # 删 spinner：尽力而为（streaming close 后飞书可能已隐藏 loading；
     # not found / 并发编辑失败都不影响页脚已经落卡）。
     try:
@@ -237,6 +280,27 @@ async def _reseal_panel(
     return True
 
 
+async def _close_streaming(client: Any, state: Any) -> None:
+    """关流式是独立阶段；成功后才记录完成，供重复 finalize 做 close-only。"""
+    if getattr(state, "streaming_closed", False):
+        return
+    state.seq += 1
+    try:
+        await call_with_seq_recovery(
+            state,
+            lambda seq: client.cardkit_close_streaming(
+                state.card_id, sequence=seq, summary=_summary_of(state)),
+            what="finalize:close",
+        )
+    except Exception:
+        _logger.warning(
+            "composer: close_streaming skipped (non-fatal) card=%s",
+            str(state.card_id)[:12], exc_info=True,
+        )
+    else:
+        state.streaming_closed = True
+
+
 async def finalize_card(
     client: Any,
     state: Any,
@@ -255,6 +319,12 @@ async def finalize_card(
     answer 终值 patch 撞 200850（长回合流式会话超时）时由 call_with_seq_recovery
     主流程自愈后重发——定稿是最后一刀，撞墙即弃会前功尽弃。
     """
+    if getattr(state, "streaming_closed", False) and getattr(state, "footer_sealed", False):
+        return
+    if getattr(state, "footer_sealed", False) and not getattr(state, "streaming_closed", False):
+        await _close_streaming(client, state)
+        return
+
     client.cardkit_stream_element  # noqa: B018 — 提前触发 attribute 错误便于诊断
     state.seq += 1
     # v2.0.9 P0-1：三步定稿全部走 300317 自愈（answer 终值/页脚/关流式）
@@ -294,6 +364,8 @@ async def finalize_card(
             "composer: footer seal failed (non-fatal) card=%s", str(state.card_id)[:12],
             exc_info=True,
         )
+    else:
+        state.footer_sealed = True
     # v2.0.13（Task 18 P1-A）：空面板壳清除——整轮无工具/思考行（status_lines=0）
     # 时删除 collapsible_panel 元素。纯 answer 回合（Task 18 取证 16:54:57 卡：
     # created status_lines=0 → finalized status_lines=0）卡上遗留 "agent loop"
@@ -338,24 +410,7 @@ async def finalize_card(
                 "composer: panel reseal skipped (non-fatal) card=%s",
                 str(state.card_id)[:12], exc_info=True,
             )
-    state.seq += 1
-    # v2.0.21（审计 R3）：关流式装饰性化——此前失败上抛 → _degrade → 卡片
-    # 通道退役 + 官方回落路径要么被幂等守卫短路（跑马灯永挂：流式模式未关，
-    # spinner 持续转），要么原生重发全文（重复消息）。此刻答案已流完送达、
-    # 页脚已落卡，关流式失败的最坏后果 = 卡片留在流式态，对齐
-    # _seal_footer/_reseal_panel「装饰性步骤失败仅 warning 绝不上抛」语义。
-    try:
-        await call_with_seq_recovery(
-            state,
-            lambda seq: client.cardkit_close_streaming(
-                state.card_id, sequence=seq, summary=_summary_of(state)),
-            what="finalize:close",
-        )
-    except Exception:
-        _logger.warning(
-            "composer: close_streaming skipped (non-fatal) card=%s",
-            str(state.card_id)[:12], exc_info=True,
-        )
+    await _close_streaming(client, state)
     _logger.debug(
         "composer: card finalized card=%s elapsed=%.1fs status_lines=%d",
         state.card_id[:12], time.monotonic() - state.created_at, len(state.status_lines),

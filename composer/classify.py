@@ -70,12 +70,16 @@ CH_PLAIN = "plain"        # 普通消息（cron / 后台 / 无标记发送）→
 _NOTICE_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*💾\s*Self-improvement review:\s+\S", re.IGNORECASE),
     re.compile(r"^\s*⏳\s+Working\s+—\s+\d+\s+min(?:\s|$)", re.IGNORECASE),
+    re.compile(r"^\s*⏳\s*正在处理——\d+\s*分钟(?:\s|$)"),
+    re.compile(r"^\s*⏳\s*處理中\s+—\s*\d+\s*分鐘(?:\s|$)"),
+    re.compile(r"^\s*💾\s*自我改进回顾：\s*\S"),
+    re.compile(r"^\s*💾\s*自我改進檢閱：\s*\S"),
     re.compile(r"^\s*(?:✅|❌)\s+Hermes update\s+(?:finished|failed|timed out)", re.IGNORECASE),
     re.compile(r"^\s*♻️?\s+Gateway\s+(?:restarted successfully|online\b)", re.IGNORECASE),
     # v2.0.34：gateway.shutdown.*（en + zh 双语，锚定模板特征短语）
     re.compile(r"^\s*⚠\uFE0F?\s+Hermes\s+is\s+(?:shutting\s+down|restarting)\b", re.IGNORECASE),
-    re.compile(r"^\s*⚠\uFE0F?\s+Hermes\s+(?:正在关闭|正在重启)——"),
-    re.compile(r"^\s*⚠\uFE0F?\s+(?:Scheduled\s+job|定时任务)\s+'", re.IGNORECASE),
+    re.compile(r"^\s*⚠\uFE0F?\s+Hermes\s+(?:正在关闭|正在重启|正在關閉|正在重新啟動)"),
+    re.compile(r"^\s*⚠\uFE0F?\s+(?:Scheduled\s+job|定时任务|排程任務)\s+'", re.IGNORECASE),
 )
 
 
@@ -84,7 +88,20 @@ def _is_notice_text(content: str) -> bool:
     text = (content or "").strip()
     if not text:
         return False
-    return any(rx.match(text) for rx in _NOTICE_RES)
+    return _is_background_completion_text(text) or any(rx.match(text) for rx in _NOTICE_RES)
+
+
+_BACKGROUND_COMPLETE_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^✅ 后台任务完成\n提示词："),
+    re.compile(r"^✅ 背景任務完成\n提示："),
+    re.compile(r"^✅ Background task complete\nPrompt: ", re.IGNORECASE),
+)
+
+
+def _is_background_completion_text(content: str) -> bool:
+    """gateway.background.complete_header 的当前 en/zh/zh-hant 模板。"""
+    text = (content or "").strip()
+    return any(rx.match(text) for rx in _BACKGROUND_COMPLETE_RES)
 
 
 @dataclass
@@ -166,6 +183,13 @@ def classify_send(
         expect_edits = bool(meta.get("expect_edits"))
         notify = bool(meta.get("notify"))
 
+        # /bg 完成结果是独立正式投递，不是 turn progress，也不并入活跃回合。
+        if _is_background_completion_text(content):
+            return ClassifyResult(
+                CH_PLAIN, kind="background_result", raw_content=content,
+                meta=_strip_internal_meta(meta),
+            )
+
         # 1) answer 流首帧：显式 expect_edits 且不是内部状态帧
         if expect_edits and not interim:
             return ClassifyResult(CH_STREAM, kind="answer", raw_content=content, meta=_strip_internal_meta(meta))
@@ -181,7 +205,14 @@ def classify_send(
                 kind, tool, clean = parse_progress_line(content)
                 return ClassifyResult(CH_PROGRESS, kind=kind, tool_name=tool, thinking_text=clean,
                                       raw_content=content, meta=_strip_internal_meta(meta))
-            return ClassifyResult(CH_INTERIM, kind="advisory", raw_content=content, meta=_strip_internal_meta(meta))
+            result = ClassifyResult(
+                CH_INTERIM, kind="advisory", raw_content=content,
+                meta=_strip_internal_meta(meta),
+            )
+            # 当前 Hermes 的 commentary 与后台通知都可无 reply_to；排除上面的
+            # 精确后台模板后，其余 interim assistant 文本才是对话 commentary。
+            result.meta["conversational_commentary"] = True
+            return result
 
         # 3) 定稿帧
         if notify:

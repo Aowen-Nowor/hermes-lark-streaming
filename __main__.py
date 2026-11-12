@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import shutil
 from pathlib import Path
 
 # ── 包目录（本文件所在目录） ──
@@ -29,8 +30,14 @@ def _bootstrap_package() -> None:
     except ImportError:
         pass
 
-    # 策略 2: 搜索常见安装路径.
-    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    # 策略 2: 搜索当前 Hermes home（Windows 默认不是 ~/.hermes）。
+    configured_home = os.environ.get("HERMES_HOME", "").strip()
+    if configured_home:
+        hermes_home = Path(configured_home)
+    elif os.name == "nt":
+        hermes_home = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hermes"
+    else:
+        hermes_home = Path.home() / ".hermes"
 
     search_paths: list[Path] = [
         hermes_home / "plugins",
@@ -77,16 +84,26 @@ def _bootstrap_package() -> None:
     )
 
 def _find_hermes_python() -> str | None:
-    """Auto-detect Hermes Agent Python interpreter path."""
-    candidates = [
-        Path.home() / ".hermes" / "hermes-agent" / "venv" / "bin" / "python3",
+    """优先发现当前 HERMES_HOME 的运行时，兼容 Windows 与 POSIX。"""
+    from .config.reader import _get_hermes_config_path
+
+    hermes_home = _get_hermes_config_path().parent
+    generation_patterns = (
+        hermes_home / "installs" / "*" / "environments" / "*" / "venv" / "Scripts" / "python.exe",
+        hermes_home / "installs" / "*" / "environments" / "*" / "venv" / "bin" / "python3",
+    )
+    candidates: list[Path] = []
+    for pattern in generation_patterns:
+        candidates.extend(sorted(hermes_home.glob(pattern.relative_to(hermes_home).as_posix()), reverse=True))
+    candidates.extend([
+        Path(sys.executable),
+        hermes_home / "hermes-agent" / "venv" / "bin" / "python3",
         Path("/usr/local/lib/hermes-agent/venv/bin/python3"),
         Path("/opt/hermes-agent/venv/bin/python3"),
-    ]
-    for p in candidates:
-        if p.exists():
-            return str(p)
-    import shutil
+    ])
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return str(path)
     if shutil.which("python3"):
         return shutil.which("python3")
     return None
@@ -140,71 +157,76 @@ def _print_usage() -> None:
     print("  status     Show current configuration and credentials status")
     print("  verify     Verify environment compatibility")
     print("  doctor     Full diagnostic: version, config, credentials, patch status, log path")
-    print("  cleanup    Remove plugin-injected config from config.yaml (run after uninstall)")
+    print("  cleanup    Remove plugin config sections before uninstall")
     print("  python     Print the auto-detected Hermes Python interpreter path")
     print()
     print("Note: V2 is a native platform plugin — zero monkey-patching.")
     print("      Enable by switching the gateway platform name: feishu -> feishu-streaming")
 
+def _credentials_configured(cfg: object) -> bool:
+    app_id = str(getattr(cfg, "env_app_id", "") or getattr(cfg, "feishu_app_id", "") or "").strip()
+    app_secret = str(getattr(cfg, "env_app_secret", "") or getattr(cfg, "feishu_app_secret", "") or "").strip()
+    return bool(app_id and app_secret)
+
+
 def _cmd_status() -> int:
     try:
         from hermes_lark_streaming.config import Config
 
-        cfg = Config()
-        print(f"Feishu credentials: {'configured' if (cfg.env_app_id or cfg.feishu_app_id) else 'MISSING'}")
+        configured = _credentials_configured(Config())
+        print(f"Feishu credentials: {'configured' if configured else 'MISSING'}")
         print()
         print("V2 architecture: native platform plugin, zero monkey-patching.")
         print("Enable by switching the gateway platform name: feishu -> feishu-streaming")
+        return 0 if configured else 1
     except ImportError as e:
         print(f"Error: Cannot import hermes_lark_streaming: {e}")
         print("Please ensure the plugin is installed correctly.")
         return 1
-    return 0
+
 
 def _cmd_verify() -> int:
     try:
         from hermes_lark_streaming.config import Config
 
-        cfg = Config()
-        print(f"Feishu credentials: {'configured' if (cfg.env_app_id or cfg.feishu_app_id) else 'MISSING'}")
-
-        # Verify that gateway modules are importable
-        try:
-            from gateway.run import GatewayRunner
-            print("gateway.run.GatewayRunner: importable")
-        except ImportError as e:
-            print(f"gateway.run.GatewayRunner: NOT importable ({e})")
-
-        try:
-            from run_agent import AIAgent
-            print("run_agent.AIAgent: importable")
-        except ImportError as e:
-            print(f"run_agent.AIAgent: NOT importable ({e})")
+        configured = _credentials_configured(Config())
+        checks = [configured]
+        print(f"Feishu credentials: {'configured' if configured else 'MISSING'}")
+        for module_name, symbol in (("gateway.run", "GatewayRunner"), ("run_agent", "AIAgent")):
+            try:
+                module = importlib.import_module(module_name)
+                available = hasattr(module, symbol)
+                detail = "importable" if available else f"missing {symbol}"
+            except Exception as exc:
+                available = False
+                detail = f"NOT importable ({exc})"
+            print(f"{module_name}.{symbol}: {detail}")
+            checks.append(available)
+        return 0 if all(checks) else 1
     except ImportError as e:
         print(f"Error: Cannot import hermes_lark_streaming: {e}")
         print("Please ensure the plugin is installed correctly.")
         return 1
 
-    return 0
 
 def _cmd_cleanup() -> int:
-    """Remove plugin-injected config entries from config.yaml."""
+    """Remove plugin config sections before uninstalling the plugin."""
     try:
         from hermes_lark_streaming.plugin import cleanup_streaming_config
 
         cleanup_streaming_config()
         print("Cleanup complete. Next steps:")
-        print("  1. hermes plugins uninstall hermes-lark-streaming")
+        print("  1. hermes plugins uninstall feishu-streaming-platform")
         print("  2. hermes gateway restart")
-    except ImportError as e:
-        print(f"Error: Cannot import hermes_lark_streaming: {e}")
-        print("Please ensure the plugin is installed correctly.")
+        return 0
+    except Exception as e:
+        print(f"Error: cleanup failed: {e}")
         return 1
-    return 0
+
 
 def _cmd_doctor() -> int:
     """Full diagnostic: version, config, credentials, patch status, logs."""
-    import os, sys
+    import sys
     print("=" * 60)
     print("  hermes-lark-streaming doctor")
     print("=" * 60)
@@ -219,6 +241,7 @@ def _cmd_doctor() -> int:
 
     # v1.8.0 (P1-1): lark-oapi 门槛检查——hermes >= 0.19 传 extra_ua_tags，
     # lark-oapi < 1.6.4 不认该参数 → 飞书 WS 断连（2026-07-21 生产中断根因）。
+    issues: list[str] = []
     try:
         import importlib.metadata as _md
         _lark_v = _md.version("lark-oapi")
@@ -231,17 +254,22 @@ def _cmd_doctor() -> int:
             print(f"      lark-oapi:         {_lark_v} ✓ (required >=1.6.4)")
         else:
             print(f"      lark-oapi:         {_lark_v} ✗ BELOW required >=1.6.4")
-            print("      Fix: pip install -U 'lark-oapi>=1.6.4'")
+            issues.append("lark-oapi below 1.6.4")
     except Exception:
         print("      lark-oapi:         (version unknown — is lark-oapi installed?)")
+        issues.append("lark-oapi missing or undetectable")
 
     print(f"[2/6] Python:             {sys.version.split()[0]}")
-    hermes_home = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
+    from .config.reader import _get_hermes_config_path
+    hermes_home = _get_hermes_config_path().parent
     print(f"      HERMES_HOME:        {hermes_home}")
     hermes_python = _find_hermes_python()
     print(f"      Hermes Python:      {hermes_python or '(not found)'}")
-    if hermes_python and hermes_python != sys.executable:
+    if not hermes_python:
+        issues.append("Hermes Python not found")
+    elif hermes_python != sys.executable:
         print(f"      ⚠ Doctor Python differs from Hermes Python ({hermes_python})")
+        issues.append("running interpreter differs from Hermes Python")
 
     print()
     try:
@@ -258,23 +286,24 @@ def _cmd_doctor() -> int:
         return 1
 
     print()
-    has_env = bool(os.environ.get("FEISHU_APP_ID") and os.environ.get("FEISHU_APP_SECRET"))
-    has_cfg = bool(getattr(cfg, "feishu_app_id", None) and getattr(cfg, "feishu_app_secret", None))
+    has_env = bool(getattr(cfg, "env_app_id", "") and getattr(cfg, "env_app_secret", ""))
+    has_cfg = _credentials_configured(cfg)
     env_file = Path(hermes_home) / ".env"
     has_dotenv = False
     if env_file.exists():
         try:
             txt = env_file.read_text(encoding="utf-8", errors="replace")
             has_dotenv = "FEISHU_APP_ID=" in txt and "FEISHU_APP_SECRET=" in txt
-        except Exception:
-            pass
+        except OSError as exc:
+            print(f"      .env read failed: {exc}")
     print("[4/6] Feishu credentials:")
     print(f"      env vars:    {'configured' if has_env else 'not set'}")
-    print(f"      config.yaml: {'configured' if has_cfg else 'not set'}")
-    print(f"      ~/.hermes/.env: {'exists' if env_file.exists() else 'not found'}"
-          + (f" (found)" if has_dotenv else ""))
-    if not (has_env or has_cfg or has_dotenv):
+    print(f"      config.yaml/scoped: {'configured' if has_cfg else 'not set'}")
+    print(f"      {env_file}: {'exists' if env_file.exists() else 'not found'}"
+          + (" (found)" if has_dotenv else ""))
+    if not (has_cfg or has_dotenv):
         print("      ⚠ MISSING — cards will NOT work.")
+        issues.append("Feishu credentials missing")
 
     print()
     print("[5/6] Architecture: native platform plugin (zero monkey-patch)")
@@ -286,6 +315,7 @@ def _cmd_doctor() -> int:
         print(f"[5/6] Patch status: (skipped — {e})")
     except Exception as e:
         print(f"[5/6] Patch status: FAILED — {e}")
+        issues.append(f"adapter status check failed: {e}")
 
     print()
     agent_log = Path(hermes_home) / "logs" / "agent.log"
@@ -294,6 +324,10 @@ def _cmd_doctor() -> int:
     print(f"      grep 'HLS:' {agent_log} | tail -100")
     print()
     print("=" * 60)
+    if issues:
+        print("Doctor result: FAIL — " + "; ".join(issues))
+        return 1
+    print("Doctor result: PASS")
     return 0
 
 if __name__ == "__main__":

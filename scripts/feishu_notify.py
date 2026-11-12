@@ -39,6 +39,7 @@ import sys
 import time
 import urllib.request
 import xml.etree.ElementTree as ET
+from urllib.parse import quote, quote_plus
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -186,6 +187,16 @@ def _parse_ts(raw: str) -> datetime | None:
         return None
 
 
+def _redact_gitee_error(exc: Exception, token: str) -> str:
+    """Remove raw and URL-encoded access tokens before an exception reaches logs."""
+    detail = str(exc)
+    variants = {token, quote(token, safe=""), quote_plus(token)} if token else set()
+    for exposed in sorted(variants, key=len, reverse=True):
+        if exposed:
+            detail = detail.replace(exposed, "<redacted>")
+    return detail
+
+
 def _fetch_gitee(kind: str, owner: str, repo: str, token: str) -> list[dict]:
     query = f"state=all&direction=desc&per_page=30&access_token={token}"
     if kind == "pulls":
@@ -225,7 +236,8 @@ def cmd_gitee_digest() -> None:
                 if updated is not None and updated > last:
                     items.append((label, entry))
     except Exception as exc:  # noqa: BLE001
-        print(f"[feishu_notify] Gitee API 查询失败: {exc}", file=sys.stderr)
+        detail = _redact_gitee_error(exc, token)
+        print(f"[feishu_notify] Gitee API 查询失败: {detail}", file=sys.stderr)
         return
 
     if not items:

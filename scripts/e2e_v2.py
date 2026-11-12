@@ -25,6 +25,7 @@ close_streaming / 澄清卡），在真实聊天里可视化验证：
 锚点消息文案已自解释；单独跑 reply 场景时脚本会自发一条锚点并标注。
 
 用法：
+    export FEISHU_E2E_REAL=1                   # 显式授权真实飞书写操作；缺省拒绝执行
     export FEISHU_E2E_APP_ID=cli_xxx
     export FEISHU_E2E_APP_SECRET=xxx
     export FEISHU_E2E_CHAT_ID=oc_xxx          # 群聊（机器人须在群内）
@@ -96,6 +97,9 @@ def _env(name: str) -> str:
 
 
 def _require_env() -> tuple[str, str, str]:
+    if _env("FEISHU_E2E_REAL") != "1":
+        print("真实飞书 E2E 必须显式设置 FEISHU_E2E_REAL=1；默认只允许 mock。")
+        sys.exit(2)
     app_id = _env("FEISHU_E2E_APP_ID") or _env("FEISHU_APP_ID")
     app_secret = _env("FEISHU_E2E_APP_SECRET") or _env("FEISHU_APP_SECRET")
     chat_id = _env("FEISHU_E2E_CHAT_ID")
@@ -384,6 +388,9 @@ async def scenario_native(composer: FrameComposer, client: FeishuClient, chat_id
     # ⑤ 终帧（got_done → finalize=True）
     ok = await composer.handle_stream_frame(
         chat, f"native 场景答案开始。检索完成，单卡全回合。\n\n— feishu-streaming v{_V} native-scenario E2E", finalize=True)
+    # 默认 clarify_suspend_sec=1.2：无 clarify 的普通终帧先进入边界等待窗，
+    # 等窗口到期真定稿后再断言，不能把立即的 pause_pending 当成失败。
+    await asyncio.sleep(1.3)
     st2 = composer._states.get(chat)
     check("⑧ 终帧定稿", ok is True and st2 is not None and st2.finalized)
     check("⑨ 全程单卡（card_id 不变）", bool(st2 and st2.card_id == card_id_1))

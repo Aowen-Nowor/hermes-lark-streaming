@@ -10,11 +10,34 @@ from typing import Any
 
 import yaml
 
+try:
+    # Hermes 主流程：遵循 context-local profile → HERMES_HOME → 平台默认目录。
+    from hermes_constants import get_hermes_home, hermes_home_key
+except ImportError:  # standalone CLI / 最小测试环境（非 Hermes 运行时）
+    def get_hermes_home() -> Path:
+        configured = os.environ.get("HERMES_HOME", "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        if os.name == "nt":
+            base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+            return base / "hermes"
+        return Path.home() / ".hermes"
+
+    def hermes_home_key(path: str | Path | None = None) -> str:
+        candidate = Path(path) if path is not None else get_hermes_home()
+        return os.path.normcase(str(candidate.expanduser().resolve(strict=False)))
+
+try:
+    from gateway.platforms._shared import get_scoped_secret
+except ImportError:  # standalone CLI / 最小测试环境（非 Hermes 运行时）
+    def get_scoped_secret(name: str, default: Any = None, **_kwargs: Any) -> Any:
+        return os.environ.get(name, default)
+
 _logger = logging.getLogger("hermes_lark_streaming")
 
 def _get_hermes_config_path() -> Path:
-    """动态获取 Hermes 配置文件路径."""
-    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "config.yaml"
+    """返回当前 profile 的 Hermes 配置文件路径。"""
+    return get_hermes_home() / "config.yaml"
 
 def _to_bool(val: Any, default: bool = False) -> bool:
     if isinstance(val, bool):
@@ -46,15 +69,25 @@ def _to_int(val: Any, default: int) -> int:
     return default
 
 class Config:
-    """插件配置, 惰性读取. 单例模式: reload() 才能清掉 controller 持有实例缓存."""
+    """按 Hermes profile 隔离的配置缓存；同 profile 的 reload 对所有持有者生效。"""
 
     _instance: Config | None = None
+    _instances: dict[str, Config] = {}
+    _registry_lock = threading.Lock()
 
     def __new__(cls) -> Config:
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+        # 旧测试与 /aowen 清理入口把 _instance 置 None 表示重置全部缓存。
+        with cls._registry_lock:
+            if cls._instance is None:
+                cls._instances.clear()
+            key = hermes_home_key()
+            instance = cls._instances.get(key)
+            if instance is None:
+                instance = super().__new__(cls)
+                instance._initialized = False
+                cls._instances[key] = instance
+            cls._instance = instance
+            return instance
 
     def __init__(self) -> None:
         if getattr(self, "_initialized", False):
@@ -266,11 +299,19 @@ class Config:
 
     @property
     def env_app_id(self) -> str:
-        return os.environ.get("FEISHU_APP_ID") or os.environ.get("LARK_APP_ID") or ""
+        for name in ("FEISHU_APP_ID", "LARK_APP_ID"):
+            value = str(get_scoped_secret(name, "") or "").strip()
+            if value:
+                return value
+        return ""
 
     @property
     def env_app_secret(self) -> str:
-        return os.environ.get("FEISHU_APP_SECRET") or os.environ.get("LARK_APP_SECRET") or ""
+        for name in ("FEISHU_APP_SECRET", "LARK_APP_SECRET"):
+            value = str(get_scoped_secret(name, "") or "").strip()
+            if value:
+                return value
+        return ""
 
     def _plugin_sec(self) -> dict[str, Any]:
         raw = self._load()
@@ -280,16 +321,22 @@ class Config:
         return {}
 
     def _platform_cfg(self) -> dict[str, Any]:
-        """从环境变量或平台配置找飞书凭据."""
-        if self.env_app_id and self.env_app_secret:
-            return {
-                "app_id": self.env_app_id,
-                "app_secret": self.env_app_secret,
-            }
+        """按 scoped env → 当前平台 extra → V1 旧配置的顺序读取凭证。"""
         raw = self._load()
+        platforms = raw.get("platforms")
+        extra: dict[str, Any] = {}
+        if isinstance(platforms, dict):
+            current = platforms.get("feishu-streaming")
+            if isinstance(current, dict) and isinstance(current.get("extra"), dict):
+                extra = current["extra"]
+        app_id = self.env_app_id or str(extra.get("app_id") or "").strip()
+        app_secret = self.env_app_secret or str(extra.get("app_secret") or "").strip()
+        if app_id and app_secret:
+            return {"app_id": app_id, "app_secret": app_secret}
+        # V1 兼容：旧版把凭证放在顶层 feishu/lark。
         for key in ("feishu", "lark"):
             pf = raw.get(key)
-            if isinstance(pf, dict) and pf.get("app_id"):
+            if isinstance(pf, dict) and pf.get("app_id") and pf.get("app_secret"):
                 return pf
         return {}
 
@@ -301,7 +348,8 @@ class Config:
             if config_path.exists():
                 try:
                     text = config_path.read_text(encoding="utf-8")
-                    self._raw = yaml.safe_load(text) or {}
+                    loaded = yaml.safe_load(text)
+                    self._raw = loaded if isinstance(loaded, dict) else {}
                 except yaml.YAMLError:
                     _logger.warning("HLS: config YAML syntax error in %s, using empty config", config_path)
                     self._raw = {}

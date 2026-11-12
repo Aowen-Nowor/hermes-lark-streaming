@@ -20,6 +20,7 @@ from __future__ import annotations
 import pytest
 from hermes_lark_streaming.cardkit.progline import parse_progress_line
 from hermes_lark_streaming.composer.engine import FrameComposer
+from hermes_lark_streaming.feishu.client import MSG_NOT_FOUND, FeishuAPIError
 
 from .test_v213_native_streaming import _FullClient
 
@@ -39,7 +40,7 @@ class _ReplyAwareClient(_FullClient):
 
     async def reply_card_by_id(self, message_id, card_id):
         if self.reply_fail:
-            raise RuntimeError("reply API failed (anchor deleted?)")
+            raise FeishuAPIError("reply API: anchor message not found", MSG_NOT_FOUND)
         self.reply_calls.append((str(message_id), str(card_id)))
         return f"om_reply_{card_id}"
 

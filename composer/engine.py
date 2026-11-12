@@ -75,6 +75,7 @@ _STREAM_RENEW_AGE_SEC = 540.0
 # 也与存量 e2e 契约「每新增行一次 update」（test_e2e_full 两次状态补丁两次
 # update）兼容——这是有意的保守切分，见 _queue_panel_flush。
 _PANEL_FLUSH_DELAY_SEC = 0.2
+_PENDING_STATUS_MAX = 64
 
 try:  # hermes 运行时存在；导入失败时 composer 退化为纯直通（tests / 无 hermes 环境）
     from gateway.platforms.base import SendResult  # type: ignore
@@ -118,6 +119,9 @@ class CardTurnState:
     turn_started_at: float | None = None
     last_activity: float = field(default_factory=time.monotonic)
     finalized: bool = False
+    footer_sealed: bool = False          # 页脚/面板阶段已完成；重复定稿不得重放
+    footer_add_attempted: bool = False   # 首次 add 后只定点更新，防未知结果重插
+    streaming_closed: bool = False       # close_streaming 已确认成功
     degraded: bool = False             # 卡片 API 失败 → 本 turn 走原生
     pending_status: list[str] = field(default_factory=list)  # 卡片建立前的 progress 暂存
     # v2.0.24 面板懒渲染：当前卡片 JSON 上是否存在 agent loop 面板。
@@ -197,6 +201,8 @@ class FrameComposer:
         # v2.0.26：per-chat 暂停窗口落定定时器（loop.call_later，与看门狗同款
         # 架构——句柄不在 all_tasks() 中，到期才建 task）。
         self._pause_timers: dict[str, asyncio.TimerHandle] = {}
+        # 每 chat 单看门狗句柄；重武装先取消，生命周期回收同步清理。
+        self._watchdog_timers: dict[str, asyncio.TimerHandle] = {}
         # v2.0.33（审计 FIX-6）：GC 孤儿卡收口的 fire-and-forget 任务强引用集。
         # ensure_future 裸任务可能被事件循环中途垃圾回收（asyncio 文档明确
         # 要求保留引用），done_callback 自动清席。
@@ -289,6 +295,7 @@ class FrameComposer:
             if st and st.card_message_id:
                 self._by_message.pop(st.card_message_id, None)
             self._cancel_pause(cid)
+            self._cancel_watchdog(cid)
             # OPT-1a（面板合并护栏）：合并 timer 随状态驱逐一并取消——已定稿
             # 60s 冷却回收与未定稿孤儿 seal 排队（_schedule_orphan_seal 内含
             # force 冲刷）两条路径都不该再留挂起 timer，否则到期只会空转一次
@@ -478,7 +485,11 @@ class FrameComposer:
                 self._degrade(chat_id, "send", exc)
                 # v2.0.32（P0-2）：降级瞬间把远端卡优雅收口（footer+关流式），
                 # 消灭「降级后远端卡永久流式态」跑马灯。
-                await self._seal_degraded_card(chat_id)
+                sealed = await self._seal_degraded_card(chat_id)
+                if sealed and cls.channel in (CH_STREAM, CH_FINAL):
+                    st = self._states.get(chat_id)
+                    if st is not None:
+                        return SendResult(success=True, message_id=st.card_message_id)
                 return None
 
     # ── reasoning 流回灌（v2.0.7，插件 stream-hook 守护线程 → 事件循环）───
@@ -669,7 +680,10 @@ class FrameComposer:
             except Exception as exc:  # noqa: BLE001 — 降级红线：任何失败走原生
                 self._degrade(chat_id, "edit", exc)
                 # v2.0.32（P0-2）：同 send 降级路径——远端卡优雅收口。
-                await self._seal_degraded_card(chat_id)
+                if await self._seal_degraded_card(chat_id):
+                    st = self._states.get(chat_id)
+                    if st is not None:
+                        return SendResult(success=True, message_id=st.card_message_id)
                 return None
 
     # ── native streaming 帧通道（v2.0.13，Task 18 P1-B）──────────────────────
@@ -768,14 +782,29 @@ class FrameComposer:
                             chat_id, CardTurnState(chat_id=chat_id))
                         if placeholder.turn_started_at is None:
                             placeholder.turn_started_at = time.monotonic()
-                        placeholder.pending_status.extend(progress)
+                        self._stage_pending_status(placeholder, progress)
                         placeholder.last_activity = time.monotonic()
                 if finalize:
+                    previous = self._states.get(chat_id)
+                    if (
+                        previous is not None and previous.finalized and not previous.degraded
+                        and (not turn_id or not previous.turn_id or previous.turn_id == turn_id)
+                    ):
+                        await self._finalize(previous, answer)
+                        return True
                     st = self.active_state(chat_id)
                     if st is None:
                         # 终帧无活跃卡（上轮已封/状态被清理）：建卡再封——
                         # 快照即终值，内容永不丢红线。
-                        await self._create_card(chat_id, answer, reply_to=reply_to)
+                        created = await self._create_card(chat_id, answer, reply_to=reply_to)
+                        if created is None:
+                            return False
+                        if not created.success:
+                            _logger.warning(
+                                "composer: streaming card delivery outcome unknown; suppressing native redelivery: %s",
+                                created.error,
+                            )
+                            return True
                         st = self._states.get(chat_id)
                         if st is None:  # pragma: no cover — create 失败已抛异常
                             return False
@@ -787,7 +816,15 @@ class FrameComposer:
                 if st is None:
                     # 种子帧/首内容帧：建卡（暂存行并入首卡面板；answer 空则
                     # 只建骨架不写 answer 元素——_create_card 内已处理）。
-                    await self._create_card(chat_id, answer, reply_to=reply_to)
+                    created = await self._create_card(chat_id, answer, reply_to=reply_to)
+                    if created is None:
+                        return False
+                    if not created.success:
+                        _logger.warning(
+                            "composer: streaming card delivery outcome unknown; suppressing native redelivery: %s",
+                            created.error,
+                        )
+                        return True
                     st = self._states.get(chat_id)
                     if st is not None and turn_id:
                         st.turn_id = turn_id
@@ -828,8 +865,9 @@ class FrameComposer:
             except Exception as exc:  # noqa: BLE001 — 降级红线：native 帧失败回落
                 self._degrade(chat_id, "stream_frame", exc)
                 # v2.0.32（P0-2）：同 send/edit 降级路径——远端卡优雅收口。
-                await self._seal_degraded_card(chat_id)
-                return False
+                sealed = await self._seal_degraded_card(chat_id)
+                st = self._states.get(chat_id)
+                return bool(sealed and st is not None and (st.answer_text or "").strip())
 
     async def _absorb_status_lines(self, st: CardTurnState, lines: list[str]) -> None:
         """进度行合并进活跃面板（幂等/原地取代/思考累积，v2.0.5 合并器）.
@@ -916,14 +954,29 @@ class FrameComposer:
         if anchor.startswith("om_"):
             try:
                 message_id = await client.reply_card_by_id(anchor, card_id)
-            except Exception:
+            except Exception as exc:
+                from ..feishu.client import is_definitive_reply_anchor_error
+
+                if not is_definitive_reply_anchor_error(exc):
+                    return SendResult(
+                        success=False,
+                        error=f"reply delivery outcome unknown: {exc}",
+                        retryable=False,
+                    )
                 _logger.warning(
                     "composer: reply card failed (anchor=%s) — fallback to direct send",
                     anchor[:20], exc_info=True,
                 )
                 message_id = None
         if not message_id:
-            message_id = await client.send_card_by_id_to_chat(chat_id, card_id)
+            try:
+                message_id = await client.send_card_by_id_to_chat(chat_id, card_id)
+            except Exception as exc:
+                return SendResult(
+                    success=False,
+                    error=f"direct card delivery outcome unknown: {exc}",
+                    retryable=False,
+                )
         # 复用占位/上一 turn 状态对象（保留注册表连续性），升级为活跃卡片。
         # 注意必须重置终态旗标：同 chat 连续 turn 时 prev 可能是上一 turn 的
         # finalized 状态，不重置会导致第 2 turn active_state 恒 None（重复建卡）。
@@ -945,6 +998,9 @@ class FrameComposer:
         # v2.0.32（P1-3 方案B）：新卡即新流式会话，续期计时从建卡起算。
         st.stream_session_at = time.monotonic()
         st.finalized = False
+        st.footer_sealed = False
+        st.footer_add_attempted = False
+        st.streaming_closed = False
         st.degraded = False
         # v2.0.26：clarify 暂停族字段随回合重置（prev 复用连续性——上一回合
         # 残留的暂停态不得渗透进新回合）。
@@ -1074,6 +1130,12 @@ class FrameComposer:
         # OPT-4：上传成功即记录基线（finalize 比对 state.answer_text 等值跳过）。
         st.last_streamed_answer = st.answer_text
 
+    def _stage_pending_status(self, st: CardTurnState, lines: list[str]) -> None:
+        """建卡前暂存与活跃面板同去重语义，并保留最新 64 行防无界增长。"""
+        merged = _merge_progress_lines(st.pending_status, lines)
+        if merged is not None:
+            st.pending_status = merged[-_PENDING_STATUS_MAX:]
+
     async def _on_progress(self, chat_id: str, cls: ClassifyResult, *, reply_to: str | None = None) -> SendResult | None:
         st = self.active_state(chat_id)
         raw = (cls.raw_content or "").strip()
@@ -1084,7 +1146,7 @@ class FrameComposer:
                 chat_id, CardTurnState(chat_id=chat_id))
             if placeholder.turn_started_at is None:
                 placeholder.turn_started_at = time.monotonic()
-            placeholder.pending_status.append(raw)
+            self._stage_pending_status(placeholder, [raw])
             # v2.0.9 P0-2 伴生：占位状态同样按 last_activity 空闲回收——
             # 建卡失败期的持续帧必须续命，否则 TTL 后暂存被 GC 误清。
             placeholder.last_activity = time.monotonic()
@@ -1093,12 +1155,16 @@ class FrameComposer:
             # 留空待流式。仍不回传 message_id：防网关把返回 id 当作进度气泡
             # anchor 反复 edit（v2.0.1 事故预防）。
             try:
-                await self._create_card(chat_id, "", reply_to=reply_to)
+                created = await self._create_card(chat_id, "", reply_to=reply_to)
+                if created is not None and not created.success:
+                    return created
             except Exception:  # 建卡失败维持暂存语义（TTL 兜底），不阻断
                 _logger.debug(
                     "composer: early card creation failed — staged pending only chat=%s",
                     chat_id, exc_info=True,
                 )
+            if self.active_state(chat_id) is None:
+                return None
             return SendResult(success=True)
         # v2.0.1：网关 accumulate 模式下气泡文本是“当前全部进度行”的全量快照
         # （edit_interval 每 tick 重发累积全文）；separate 模式则是单行增量。
@@ -1122,7 +1188,8 @@ class FrameComposer:
     ) -> SendResult | None:
         st = self.active_state(chat_id)
         text = (content or "").strip()
-        if st is None and text and cls.meta.get("conversational_commentary"):
+        if st is None and text and cls.meta.get("conversational_commentary") \
+                and cls.meta.get("commentary_anchor_confirmed"):
             # v2.0.34-hotfix（用户症状①，logs11.11 22:33 轮三方互证）：turn 首段
             # 前导文本经 hermes commentary 通道独立投递（gateway
             # _send_commentary → adapter.send(reply_to=触发锚, _interim_send)），
@@ -1163,6 +1230,9 @@ class FrameComposer:
         return SendResult(success=True, message_id=st.card_message_id)
 
     async def _on_final_send(self, chat_id: str, content: str) -> SendResult | None:
+        previous = self._states.get(chat_id)
+        if previous is not None and previous.finalized and not previous.degraded:
+            return await self._finalize(previous, content)
         st = self.active_state(chat_id)
         if st is None:
             return None
@@ -1209,12 +1279,26 @@ class FrameComposer:
     async def _finalize(self, st: CardTurnState, content: str) -> SendResult:
         from .finalize import finalize_card
 
+        self._cancel_watchdog(st.chat_id)
         client = self._get_client()
         if client is None:
             raise RuntimeError("card client unavailable")
         # v2.0.9 P1-4：幂等守卫先行——网关重试/重复 finalize 事件会重复插
-        # 页脚（三步定稿非事务性）。已定稿直接短路返回成功。
+        # 页脚（三步定稿非事务性）。已定稿直接短路返回成功；若仅 close 失败，
+        # 则只补关流式， finalize_card 的阶段标记保证不重放页脚。
         if st.finalized:
+            if not getattr(st, "streaming_closed", False) or not getattr(st, "footer_sealed", False):
+                await finalize_card(
+                    client, st, answer_element_id=_answer_element_id(),
+                    footer_fields=self._footer_fields(),
+                    footer_show_label=self._footer_show_label(),
+                    panel_title=_panel_title(st.status_lines, elapsed_ms=_turn_elapsed_ms(st)),
+                    panel_expanded=self._panel_expanded(),
+                    model_name=self._resolve_footer_model(st.chat_id),
+                    reopen=self._reopen_closure(st),
+                )
+            if not getattr(st, "streaming_closed", False) or not getattr(st, "footer_sealed", False):
+                self._arm_watchdog(st.chat_id)
             return SendResult(success=True, message_id=st.card_message_id)
         # OPT-1a：定稿入口强制冲刷挂起面板状态（取消合并 timer，同步上传）——
         # 最后面板状态必须先于 finalize 四步 API 落卡（流式正确性红线）。
@@ -1251,6 +1335,8 @@ class FrameComposer:
             "composer: card finalized chat=%s card=%s answer_len=%d status_lines=%d",
             st.chat_id, st.card_id, len(st.answer_text or ""), len(st.status_lines),
         )
+        if not getattr(st, "streaming_closed", False) or not getattr(st, "footer_sealed", False):
+            self._arm_watchdog(st.chat_id)
         return SendResult(success=True, message_id=st.card_message_id)
 
     # ── clarify 暂停/恢复（v2.0.26，同卡续流）────────────────────────────
@@ -1365,7 +1451,7 @@ class FrameComposer:
             chat_id, where, exc,
         )
 
-    async def _seal_degraded_card(self, chat_id: str) -> None:
+    async def _seal_degraded_card(self, chat_id: str) -> bool:
         """v2.0.32（审计 P0-2）：降级瞬间优雅收口远端卡（跑马灯永挂根治）.
 
         事故实证（11-07 12:11:08 / 15:18:35）：200850 撞墙 → _degrade 只置本端
@@ -1377,12 +1463,16 @@ class FrameComposer:
         """
         st = self._states.get(chat_id)
         if st is None or not st.card_id:
-            return  # 占位/无卡降级（如 client 缺失）无远端卡可收口
-        if await self._seal_live_card(st):
+            return False  # 占位/无卡降级（如 client 缺失）无远端卡可收口
+        sealed = await self._seal_live_card(st)
+        if sealed:
             _logger.info(
                 "composer: degraded card sealed chat=%s card=%s",
                 chat_id[:12], str(st.card_id)[:12],
             )
+            if not st.streaming_closed or not st.footer_sealed:
+                self._arm_watchdog(chat_id)
+        return sealed
 
     async def _seal_live_card(self, st: CardTurnState) -> bool:
         """对单张远端活跃卡执行 finalize_card 优雅收口（降级/GC/停机共用核心）.
@@ -1422,7 +1512,9 @@ class FrameComposer:
                 str(st.card_id)[:12], exc_info=True,
             )
             return False
-        return True
+        # 返回值只回答“当前全文是否已落卡”；close 是否成功由独立状态跟踪，
+        # 关流失败不得再触发原生全文重投。
+        return (st.last_streamed_answer or "") == (st.answer_text or "")
 
     async def seal_all_on_shutdown(self) -> int:
         """网关停机收口：对全部未落定的远端活跃卡执行优雅定稿（v2.0.33 FIX-1）.
@@ -1442,6 +1534,8 @@ class FrameComposer:
         'composer: shutdown seal closed N live card(s)' 供停机取证。
         """
         sealed = 0
+        for chat_id in list(self._watchdog_timers):
+            self._cancel_watchdog(chat_id)
         deadline = time.monotonic() + 5.0
         for chat_id, st in list(self._states.items()):
             if st.finalized or st.degraded or not st.card_id:
@@ -1483,7 +1577,14 @@ class FrameComposer:
         """
         self._arm_watchdog(chat_id)
 
+    def _cancel_watchdog(self, chat_id: str) -> None:
+        timer = self._watchdog_timers.pop(chat_id, None)
+        if timer is not None:
+            with contextlib.suppress(Exception):
+                timer.cancel()
+
     def _arm_watchdog(self, chat_id: str) -> None:
+        self._cancel_watchdog(chat_id)
         loop = self._loop
         if loop is None or loop.is_closed():
             return
@@ -1494,17 +1595,31 @@ class FrameComposer:
             # 判定按配置阈值放行后重武装却要再等 300s（孤儿卡收口延迟最高
             # 5 倍于配置值）；> 300 配置则提前到期、due 内静默复查挡住（无害
             # 但空转）。统一以 _watchdog_idle_sec() 为唯一事实源。
-            loop.call_later(self._watchdog_idle_sec(), self._watchdog_due, chat_id)
+            st = self._states.get(chat_id)
+            expected_card_id = st.card_id if st is not None else ""
+            expected_turn_id = st.turn_id if st is not None else ""
+            self._watchdog_timers[chat_id] = loop.call_later(
+                self._watchdog_idle_sec(), self._watchdog_due,
+                chat_id, expected_card_id, expected_turn_id,
+            )
         except RuntimeError:  # loop 已停转（跨线程窗口）
             pass
         except Exception:
             _logger.debug("composer: watchdog arm failed chat=%s", chat_id, exc_info=True)
 
-    def _watchdog_due(self, chat_id: str) -> None:
-        """定时器到期回调（loop 线程）：静默达标 → 落定；仍活跃 → 重新武装."""
+    def _watchdog_due(
+        self, chat_id: str, expected_card_id: str = "", expected_turn_id: str = "",
+    ) -> None:
+        """定时器到期回调（loop 线程）：校验回合/卡片后再静默落定。"""
         try:
             st = self._states.get(chat_id)
-            if st is None or st.finalized or st.degraded:
+            if expected_card_id and (
+                st is None or st.card_id != expected_card_id
+                or (expected_turn_id and st.turn_id != expected_turn_id)
+            ):
+                return  # 旧回合/旧卡的迟到回调不得关闭新卡
+            self._watchdog_timers.pop(chat_id, None)
+            if st is None:
                 return
             if st.paused or st.pause_pending:
                 # v2.0.26：clarify 暂停/窗口期看门狗让位——等待可长达 hermes
@@ -1513,14 +1628,24 @@ class FrameComposer:
                 self._arm_watchdog(chat_id)
                 return
             if time.monotonic() - st.last_activity >= self._watchdog_idle_sec():
-                asyncio.ensure_future(self._watchdog_seal(chat_id))
+                if expected_card_id:
+                    coro = self._watchdog_seal(
+                        chat_id,
+                        expected_card_id=expected_card_id,
+                        expected_turn_id=expected_turn_id,
+                    )
+                else:
+                    coro = self._watchdog_seal(chat_id)
+                asyncio.ensure_future(coro)
             else:
                 # 回合仍活跃（tick/快照帧持续刷新 last_activity）——再等一个周期
                 self._arm_watchdog(chat_id)
         except Exception:
             _logger.debug("composer: watchdog due failed chat=%s", chat_id, exc_info=True)
 
-    async def _watchdog_seal(self, chat_id: str) -> None:
+    async def _watchdog_seal(
+        self, chat_id: str, *, expected_card_id: str = "", expected_turn_id: str = "",
+    ) -> None:
         """静默孤儿卡优雅落定（跑马灯永挂根治，v2.0.21 审计 R1）.
 
         背景（2026-10-16 全生命周期审计取证）：send_message 工具族主动投递
@@ -1545,7 +1670,19 @@ class FrameComposer:
         try:
             async with self._chat_lock(chat_id):
                 st = self._states.get(chat_id)
-                if st is None or st.finalized or st.degraded:
+                if expected_card_id and (
+                    st is None or st.card_id != expected_card_id
+                    or (expected_turn_id and st.turn_id != expected_turn_id)
+                ):
+                    return
+                if st is None:
+                    return
+                if st.finalized or st.degraded:
+                    if st.streaming_closed and st.footer_sealed:
+                        return
+                    # 单次 final 后的 footer/close 失败，也按缺失阶段恢复，
+                    # 而不是因 finalized 旗标直接放弃。
+                    await self._finalize(st, st.answer_text)
                     return
                 idle_sec = self._watchdog_idle_sec()
                 if time.monotonic() - st.last_activity < idle_sec:
@@ -1588,6 +1725,7 @@ class FrameComposer:
         if st and st.card_message_id:
             self._by_message.pop(st.card_message_id, None)
         self._cancel_pause(chat_id)  # v2.0.26：暂停窗口定时器随状态一并清理
+        self._cancel_watchdog(chat_id)
         # OPT-1a：面板合并 timer 随状态清理（避免无主 timer 到期后空转）。
         self._cancel_panel_flush(chat_id)
         # OPT-3：状态已弹出且锁空闲无等待者 → 驱逐锁对象（锁集合回收口；
@@ -1595,6 +1733,8 @@ class FrameComposer:
         self._evict_chat_lock_if_idle(chat_id)
 
     def clear(self) -> None:
+        for cid in list(self._watchdog_timers):
+            self._cancel_watchdog(cid)
         for cid in list(self._pause_timers):
             self._cancel_pause(cid)
         for cid in list(self._panel_flush_timers):

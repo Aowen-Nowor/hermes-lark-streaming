@@ -270,14 +270,15 @@ class TestOneshotGates:
         result = await adapter._send_oneshot_card("oc_c", _WRAPPED, meta, classify_send(_WRAPPED, meta))
         assert result is None
 
-    async def test_send_failure_raises_red_line(self):
-        """发送异常向上抛（send() 捕获后回落原生）——内容永不静默丢失."""
+    async def test_send_failure_returns_non_retryable_error(self):
+        """直发结果未知：返回不可自动重试失败，不再向原生链路二次投递。"""
         client, comp = _FakeClient(), _FakeComposer()
         client.fail = True
         adapter = _bare_adapter(client, comp)
         meta = {"job_id": "j7"}
-        with pytest.raises(RuntimeError):
-            await adapter._send_oneshot_card("oc_c", _WRAPPED, meta, classify_send(_WRAPPED, meta))
+        result = await adapter._send_oneshot_card("oc_c", _WRAPPED, meta, classify_send(_WRAPPED, meta))
+        assert result is not None and not result.success
+        assert result.retryable is False
 
 
 # ---------------------------------------------------------------------------
@@ -295,15 +296,16 @@ class TestOneshotSendWiring:
         assert len(client.sent_cards) == 1
         assert comp.handled == []  # 不进 composer 回合通道
 
-    async def test_send_oneshot_failure_falls_to_composer(self):
-        """降级红线：oneshot 异常 → CH_FINAL 继续走 composer.handle_send."""
+    async def test_send_oneshot_failure_is_not_redelivered(self):
+        """oneshot 直发结果未知：返回不可重试失败，不继续 composer/原生重投。"""
         client, comp = _FakeClient(), _FakeComposer()
         client.fail = True
         adapter = _bare_adapter(client, comp)
         meta = {"notify": True}
         result = await adapter.send("oc_c", "final content", metadata=meta)
-        assert result == "composer-sentinel"
-        assert len(comp.handled) == 1
+        assert result is not None and not result.success
+        assert result.retryable is False
+        assert comp.handled == []
 
     async def test_send_reply_to_skips_oneshot(self):
         """reply_to 用户消息锚点同样走一次性卡（引用发表，与内置回复同款）。"""

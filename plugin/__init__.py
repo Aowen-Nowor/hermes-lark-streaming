@@ -11,9 +11,11 @@ V2 不再包含任何运行时补丁逻辑（零 monkey-patch）。
 
 from __future__ import annotations
 
+import contextlib
 import logging
-import shutil
-from datetime import datetime
+import os
+import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -87,79 +89,113 @@ def _get_hermes_config_path() -> Path:
     return _get_path()
 
 
-def _backup_config() -> None:
-    """首次注入前备份 config.yaml（已有备份则跳过）。"""
-    config_path = _get_hermes_config_path()
-    if not config_path.exists():
-        return
-    backup_pattern = f"config.yaml.*.{_PLUGIN_NAME}"
-    existing = list(config_path.parent.glob(backup_pattern))
-    if existing:
-        return
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = config_path.parent / f"config.yaml.{timestamp}.{_PLUGIN_NAME}"
+@contextlib.contextmanager
+def _config_write_lock(config_path: Path):
+    """跨进程保护显式配置迁移；锁文件不含配置或秘密。"""
+    lock_path = config_path.with_name(config_path.name + ".migration.lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        shutil.copy2(config_path, backup_path)
-        _logger.info("feishu-streaming: backed up config.yaml to %s", backup_path.name)
-    except Exception:
-        _logger.exception("feishu-streaming: config backup failed")
+        os.lseek(fd, 0, os.SEEK_SET)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
-def _prepare_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for k, v in cfg.items():
-        result[k] = _prepare_config(v) if isinstance(v, dict) else v
-    return result
+def _atomic_write_text(config_path: Path, text: str) -> None:
+    """同目录临时文件 + os.replace，避免中断留下半份 YAML。"""
+    fd, temp_name = tempfile.mkstemp(
+        prefix=config_path.name + ".", suffix=".tmp", dir=config_path.parent,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, config_path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
 
 
-def _ensure_legacy_section(raw: dict[str, Any]) -> bool:
-    """兼容：把 V1 残留的 hermes_lark_streaming 节迁移到 feishu_streaming."""
-    if _LEGACY_CONFIG_KEY in raw and _CONFIG_KEY not in raw:
-        raw[_CONFIG_KEY] = raw.pop(_LEGACY_CONFIG_KEY)
-        _logger.info("feishu-streaming: migrated config section %s -> %s", _LEGACY_CONFIG_KEY, _CONFIG_KEY)
-        return True
-    return False
+def _migrated_config_text(text: str) -> tuple[str, bool]:
+    """文本级迁移，保留其他配置、注释和秘密，不做整份 YAML 重序列化。"""
+    updated = text
+    changed = False
+    has_current = re.search(r"^feishu_streaming\s*:", updated, re.MULTILINE)
+    has_legacy = re.search(r"^hermes_lark_streaming\s*:", updated, re.MULTILINE)
+    if has_legacy and not has_current:
+        updated = re.sub(
+            r"^hermes_lark_streaming\s*:", "feishu_streaming:", updated,
+            count=1, flags=re.MULTILINE,
+        )
+        changed = True
+        has_current = re.search(r"^feishu_streaming\s*:", updated, re.MULTILINE)
+    if not has_current:
+        if updated and not updated.endswith("\n"):
+            updated += "\n"
+        updated += yaml.dump(
+            {_CONFIG_KEY: _DEFAULT_STREAMING_CONFIG},
+            default_flow_style=False, allow_unicode=True, sort_keys=False,
+        )
+        changed = True
+    return updated, changed
+
+
+def _without_plugin_sections(text: str) -> tuple[str, bool]:
+    """仅移除插件顶层配置节，其他行逐字保留。"""
+    kept: list[str] = []
+    removing = False
+    changed = False
+    for line in text.splitlines(keepends=True):
+        top_level = re.match(r"^([A-Za-z_][\w-]*)\s*:", line)
+        if top_level:
+            removing = top_level.group(1) in {_CONFIG_KEY, _LEGACY_CONFIG_KEY}
+            if removing:
+                changed = True
+                continue
+        if not removing:
+            kept.append(line)
+    return "".join(kept), changed
 
 
 def ensure_streaming_config() -> None:
-    """确保 config.yaml 存在插件配置节（V1 节自动迁移）。"""
+    """用户显式调用的 V1→V2 配置迁移；注册流程不得调用。"""
     config_path = _get_hermes_config_path()
     if not config_path.exists():
-        _logger.warning("feishu-streaming: config.yaml not found — config injection skipped")
-        return
-    try:
-        text = config_path.read_text(encoding="utf-8")
-        raw = yaml.safe_load(text) or {}
-        changed = _ensure_legacy_section(raw)
-
-        if _CONFIG_KEY not in raw:
-            _backup_config()
-            raw[_CONFIG_KEY] = dict(_DEFAULT_STREAMING_CONFIG)
-            changed = True
-            _logger.info("feishu-streaming: injected %s config section", _CONFIG_KEY)
-
+        raise FileNotFoundError(f"Hermes config not found: {config_path}")
+    with _config_write_lock(config_path):
+        updated, changed = _migrated_config_text(
+            config_path.read_text(encoding="utf-8")
+        )
         if changed:
-            prepped = _prepare_config(raw)
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(prepped, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-    except Exception:
-        _logger.exception("feishu-streaming: config injection failed")
+            _atomic_write_text(config_path, updated)
+            _logger.info("feishu-streaming: migrated %s config section", _CONFIG_KEY)
 
 
 def cleanup_streaming_config() -> None:
-    """卸载：移除插件配置节。"""
+    """用户显式调用的卸载清理：仅删除插件配置节。"""
     config_path = _get_hermes_config_path()
     if not config_path.exists():
         return
-    try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        changed = False
-        for key in (_CONFIG_KEY, _LEGACY_CONFIG_KEY):
-            if key in raw:
-                del raw[key]
-                changed = True
+    with _config_write_lock(config_path):
+        updated, changed = _without_plugin_sections(
+            config_path.read_text(encoding="utf-8")
+        )
         if changed:
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(raw, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-    except Exception:
-        _logger.exception("feishu-streaming: config cleanup failed")
+            _atomic_write_text(config_path, updated)
+            _logger.info("feishu-streaming: removed plugin config sections")

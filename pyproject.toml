@@ -69,10 +69,7 @@ testpaths = ["tests"]
 # NOTE: no pythonpath needed — conftest.py registers the repo root
 # as the hermes_lark_streaming package via importlib.
 asyncio_mode = "auto"
-# Integration tests require HERMES_SRC_DIR (set by hermes-integration-test.yml).
-# Exclude from default `pytest tests/` run to avoid 25 skipped in sync-from-gitee.
-# Run explicitly: `pytest tests/integration/`
-norecursedirs = ["tests/integration"]
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
     # lark_oapi uses deprecated datetime.utcfromtimestamp (Python 3.12+)
     "ignore:datetime.datetime.utcfromtimestamp:DeprecationWarning",

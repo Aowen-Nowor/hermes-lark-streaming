@@ -16,6 +16,7 @@ import inspect
 import logging
 import os
 import time
+import asyncio
 from typing import Any
 
 _logger = logging.getLogger("hermes_lark_streaming")
@@ -363,6 +364,13 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             cls = classify_send(content, metadata)
         except Exception:  # noqa: BLE001 — 分类失败按 plain 走原生，永不阻断
             cls = None
+        if cls is not None and cls.channel == CH_INTERIM and cls.meta.get("conversational_commentary"):
+            # early-create 只允许显式回合锚：入站锚回退不能证明这是当前 turn，
+            # gateway/plugin_messages 的非回合通知不得因此创建孤儿流式卡。
+            cls.meta["commentary_anchor_confirmed"] = bool(
+                (reply_to or "").strip()
+                or (isinstance(metadata, dict) and str(metadata.get("reply_to_message_id") or "").strip())
+            )
         if cls is not None and cls.channel == CH_PLAIN:
             # v2.0.1 上下文升格：裸进度气泡吸收进状态面板
             #（详见 _upgrade_plain_to_progress；条件不满足维持原分类）。
@@ -371,20 +379,8 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             if upgraded is not None:
                 cls = upgraded
                 _logger.debug("feishu-streaming: plain send upgraded to progress (progress lane)")
-        # v2.0.34-hotfix（用户症状①，logs11.11 22:33 轮三方互证）：对话性
-        # commentary 判定必须在锚点归一【之前】用原始 reply_to 形参——
-        # hermes gateway/stream_consumer_fallback._send_commentary 对 feishu
-        # 平台（_needs_reply_anchor 清单）显式传 reply_to=触发消息 om_ 锚；
-        # 后台状态通知 _send_status_text（run_turn_progress.py:1139）不传
-        # reply_to 形参（仅 metadata._interim_send）。两者在飞书 DM 上
-        # metadata 同形（都只有 _interim_send），回复锚形参是唯一官方语义级
-        # 区分点。群聊 thread 场景后台通知的 metadata.reply_to_message_id
-        # 若参与判定会误标——原始形参不受锚点归一/入站锚回退污染。
-        if (
-            cls is not None and cls.channel == CH_INTERIM and cls.kind == "advisory"
-            and bool((reply_to or "").strip())
-        ):
-            cls.meta["conversational_commentary"] = True
+        # commentary 由 classify_send 在精确排除 Hermes 后台模板后标记；
+        # 当前网关可能不传 reply_to，不能再以形参作为对话语义判据。
         # 【锚点归一】Hermes 流式消费者把用户触发消息 ID 放在 metadata.reply_to_message_id
         # （见 stream_consumer.py:266，initial_reply_to_id 回路），不是 send() 的 reply_to 形参。
         # 回合建卡 _create_card 只认 reply_to 槽位 —— 从 metadata 回退出来，才能以引用发表卡片。
@@ -477,7 +473,9 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             has_active = self._composer.active_state(chat_id) is not None
         except Exception:  # noqa: BLE001 — 状态查询失败按无活跃卡处理
             has_active = False
-        if job_id:
+        if channel == "plain" and getattr(cls, "kind", "") == "background_result":
+            gate = "background"  # 独立会话结果：即使有活跃 turn 卡也不得串卡
+        elif job_id:
             gate = "cron"
         elif channel == "final" and not has_active:
             gate = "final"
@@ -514,7 +512,16 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             # 话题/线程续投：官方 thread_id 在飞书即 root 消息 id → 线程内回复卡
             try:
                 message_id = await client.reply_card(thread_id, card)
-            except Exception:
+            except Exception as exc:
+                from ..composer.engine import SendResult
+                from ..feishu.client import is_definitive_reply_anchor_error
+
+                if not is_definitive_reply_anchor_error(exc):
+                    return SendResult(
+                        success=False,
+                        error=f"oneshot thread reply outcome unknown: {exc}",
+                        retryable=False,
+                    )
                 _logger.warning(
                     "feishu-streaming: oneshot reply card failed (thread anchor=%s) "
                     "— fallback to direct send",
@@ -523,14 +530,32 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         elif reply_anchor.startswith("om_"):
             try:
                 message_id = await client.reply_card(reply_anchor, card)
-            except Exception:
+            except Exception as exc:
+                from ..composer.engine import SendResult
+                from ..feishu.client import is_definitive_reply_anchor_error
+
+                if not is_definitive_reply_anchor_error(exc):
+                    return SendResult(
+                        success=False,
+                        error=f"oneshot reply outcome unknown: {exc}",
+                        retryable=False,
+                    )
                 _logger.warning(
                     "feishu-streaming: oneshot reply card failed (anchor=%s) "
                     "— fallback to direct send",
                     reply_anchor[:20], exc_info=True,
                 )
         if not message_id:
-            message_id = await client.send_card_to_chat(chat_id, card)
+            try:
+                message_id = await client.send_card_to_chat(chat_id, card)
+            except Exception as exc:
+                from ..composer.engine import SendResult
+
+                return SendResult(
+                    success=False,
+                    error=f"oneshot direct delivery outcome unknown: {exc}",
+                    retryable=False,
+                )
         _logger.info(
             "feishu-streaming: oneshot card delivered (%s) chat=%s job=%s msg=%s",
             gate, chat_id[:12], job_id[:12] or "-", str(message_id or "")[:16],
@@ -783,6 +808,7 @@ def _upgrade_plain_to_progress(
         from ..composer.classify import (
             CH_PROGRESS,
             ClassifyResult,
+            _EMOJI_RE,
             _is_notice_text,
             is_progress_text,
             parse_progress_line,
@@ -803,6 +829,10 @@ def _upgrade_plain_to_progress(
         # 上面已拦）+ composer 有活跃卡或暂存。长度 4000 兜底防整页答案误吸收。
         if not is_progress_text(content):
             if meta or len(content) > 4000:
+                return None
+            # 宽吸收只覆盖已知工具结构（emoji 工具头或 terminal 围栏），
+            # 普通独立正文即使很短也不得并入状态面板。
+            if not _EMOJI_RE.match(content) and not content.lstrip().startswith("```"):
                 return None
             try:
                 if composer.active_state(chat_id) is None:
@@ -853,6 +883,100 @@ def _rebuild_class_with_real_base() -> Any:
     return cls
 
 
+def _env_registration() -> tuple[tuple[Any, ...], tuple[str, str]]:
+    """与内置飞书同语的 profile-scoped env → platform 配置桥接。"""
+    credentials = ("FEISHU_APP_ID", "FEISHU_APP_SECRET")
+
+    def apply_env(config: Any) -> None:
+        # 动态 Platform 只有在 register() 后才存在；Hermes 应用 overrides 时再创建。
+        from gateway.config import Platform
+        from gateway.platform_env import EnvCred
+
+        EnvCred(
+            Platform(PLATFORM_NAME), credentials,
+            fixed=(
+                ("app_id", "FEISHU_APP_ID"),
+                ("app_secret", "FEISHU_APP_SECRET"),
+                ("domain", "FEISHU_DOMAIN", "feishu"),
+                ("connection_mode", "FEISHU_CONNECTION_MODE", "websocket"),
+            ),
+            optional=(
+                ("encrypt_key", "FEISHU_ENCRYPT_KEY"),
+                ("verification_token", "FEISHU_VERIFICATION_TOKEN"),
+            ),
+            home="FEISHU_HOME_CHANNEL",
+        )(config)
+
+    return (apply_env,), credentials
+
+
+async def _standalone_send(
+    pconfig: Any,
+    chat_id: str,
+    message: str,
+    *,
+    thread_id: str | None = None,
+    media_files: list[tuple[str, bool]] | None = None,
+    force_document: bool = False,
+) -> Any:
+    """无常驻网关时仍经本插件卡片层投递，而非绕回内置纯文本适配器。"""
+    if not await asyncio.to_thread(_builtin_attr("_load_lark_oapi")):
+        return _builtin_attr("send_error")(
+            "Feishu dependencies not installed. Run `hermes setup` to install Feishu support."
+        )
+    try:
+        adapter = FeishuStreamingAdapter(pconfig)
+        adapter._client = adapter._build_lark_client(
+            _builtin_attr("_sdk_domain")(getattr(adapter, "_domain_name", "feishu"))
+        )
+        metadata = {
+            "thread_id": thread_id,
+            "non_conversational": True,
+        } if thread_id else {"non_conversational": True}
+        last_result = None
+        if message.strip():
+            last_result = await adapter.send(chat_id, message, metadata=metadata)
+            if not last_result.success:
+                return _builtin_attr("send_error")(
+                    f"Feishu streaming send failed: {last_result.error}"
+                )
+        for media_path, is_voice in media_files or []:
+            if not os.path.exists(media_path):
+                return _builtin_attr("send_error")(f"Media file not found: {media_path}")
+            ext = os.path.splitext(media_path)[1].lower()
+            if ext in _builtin_attr("_MIGRATION_IMAGE_EXTS"):
+                sender = adapter.send_image_file
+            elif ext in _builtin_attr("_MIGRATION_VIDEO_EXTS"):
+                sender = adapter.send_video
+            elif ext in _builtin_attr("_MIGRATION_AUDIO_EXTS"):
+                sender = adapter.send_voice
+            else:
+                sender = adapter.send_document
+            last_result = await sender(chat_id, media_path, metadata=metadata)
+            if not last_result.success:
+                return _builtin_attr("send_error")(
+                    f"Feishu streaming media send failed: {last_result.error}"
+                )
+        if last_result is None:
+            return _builtin_attr("send_error")(
+                "No deliverable text or media remained after processing MEDIA tags"
+            )
+        return {
+            "success": True,
+            "platform": PLATFORM_NAME,
+            "chat_id": chat_id,
+            "message_id": last_result.message_id,
+        }
+    except Exception as exc:
+        redactor = _builtin_attr("describe_proxy_error")
+        proxy_args = _builtin_attr("env_proxy_for_redaction")(
+            *_builtin_attr("_ONBOARD_OPEN_URLS").values()
+        )
+        return _builtin_attr("send_error")(
+            f"Feishu streaming send failed: {redactor(exc, proxy_args) or exc}"
+        )
+
+
 def register(ctx: Any) -> None:
     """平台插件注册（hermes 官方协议）."""
     try:
@@ -868,6 +992,7 @@ def register(ctx: Any) -> None:
     # gateway19 审计实证缺口）。插件 logger 树显式提到 INFO：自有命名空间不受
     # 网关全局级别影响，第三方日志零污染。
     logging.getLogger("hermes_lark_streaming").setLevel(logging.INFO)
+    env_overrides, env_enable_credentials = _env_registration()
 
     ctx.register_platform(
         name=PLATFORM_NAME,
@@ -884,10 +1009,14 @@ def register(ctx: Any) -> None:
         allowed_users_env="FEISHU_ALLOWED_USERS",
         allow_all_env="FEISHU_ALLOW_ALL_USERS",
         cron_deliver_env_var="FEISHU_HOME_CHANNEL",
-        standalone_sender_fn=_builtin_attr("_standalone_send"),
+        standalone_sender_fn=_standalone_send,
         max_message_length=8000,
         emoji="🪽",
         allow_update_command=True,
+        env_overrides=env_overrides,
+        env_enable_credentials=env_enable_credentials,
+        allow_bots_env="FEISHU_ALLOW_BOTS",
+        allowlist_suppresses_pairing=True,
         # v2.0.1：显式声明 display tier。TIER_HIGH = streaming 跟随全局开关 +
         # tool_progress "all"（进度行必须到达适配器才能进卡片状态面板）+
         # interim_assistant_messages 开（commentary → CH_INTERIM → 面板）。
@@ -900,11 +1029,10 @@ def register(ctx: Any) -> None:
 
 
 def _prewarm_config() -> None:
-    """注册期配置注入与 lark-oapi 门槛检查（自 V1 plugin/ 移植语义）."""
+    """注册期只做依赖门槛检查；配置读取和迁移均由显式入口负责。"""
     try:
-        from . import check_lark_oapi_floor, ensure_streaming_config
+        from . import check_lark_oapi_floor
 
         check_lark_oapi_floor()
-        ensure_streaming_config()
     except Exception:
-        _logger.debug("feishu-streaming: prewarm skipped", exc_info=True)
+        _logger.debug("feishu-streaming: dependency preflight skipped", exc_info=True)

@@ -100,6 +100,7 @@ def _marked_commentary_cls(text: str) -> ClassifyResult:
     cls = classify_send(text, {"_interim_send": True})
     assert cls.channel == CH_INTERIM and cls.kind == "advisory"
     cls.meta["conversational_commentary"] = True
+    cls.meta["commentary_anchor_confirmed"] = True
     return cls
 
 

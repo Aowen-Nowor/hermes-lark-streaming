@@ -652,7 +652,10 @@ class TestFix7WatchdogRearmConfig:
         arms = [(d, a) for d, cb, a in captured if cb == comp._watchdog_due]
         assert len(arms) == 2, f"首武装 + 重武装各一次，实得 {arms}"
         assert all(d == 90.0 for d, _ in arms), f"武装周期必须用配置值 90s，实得 {arms}"
-        assert all(a == (chat,) for _, a in arms)
+        assert all(
+            len(a) == 3 and a[0] == chat and a[1] == comp._states[chat].card_id
+            for _, a in arms
+        ), "回调必须携带 chat + 预期 card/turn 防旧句柄误封新卡"
 
     async def test_config_fallback_still_uses_default(self):
         """无配置（config=None）：回退模块常量（既有语义不回归）."""

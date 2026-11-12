@@ -68,11 +68,9 @@ class TestUpgradePlainToProgress:
         assert _upgrade_plain_to_progress(runner.composer, session.chat_id, long_text) is None
 
     async def test_no_upgrade_for_plain_prose(self, runner):
-        """普通无 emoji 短文本：v2.0.31 回合内宽吸收——活跃卡在场也升格进面板
-        （route-trace 实锤 `🔧 Editing ...` 等超长工具行漏启发式 → 双贴）；
-        反之无活跃卡则维持原分类（plain）。"""
+        """普通无 emoji 独立正文不进入状态面板；只有工具结构才允许宽吸收。"""
         session = await runner.start_message("建卡。")
-        assert _upgrade_plain_to_progress(runner.composer, session.chat_id, "这是一句普通的话") is not None
+        assert _upgrade_plain_to_progress(runner.composer, session.chat_id, "这是一句普通的话") is None
 
     async def test_finalized_card_still_upgrades(self, runner):
         """已定稿卡片 + 进度文本 → 仍升格（v2.0.4：下一个 _on_progress 暂存/建新卡；

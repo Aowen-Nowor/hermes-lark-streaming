@@ -32,6 +32,7 @@ import os
 import subprocess
 import sys
 import traceback
+from collections.abc import MutableMapping
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,6 +59,21 @@ SURFACE_CHECKLIST = (
 )
 
 _HERMES_VERSION_ATTRS = ("__version__", "VERSION", "version")
+_E2E_REAL_ENV = (
+    "FEISHU_E2E_REAL",
+    "FEISHU_E2E_APP_ID",
+    "FEISHU_E2E_APP_SECRET",
+    "FEISHU_E2E_CHAT_ID",
+    "FEISHU_E2E_OPEN_ID",
+    "FEISHU_E2E_BASE_URL",
+)
+
+
+def _force_mock_e2e(env: MutableMapping[str, str]) -> MutableMapping[str, str]:
+    """Remove every real-mode input so ambient credentials cannot send messages."""
+    for name in _E2E_REAL_ENV:
+        env.pop(name, None)
+    return env
 
 
 def _hermes_version() -> str:
@@ -109,6 +125,7 @@ def main() -> int:
     parser.add_argument("--skip-tests", action="store_true", help="跳过 S5 回归测试（调试用）")
     parser.add_argument("--json", dest="json_path", help="结论 JSON 落盘路径（工作流读取）")
     args = parser.parse_args()
+    _force_mock_e2e(os.environ)
 
     hermes_dir = Path(args.hermes_dir).resolve()
     report: dict = {
@@ -135,7 +152,7 @@ def main() -> int:
     if hermes_path not in sys.path:
         sys.path.insert(0, hermes_path)
     try:
-        builtin = importlib.import_module("plugins.platforms.feishu.adapter")
+        importlib.import_module("plugins.platforms.feishu.adapter")
         report["hermes_version"] = _hermes_version()
         _record("S1 hermes 源码导入", True,
                 f"plugins.platforms.feishu.adapter OK（hermes {report['hermes_version']}）")

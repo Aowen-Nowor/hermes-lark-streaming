@@ -28,7 +28,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-
 from hermes_lark_streaming.cardkit.cards import (
     _apply_panel_title,
     build_streaming_card_v2,
@@ -40,6 +39,7 @@ from hermes_lark_streaming.cardkit.elements import (
 from hermes_lark_streaming.cardkit.special import build_cron_card
 from hermes_lark_streaming.composer.classify import classify_send
 from hermes_lark_streaming.composer.engine import _panel_title
+from hermes_lark_streaming.feishu.client import MSG_NOT_FOUND, FeishuAPIError
 from hermes_lark_streaming.plugin.adapter import FeishuStreamingAdapter
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -240,7 +240,7 @@ class _ReplyFailClient:
 
     async def reply_card(self, message_id, card):
         self.reply_attempts.append(message_id)
-        raise RuntimeError("im:message not found (deleted anchor)")
+        raise FeishuAPIError("im:message not found (deleted anchor)", MSG_NOT_FOUND)
 
     async def send_card_to_chat(self, chat_id, card):
         self.sent_cards.append((chat_id, card))

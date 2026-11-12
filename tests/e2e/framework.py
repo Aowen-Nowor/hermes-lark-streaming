@@ -12,9 +12,11 @@ platform 零钩子的 FrameComposer。本 runner 与 adapter.py 出站语义层
 mock / real 两种模式下完全一致——唯一区别是 client 打到内存 mock
 还是真实飞书 API。
 
-模式切换（自动）：
-  FEISHU_E2E_APP_ID + FEISHU_E2E_APP_SECRET + FEISHU_E2E_CHAT_ID 全设置
-  → real 模式（真实飞书）；否则 mock 模式（内存 MockFeishuServer）。
+模式切换（显式 opt-in）：
+  仅当 FEISHU_E2E_REAL=1 且 FEISHU_E2E_APP_ID +
+  FEISHU_E2E_APP_SECRET + FEISHU_E2E_CHAT_ID 全设置时才启用 real 模式
+  （真实飞书）；其他情况一律 mock 模式（内存 MockFeishuServer）。
+  只配置凭证不会触发真实消息；FEISHU_E2E_OPEN_ID 仅用于 real 私聊场景。
 
 V2 与 V1 runner 的差异：
   - 无 controller / session 对象；start_message 返回轻量 E2ESession
@@ -54,9 +56,10 @@ _REAL_FRAME_INTERVAL_SEC = 0.15  # 真飞书帧间限速（单卡 stream/update 
 
 
 def has_real_feishu_creds() -> bool:
-    """real 模式判定：APP_ID + APP_SECRET + CHAT_ID 全设置（V2 无需 OPEN_ID）。"""
+    """Only an exact opt-in plus all three required credentials enables real mode."""
     return bool(
-        os.environ.get("FEISHU_E2E_APP_ID")
+        os.environ.get("FEISHU_E2E_REAL") == "1"
+        and os.environ.get("FEISHU_E2E_APP_ID")
         and os.environ.get("FEISHU_E2E_APP_SECRET")
         and os.environ.get("FEISHU_E2E_CHAT_ID")
     )

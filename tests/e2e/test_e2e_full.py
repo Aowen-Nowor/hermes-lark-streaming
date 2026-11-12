@@ -225,11 +225,17 @@ class TestNativeAndDegrade:
         assert runner.get_call_count("cardkit_create") == 0
         assert runner.get_call_count("cardkit_stream_element") == 0
 
-    async def test_interim_without_card_native_bubble(self, runner):
-        """无 emoji 的 _interim_send 帧在无卡片时 → None（原生小气泡）."""
-        result = await runner.send_raw("无 emoji 的中途播报", {"_interim_send": True})
-        assert result is None
-        assert runner.get_call_count("cardkit_create") == 0
+    async def test_commentary_without_card_early_creates_turn_card(self, runner):
+        """带显式回合锚的 commentary 无卡片时 early-create，等待最终回复收同一张卡。"""
+        from hermes_lark_streaming.composer.classify import classify_send
+
+        text = "无 emoji 的中途播报"
+        metadata = {"_interim_send": True, "reply_to_message_id": "om_trigger"}
+        cls = classify_send(text, metadata)
+        cls.meta["commentary_anchor_confirmed"] = True
+        result = await runner.composer.handle_send(runner.chat_id, text, "om_trigger", metadata, cls)
+        assert result is not None and result.success
+        assert runner.get_call_count("cardkit_create") == 1
 
     async def test_client_unavailable_native_fallback(self, runner):
         """get_client 返回 None → handle_send 返回 None（原生兜底），恢复后重建卡."""

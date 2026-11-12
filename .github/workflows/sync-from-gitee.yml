@@ -33,12 +33,12 @@ name: Sync from Gitee
 #     修复：http.lowSpeedLimit/Time 低速判死（60s 内 <1KB/s 即断，不再挂满 300s）+ 3 次重试递增等待。
 #   - 测试门禁失效：默认 shell 是 bash -e（无 pipefail），`pytest | tee` 后 `$?` 取的是 tee 的
 #     退出码——pytest 全红 exit_code 仍为 0，红测试照样放行 GitHub Release。
-#     修复：该步骤显式 shell: bash（-eo pipefail），pytest 退出码穿透管道，失败即整步失败。
+#     修复：显式 bash + pipefail，关闭 -e 后立即读取 PIPESTATUS[0]，落盘再以原码退出。
 #   - 测试/发布树错位：run 的工作树停留在 dispatch 时的旧 checkout（run #1546 实证：检出 b0c38d0，
 #     Mirror 已把 a51cc0a 推上 GitHub，但 pytest 与 plugin.yaml 仍读旧树——版本号命中既有 Release 被跳过，
 #     且变更事件被本轮消费后下轮 has_changes=false，新版本 Release 永远缺位＝v2.0.30/31 未发布的结构性根因）。
-#     修复：Detect changes 后重新检出刚镜像的 Gitee tip 再测试（现为 origin/github_sync）；
-#     Release 以 target_commitish=new_sha 钉住被测提交。
+#     修复：Detect changes 后直接 detached checkout 刚 fetch 的 Gitee tip，先测试，通过后才 Mirror；
+#     Release 以 target_commitish=new_sha 钉住被测提交，既有 Release 也核对该值。
 #
 # 所需 Secrets：GITEE_USERNAME / GITEE_TOKEN（同步+API）、FEISHU_WEBHOOK / FEISHU_SIGN_SECRET（通知）、
 #               GH_MIRROR_PAT（GitHub 侧 checkout+push，classic PAT 含 repo + workflow scope）。
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout GitHub repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GH_MIRROR_PAT }}   # PAT 推送（含 workflow 文件变更）；GITHUB_TOKEN 永远无此权限
@@ -76,8 +76,13 @@ jobs:
           git config user.email "sync@example.com"
 
       - name: Add Gitee remote and fetch
+        env:
+          GITEE_USERNAME: ${{ secrets.GITEE_USERNAME }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
-          git remote add gitee "https://${{ secrets.GITEE_USERNAME }}:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ secrets.GITEE_USERNAME }}/${{ github.event.repository.name }}.git"
+          # Stored remote stays credential-free; Basic auth is scoped to this fetch process.
+          git remote add gitee "https://gitee.com/${{ secrets.GITEE_USERNAME }}/${{ github.event.repository.name }}.git"
+          GITEE_BASIC=$(printf '%s' "${GITEE_USERNAME}:${GITEE_TOKEN}" | base64 -w 0)
           # 低速判死：60s 内 <1KB/s 即断连重试（默认要挂满 300s 才超时，run #1506 实证）
           git config --global http.lowSpeedLimit 1000
           git config --global http.lowSpeedTime 60
@@ -85,14 +90,16 @@ jobs:
           # 3 次重试递增等待（30s/60s）：gitee ↔ GitHub Actions 跨网间歇性超时是已证实故障源
           for attempt in 1 2 3; do
             echo "==> gitee fetch 第 ${attempt}/3 次"
-            if git fetch gitee --prune --tags --force; then
+            if git -c http.extraHeader="Authorization: Basic ${GITEE_BASIC}" fetch gitee --prune --tags --force; then
               echo "fetch 成功（第 ${attempt} 次尝试）"
+              unset GITEE_BASIC
               exit 0
             fi
             if [ "$attempt" -lt 3 ]; then
               sleep $((attempt * 30))
             fi
           done
+          unset GITEE_BASIC
           echo "❌ gitee fetch 连续 3 次失败，放弃本轮（下个调度周期或手动 dispatch 重试）"
           exit 1
 
@@ -104,13 +111,6 @@ jobs:
           else
             echo "sha=none" >> $GITHUB_OUTPUT
           fi
-
-      - name: Mirror branches and tags (Gitee is source of truth)
-        run: |
-          # remote-to-remote 直推：不经工作树、不产生 merge commit，GitHub github_sync 强制对齐 Gitee
-          # （分支模型定案 2026-11-11：refactor/v2.0.0 是 Gitee 独有开发分支，不再镜像 GitHub）
-          git push --force origin "refs/remotes/gitee/github_sync:refs/heads/github_sync"
-          git push --force origin "refs/tags/*:refs/tags/*"
 
       - name: Detect changes
         id: detect
@@ -135,19 +135,14 @@ jobs:
             echo "无变更"
           fi
 
-      # v2.0.32 修复③：Mirror 后工作树仍是 dispatch 时的旧 checkout——pytest 与 plugin.yaml
-      # 版本读取必须发生在刚镜像的 Gitee tip 上（测试的代码=发布的代码）
-      - name: Checkout mirrored tip for test & release
+      # 先切到刚 fetch 的 Gitee tip 再测试；此时尚未 Mirror，测试的代码=随后推送的代码。
+      - name: Checkout Gitee tip for test & release
         if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
-        uses: actions/checkout@v4
-        with:
-          ref: github_sync            # Mirror 步骤刚推送到 origin 的 Gitee 主分支 tip
-          fetch-depth: 0
-          token: ${{ secrets.GH_MIRROR_PAT }}
+        run: git checkout --detach "${{ steps.detect.outputs.new_sha }}"
 
       - name: Set up Python
         if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.14'
 
@@ -169,14 +164,28 @@ jobs:
       - name: Run full test suite (unit + e2e mock)
         if: steps.detect.outputs.has_changes == 'true' || inputs.force_tests == true
         id: run_tests
-        # 显式 shell: bash = -eo pipefail：pytest 退出码穿透 tee 管道（默认 bash -e 无 pipefail，
-        # $? 永远是 tee 的 0 → 红测试也判 0 并放行 Release）；pytest 失败时脚本在管道行中止，
-        # exit_code 不落盘 → 下游 Release 条件不满足 + 通知侧 fallback 为 1
+        # 先关闭 -e 以捕获 pytest（而非 tee）退出码，落盘后再以原码结束步骤。
         shell: bash
         run: |
+          set -o pipefail
+          set +e
           python -m pytest tests/ --tb=short -q \
             --junitxml=unit_test_report.xml 2>&1 | tee unit_test_output.txt
-          echo "exit_code=$?" >> $GITHUB_OUTPUT
+          TEST_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo "exit_code=$TEST_EXIT" >> $GITHUB_OUTPUT
+          exit "$TEST_EXIT"
+
+      - name: Mirror branches and tags (Gitee is source of truth)
+        # 新 tip / force_tests 必须先测试通过；无新代码且非重验仍同步 tag（旧语义）。
+        if: >-
+          (steps.detect.outputs.has_changes != 'true' && inputs.force_tests != true) ||
+          steps.run_tests.outputs.exit_code == '0'
+        run: |
+          # remote-to-remote 直推：不经工作树、不产生 merge commit，GitHub github_sync 强制对齐 Gitee
+          # （分支模型定案 2026-11-11：refactor/v2.0.0 是 Gitee 独有开发分支，不再镜像 GitHub）
+          git push --force origin "refs/remotes/gitee/github_sync:refs/heads/github_sync"
+          git push --force origin "refs/tags/*:refs/tags/*"
 
       # ── GitHub Release（测试通过 + 版本 tag 未存在时创建，幂等）──
       - name: Read version from plugin.yaml
@@ -194,10 +203,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="v${{ steps.version.outputs.version }}"
-          # 幂等锚 = Release 本身（tag 已由 Mirror 步骤先从 Gitee 镜像，查 tag 会永远误判已存在）
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          NEW="${{ steps.detect.outputs.new_sha }}"
+          # 幂等锚 = Release 本身；已存在时必须钉在刚通过测试的 Gitee tip，不能静默复用错位 Release。
+          if TARGET=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq '.targetCommitish' 2>/dev/null); then
+            if [ -z "$TARGET" ] || [ "$TARGET" != "$NEW" ]; then
+              echo "❌ Release $TAG target commit mismatch: existing=${TARGET:-empty}, tested=$NEW"
+              exit 1
+            fi
             echo "tag_exists=true" >> $GITHUB_OUTPUT
-            echo "📌 Release $TAG already exists on GitHub, skipping"
+            echo "📌 Release $TAG already exists at tested commit $NEW, skipping"
           else
             echo "tag_exists=false" >> $GITHUB_OUTPUT
             echo "🆕 Release $TAG does not exist on GitHub, will create"
@@ -210,7 +224,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.detect.outputs.has_changes == 'true' && steps.run_tests.outputs.exit_code == '0' && steps.check_tag.outputs.tag_exists == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
@@ -224,7 +238,7 @@ jobs:
 
       # ── Gitee PR/Issue 增量摘要 → 飞书（水位经 cache 持久化）──
       - name: Restore Gitee digest state
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .gitee-digest-state.json
           key: gitee-digest-state-${{ github.run_number }}
@@ -241,7 +255,7 @@ jobs:
         run: python3 scripts/feishu_notify.py gitee-digest --state-file .gitee-digest-state.json
 
       - name: Persist Gitee digest state
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .gitee-digest-state.json
           key: gitee-digest-state-${{ github.run_number }}
