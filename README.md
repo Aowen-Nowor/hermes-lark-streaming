@@ -9,7 +9,7 @@
 [![python](https://img.shields.io/badge/python-%3E%3D3.11%2C%3C3.15-informational)](#环境与路径)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
-**v2.0.35 · 2026-11-12 · 本地验证中，未发布**
+**v2.0.35 · 2026-11-12**
 
 *回答流式入卡 · 工具与思考进入状态面板 · 澄清同卡续流 · 全程零 monkey-patch*
 
@@ -39,7 +39,7 @@
 | 状态面板 | 工具进度、思考与对话性 interim 信息进入同一卡片；纯回答回合不创建空面板 |
 | 引用回复 | 有真实 `om_` 锚点时以回复形式发卡；已确认锚点不可用时直发，传输结果未知时禁止自动重试和原生二次投递 |
 | 澄清续流 | 澄清等待期暂停卡片，回答后尽量在同一张卡上继续；交互协议复用内置实现 |
-| 回合外投递 | cron、主动发送与无活跃卡的定稿使用一次性静态卡，短回复也不另设字数门槛 |
+| 回合外投递 | cron、命令回复、主动发送与无活跃卡的回合外定稿使用一次性静态卡；普通文本/媒体回合即使无工具调用也建 turn 卡（reasoning 进折叠面板），短回复也不另设字数门槛 |
 | standalone 投递 | 无常驻网关的官方 standalone 发送也经过本插件适配器，而非绕回内置纯文本路径 |
 | 稳定性 | 每聊天帧串行化、sequence 自愈、流式会话续期、停机收口、孤儿卡看门狗与体积/元素预算 |
 
@@ -182,7 +182,7 @@ CLI 会将 `gateway.platforms.*` 规范化到顶层 `platforms.*`，且顶层配
 | `print_step` | int | `4`；钳制到 `1..10` | 每次渲染的步长 |
 | `card_ttl_sec` | int | `600`；最低 `60` | 活跃卡片状态 TTL，过小会被钳制以防断卡 |
 | `watchdog_idle_sec` | float | `300`；钳制到 `60..1800` | 无活动卡片的看门狗静默阈值 |
-| `oneshot_cards` | bool | `true` | cron、主动 plain、无活跃卡 final 是否使用一次性静态卡；`false` 回原生路径 |
+| `oneshot_cards` | bool | `true` | cron、命令回复、主动 plain、无活跃卡回合外 final 是否使用一次性静态卡；普通文本/媒体回合 final 始终建 turn 卡；`false` 回原生路径 |
 | `clarify_suspend_sec` | float | `1.2`；`0` 关闭 | 等待澄清边界的窗口；关闭后澄清前卡先定稿，后续可能另开卡 |
 | `footer.show_label` | bool | `false` | 页脚字段是否显示文字标签 |
 | `footer.fields` | list | `[[status, elapsed, model]]` | 支持 `status/elapsed/model/tokens/context/api_calls/history_offset/compression_exhausted/cache/cost/reasoning`；无数据字段省略，畸形行回退默认 |

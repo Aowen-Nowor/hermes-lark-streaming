@@ -1235,7 +1235,26 @@ class FrameComposer:
             return await self._finalize(previous, content)
         st = self.active_state(chat_id)
         if st is None:
-            return None
+            # 本地修复：纯文本回合（无工具调用/无流式帧）到达 final 时无活跃卡——
+            # 此前回落 None → adapter 走 oneshot final 路径（build_gateway_card）→
+            # reasoning 未折叠进面板（show_reasoning=true 时推理块暴露在正文）。
+            # 修复：先建 turn 卡再 finalize，推理块经 _extract_reasoning_block
+            # 进折叠面板，与有工具调用的回合体验一致。
+            # 建卡失败时仍返回 None（adapter 降级 oneshot/原生，内容永不丢）。
+            # cron / 命令 / 后台投递不会到达此分支（被 _send_oneshot_card 更早拦截）。
+            try:
+                created = await self._create_card(chat_id, "")
+                if created is not None and not created.success:
+                    return None
+            except Exception:  # noqa: BLE001 — 建卡失败降级 oneshot，内容永不丢
+                _logger.debug(
+                    "composer: toolless-turn card create failed — oneshot fallback chat=%s",
+                    chat_id, exc_info=True,
+                )
+                return None
+            st = self.active_state(chat_id)
+            if st is None:
+                return None
         return await self._finalize(st, content)
 
     async def _patch_status(self, st: CardTurnState) -> None:
@@ -1888,10 +1907,11 @@ def _extract_reasoning_block(text: str) -> tuple[str, str | None]:
     另外两种显示风格（reasoning_style=blockquote/subtext）只是把那段推理
     包在引用/次级文本里再拼正文，与 code 块保持一致的 peel 语义。
 
-    本解析只在“块出现在回答最前方且围栏闭合”时触发：
+    本解析只在"块出现在回答最前方且围栏闭合"时触发：
     - 抑制正文自身含 markdown 分隔块而误伤（正文里只有内容，不会有
       ``💭 **推理：**`` 块头在第 0 行）；
     - 中英双语模板同款识别；
+    - 三种 reasoning_style 均处理（code/blockquote/subtext）；
     - 多语言未来模板改文案时，下版随 Hermes 更新跟上即可（保守失败方向
       是不动正文，推理留在 answer，内容永不丢）。
     永不抛异常；未命中时原样返回。
@@ -1906,18 +1926,61 @@ def _extract_reasoning_block(text: str) -> tuple[str, str | None]:
         head = lines[0].strip()
         if "推理" not in head and "Reasoning" not in head:
             return text, None
-        # 代码块风格：第二行应为 ```
-        rest = "\n".join(lines[1:]).strip()
-        if not rest.startswith("```"):
+        rest = "\n".join(lines[1:])
+        rest_stripped = rest.strip()
+
+        # ── code 风格（默认）：```\n{reasoning}\n``` ──────────────────────
+        if rest_stripped.startswith("```"):
+            end = rest_stripped.find("\n```")
+            if end >= 0:
+                reasoning = rest_stripped[3:end].strip()
+                if reasoning:
+                    clean = rest_stripped[end + 4:].strip()
+                    return clean, reasoning
             return text, None
-        end = rest.find("\n```")
-        if end < 0:
+
+        # ── blockquote 风格：每行以 "> " 或 ">" 开头 ─────────────────────
+        # 格式："> {reasoning line1}\n> {line2}\n\n{response}"
+        if rest_stripped.startswith("> ") or rest_stripped.startswith(">"):
+            reasoning_lines: list[str] = []
+            remaining_lines = rest_stripped.splitlines()
+            i = 0
+            for i, ln in enumerate(remaining_lines):
+                if ln.startswith("> "):
+                    reasoning_lines.append(ln[2:])
+                elif ln == ">":
+                    reasoning_lines.append("")
+                else:
+                    break
+            else:
+                i += 1  # 全部都是引用行
+            reasoning = "\n".join(reasoning_lines).strip()
+            if reasoning:
+                clean = "\n".join(remaining_lines[i:]).strip()
+                return clean, reasoning
             return text, None
-        reasoning = rest[3:end].strip()
-        if not reasoning:
+
+        # ── subtext 风格（Discord "-# "）：每行以 "-# " 开头 ───────────
+        if rest_stripped.startswith("-# "):
+            reasoning_lines = []
+            remaining_lines = rest_stripped.splitlines()
+            i = 0
+            for i, ln in enumerate(remaining_lines):
+                if ln.startswith("-# "):
+                    reasoning_lines.append(ln[3:])
+                elif ln == "-#":
+                    reasoning_lines.append("")
+                else:
+                    break
+            else:
+                i += 1
+            reasoning = "\n".join(reasoning_lines).strip()
+            if reasoning:
+                clean = "\n".join(remaining_lines[i:]).strip()
+                return clean, reasoning
             return text, None
-        clean = rest[end + 4:].strip()
-        return clean, reasoning
+
+        return text, None
     except Exception:  # noqa: BLE001 — 推理搬运纯装饰，失败维持原文
         return text, None
 

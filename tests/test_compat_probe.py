@@ -60,3 +60,36 @@ def test_main_sanitizes_process_environment_before_any_probe_step(
     assert probe.main() == 1
     for name in _REAL_ENV:
         assert name not in os.environ
+
+
+def test_surface_checklist_excludes_plugin_client_methods() -> None:
+    """S4 清单不得把插件自身 FeishuClient 方法误列为基类必备。
+
+    send_stream_frame / send_card_to_chat / reply_card_by_id /
+    cardkit_* 是插件自己的接口，不是内置 FeishuAdapter 基类方法。
+    旧清单导致 0.23.2+ 每次探针误报 S4 失败。
+    """
+    probe = _load_probe()
+    checklist = set(probe.SURFACE_CHECKLIST)
+
+    for name in (
+        "send_stream_frame",
+        "send_card_to_chat",
+        "reply_card_by_id",
+        "cardkit_create",
+        "cardkit_update",
+        "cardkit_stream_element",
+    ):
+        assert name not in checklist, f"{name} 是插件自身方法，不应列入基类清单"
+
+    for name in (
+        "send",
+        "edit_message",
+        "send_clarify",
+        "delete_message",
+        "handle_message",
+        "_handle_message_with_guards",
+        "set_message_handler",
+        "_CARD_ACTION_ROUTES",
+    ):
+        assert name in checklist, f"{name} 是插件运行时依赖的基类方法"

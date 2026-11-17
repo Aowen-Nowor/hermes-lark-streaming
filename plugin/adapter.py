@@ -193,6 +193,10 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         # 无显式锚时回退最近入站锚（仅限无 metadata 的回合内帧；
         # cron/notify 等带标记投递不回退，防错锚到旧用户消息）。
         self._inbound_anchor: dict[str, tuple[str, float]] = {}
+        # 本地修复：入站事件类型存根（mid → (kind, timestamp)）——final 门据此
+        # 区分「普通文本/媒体回合 final」与「斜杠命令 final」。命令回复保持
+        # oneshot 静态卡语义；普通回合 final 走 composer turn 卡（reasoning 可折叠）。
+        self._inbound_event_kind: dict[str, tuple[str, float]] = {}
         # v2.0.31 页脚 model 会话化：chat_id → session_key（入站时记录），
         # 供 _resolve_session_model 查会话级 /model override。
         self._session_keys: dict[str, str] = {}
@@ -307,6 +311,18 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         chat_id = str(getattr(getattr(event, "source", None), "chat_id", "") or "")
         if mid.startswith("om_") and chat_id:
             self._inbound_anchor[chat_id] = (mid, time.monotonic())
+            # 本地修复：记录该锚点的事件类型（message/command）。命令 final 保持
+            # oneshot；普通文本/媒体回合 final 走 turn 卡。
+            kind = "command" if getattr(event, "message_type", "") == "command" else "message"
+            self._inbound_event_kind[mid] = (kind, time.monotonic())
+            # 入站事件类型缓存与锚点缓存同生命周期（LRU 淘汰最旧一半）
+            if len(self._inbound_event_kind) > _ANCHOR_CACHE_MAX:
+                oldest = sorted(
+                    self._inbound_event_kind,
+                    key=lambda k: self._inbound_event_kind[k][1],
+                )
+                for k in oldest[: len(oldest) // 2]:
+                    self._inbound_event_kind.pop(k, None)
             # v2.0.32：超限淘汰最旧一半（长命网关进程内存卫生）
             if len(self._inbound_anchor) > _ANCHOR_CACHE_MAX:
                 oldest = sorted(self._inbound_anchor,
@@ -478,6 +494,15 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         elif job_id:
             gate = "cron"
         elif channel == "final" and not has_active:
+            # 本地修复：区分「普通回合 final」与「命令/回合外 final」。
+            # 普通文本/媒体回合 final（锚点来源为普通消息）不在此转 oneshot——
+            # 交给 composer 建 turn 卡并走 _finalize，reasoning 才能折叠进面板。
+            # 命令回复（锚点来源为 command）与无锚点回合外通知保持 oneshot。
+            anchor = str(reply_to or "").strip()
+            kind_entry = getattr(self, "_inbound_event_kind", {}).get(anchor)
+            kind = kind_entry[0] if isinstance(kind_entry, tuple) else kind_entry
+            if anchor.startswith("om_") and kind != "command":
+                return None
             gate = "final"
         elif channel == "plain" and not has_active and (content or "").strip():
             gate = "longform"

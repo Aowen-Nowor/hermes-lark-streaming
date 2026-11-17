@@ -1,6 +1,6 @@
 # 更新日志
 
-## v2.0.35（2026-11-12，本地验证中，未发布）
+## v2.0.35（2026-11-12）
 
 | 类型 | 问题/功能 | 原因 | 修复/说明 |
 |---|---|---|---|
@@ -19,10 +19,15 @@
 | 文档 | 安装、迁移、配置与排障文档仍含手工环境操作和过期契约 | 人类与 Agent 可能照文档写 secret 到 YAML、手工维护运行环境、使用危险进程/锁操作或误跑真实 E2E | 重写 README、SKILL、API；统一真实 Gitee URL 与官方 install/update/uninstall/config 命令，补齐 V1→V2、回滚、完整配置、mock/real 红线、故障排查及脱敏 Issue 模板 |
 | 验收 | 合并修复不能只依赖子代理汇报 | A/B/C 并行实现后必须同一代码复核 | 全量 mock `946 passed`；`python scripts/smoke_v2.py` 13/13；实际 `hermes plugins validate` Passed（存量 private imports 与 dump_all_env 警告保留） |
 | 真飞书 | mock 不能证明真实卡片渲染与 reply 关系 | 卡片行为、页脚定点更新和边界窗口需专用会话实写验证 | 经授权以 `FEISHU_E2E_REAL=1` 执行 connect/answer/full/reply/oneshot/progress/interim/burst/clarify/plain/native：`67/67` PASS（native 边界脚本等待后重跑，未算作插件失败）；另固定 ID 页脚二次 `partial_update_element` 真卡通过（card_id=7707223425866664892）。关键 `om_`：connect=om_x100b606c886608a…、answer=om_x100b606c881520a…、full=om_x100b606c89acb4a…、reply=om_x100b606c89218cb…、oneshot=om_x100b606c86f6b4b… |
+| 修复 | 纯文本回合 `show_reasoning=true` 时推理暴露在卡正文、无折叠面板 | 无工具调用/无流式帧的回合在 final 前无活跃卡；adapter 将 `CH_FINAL + 无活跃卡` 一律走 oneshot final（`build_gateway_card`），而 reasoning 折叠只在回合卡 `_finalize` 路径生效 | 入站记录事件类型（message/command）；普通文本/媒体回合 final 无活跃卡时由 composer 建 turn 卡并 `_finalize`，推理进折叠面板；命令回复与无锚点回合外通知保持 oneshot。`_extract_reasoning_block` 补齐 `code/blockquote/subtext` 三种官方 reasoning_style |
+| 修复 | 纯文本回合定稿补面板报 300314 `not find elementID` | 建卡时无 `status_lines`，卡上从未插入面板；`_reseal_panel` 无条件 `delete_elements(agent_process_panel)` | 按 `state.panel_on_card` 决定 delete/add：显式 `False` 只 add；字段缺失保持旧行为（兼容旧状态/测试桩） |
+| 修复 | `compat_probe` S4 在 0.23.2+ 误报不兼容 | S4 清单混入插件自身 `FeishuClient` 方法（`send_stream_frame/cardkit_*/send_card_to_chat/reply_card_by_id`），并非内置 `FeishuAdapter` 基类表面 | S4 收敛为插件运行时真正依赖的基类 8 项；补契约测试锁定 |
+| 修复 | 兼容探针 S5 在 hermes 源码环境跑全套时 2 个测试桩失败 | 测试桩固定 patch `_MissingBuiltin`，真实基类环境下打偏，真实 `send` 执行后缺 `_client` | 测试桩改为 patch `type(stub)` 的实际直接基类，两种环境同一语义 |
+| 验收 | 纯文本回合修复的回归与真飞书定向验证 | mock 不能证明折叠面板真实落卡 | `pytest tests/` 956 passed；compat_probe S1-S5 PASS（S5 956 passed）；smoke 13/13；真飞书纯文本回合 final + reasoning 定向卡发送成功（`om_x100b608b32888480cf1a54f96d1da6e`） |
 
-> 审计方法：以当前工作区代码/测试、Hermes 0.23.1 实际 CLI `--help`、内置 Feishu 的 `EnvCred`/注册实现及官方插件文档交叉核对；投递故障按“服务端已应用但响应未知”审查，文档中的命令、默认值和出站契约逐项回查实现。初审后另做独立规格/质量两轮审查，补测 Hermes 自动重试、原生回退、单次 final、非回合插件通知和 standalone 分类入口并逐项修复。版本仍在本地验证，不把 mock 结果冒充真实飞书验收。
+> 审计方法：以当前工作区代码/测试、Hermes 0.23.1 实际 CLI `--help`、内置 Feishu 的 `EnvCred`/注册实现及官方插件文档交叉核对；投递故障按“服务端已应用但响应未知”审查，文档中的命令、默认值和出站契约逐项回查实现。初审后另做独立规格/质量两轮审查，补测 Hermes 自动重试、原生回退、单次 final、非回合插件通知和 standalone 分类入口并逐项修复。11-15 生产日志（09:23 纯文本回合无 `card created`、09:28 工具回合有）+ 插件代码路径 + Hermes 0.23.2 `run_turn_persistence`/`platforms/base` 源码三方互证，补测纯文本回合 reasoning 折叠与 compat_probe S4/S5。
 >
-> 已知限制：本条目**未发布**。已在专用会话完成主要真实飞书 E2E，但“服务端已应用、响应丢失”故障注入、慢网络停机 seal、全语言通知模板和当前网关内非 mock turn 仍属后续验收范围。mock 不能证明飞书客户端最终视觉与引用关系；内置适配器继承面仍受 Hermes 上游变更影响，失配时应明确报错而不是静默降级。V1 cleanup 依赖原 V1 代码仍在，缺失时须先恢复原代码与备份。
+> 已知限制：已在专用会话完成主要真实飞书 E2E，但“服务端已应用、响应丢失”故障注入、慢网络停机 seal、全语言通知模板和当前网关内非 mock turn 仍属后续验收范围。mock 不能证明飞书客户端最终视觉与引用关系；内置适配器继承面仍受 Hermes 上游变更影响，失配时应明确报错而不是静默降级。V1 cleanup 依赖原 V1 代码仍在，缺失时须先恢复原代码与备份。
 ---
 
 ## v2.0.34（2026-11-10）

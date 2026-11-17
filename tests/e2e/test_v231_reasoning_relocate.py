@@ -32,6 +32,34 @@ def test_extract_non_reasoning_head_keeps_original():
     assert clean == text
 
 
+def test_extract_zh_blockquote():
+    text = "💭 **推理：**\n> 先查再问\n> 拆任务\n\n正文来了"
+    clean, reasoning = _extract_reasoning_block(text)
+    assert reasoning == "先查再问\n拆任务"
+    assert clean == "正文来了"
+
+
+def test_extract_en_blockquote():
+    text = "💭 **Reasoning:**\n> working it out\n> then answer\n\nanswer here"
+    clean, reasoning = _extract_reasoning_block(text)
+    assert reasoning == "working it out\nthen answer"
+    assert clean == "answer here"
+
+
+def test_extract_subtext():
+    text = "💭 **推理：**\n-# 先查再问\n-# 拆任务\n\n正文来了"
+    clean, reasoning = _extract_reasoning_block(text)
+    assert reasoning == "先查再问\n拆任务"
+    assert clean == "正文来了"
+
+
+def test_extract_blockquote_non_reasoning_head_keeps_original():
+    text = "💭 hello\n> not reasoning\n\nanswer"
+    clean, reasoning = _extract_reasoning_block(text)
+    assert reasoning is None
+    assert clean == text
+
+
 def test_split_fallback_when_strict_guard_fails():
     # 新工具/中文动词变异的尾行：严格语法会回滚为正文，兜底应拆出进面板
     composite = "先回答一半\n\n---\n🤓 询问 · 新工具X\n补充说明"

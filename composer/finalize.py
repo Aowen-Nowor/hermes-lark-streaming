@@ -260,23 +260,34 @@ async def _reseal_panel(
     from ..cardkit.cards import _enforce_card_element_limit
 
     _enforce_card_element_limit({"body": {"elements": [panel]}})
+    # 本地修复：纯文本回合 final 建卡时无 status_lines → 卡上从未插入面板；
+    # 定稿补推理后 panel_on_card=False。此时不得 delete 不存在的面板
+    # （300314 not find elementID），只 add insert_before answer。
+    actions: list[dict[str, Any]] = []
+    # 字段缺失（旧状态/测试桩）按旧行为处理；只有显式 False（纯文本回合
+    # 建卡时未插面板）才跳过 delete。
+    if getattr(state, "panel_on_card", True):
+        actions.append({
+            "action": "delete_elements",
+            "params": {"element_ids": [UNIFIED_PANEL_ELEMENT_ID]},
+        })
+    actions.append({
+        "action": "add_elements",
+        "params": {"type": "insert_before",
+                   "target_element_id": ANSWER_ELEMENT_ID,
+                   "elements": [panel]},
+    })
     state.seq += 1
     await call_with_seq_recovery(
         state,
         lambda seq: client.cardkit_batch_update(
             state.card_id,
-            [
-                {"action": "delete_elements",
-                 "params": {"element_ids": [UNIFIED_PANEL_ELEMENT_ID]}},
-                {"action": "add_elements",
-                 "params": {"type": "insert_before",
-                            "target_element_id": ANSWER_ELEMENT_ID,
-                            "elements": [panel]}},
-            ],
+            actions,
             sequence=seq,
         ),
         what="finalize:panel-reseal",
     )
+    state.panel_on_card = True
     return True
 
 

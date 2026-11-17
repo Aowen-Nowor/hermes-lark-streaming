@@ -41,21 +41,21 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 # S4：插件运行时内生依赖的官方表面（生产代码逐一引用过的方法/属性）。
 # 依据：plugin/adapter.py + composer/* 的 super()/builtin_attr 引用清单；
 # 任何一项缺失都意味着该 hermes 版本下插件部分能力失灵。
+#
+# 本地修复（2026-11-17）：移除 send_stream_frame / send_card_to_chat /
+# reply_card_by_id / cardkit_create / cardkit_update / cardkit_stream_element。
+# 这六项不是内置 FeishuAdapter 基类方法，而是插件自身 FeishuClient 的接口；
+# 旧清单把它们误列为"基类必须有"的项目，导致 0.23.2 以后每次探针运行均报
+# S4 失败，但插件实际运行完全正常（误报）。
 SURFACE_CHECKLIST = (
     "send",
     "edit_message",
     "send_clarify",
-    "send_stream_frame",
     "delete_message",
     "handle_message",
     "_handle_message_with_guards",
     "set_message_handler",
     "_CARD_ACTION_ROUTES",
-    "send_card_to_chat",
-    "reply_card_by_id",
-    "cardkit_create",
-    "cardkit_update",
-    "cardkit_stream_element",
 )
 
 _HERMES_VERSION_ATTRS = ("__version__", "VERSION", "version")

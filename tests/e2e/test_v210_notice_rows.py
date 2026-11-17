@@ -178,7 +178,14 @@ class TestOfficialTokens:
 
 class TestStatusLane:
     def _stub(self, comp, monkeypatch):
-        """免 __init__ 的适配器桩：注入 composer，并把占位基类 send 换成记录器."""
+        """免 __init__ 的适配器桩：注入 composer，并把实际基类 send 换成记录器.
+
+        本地修复：兼容探针会在 hermes 源码位于 PYTHONPATH 的环境跑全套回归，
+        此时插件基类已是真实 ``FeishuAdapter``（而非无 hermes 时的
+        ``_MissingBuiltin``）。旧实现固定 patch ``_MissingBuiltin``，在真实
+        基类环境下打偏 → 真实 send 执行 → 桩缺 ``_client`` 报错。改为 patch
+        ``type(stub)`` 的实际直接基类，两种环境同一语义。
+        """
         import hermes_lark_streaming.plugin.adapter as adp
 
         native: list[tuple] = []
@@ -187,7 +194,8 @@ class TestStatusLane:
             native.append((chat_id, content, metadata))
             return "native"
 
-        monkeypatch.setattr(adp._MissingBuiltin, "send", _fake_send, raising=False)
+        base = type(object.__new__(adp.FeishuStreamingAdapter)).__bases__[0]
+        monkeypatch.setattr(base, "send", _fake_send, raising=False)
         stub = object.__new__(adp.FeishuStreamingAdapter)
         stub._composer = comp
         return stub, native
