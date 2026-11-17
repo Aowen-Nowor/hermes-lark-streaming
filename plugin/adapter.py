@@ -93,6 +93,19 @@ _ANCHOR_CACHE_MAX = 256
 # ── 活跃适配器注册表（供状态卡等模块级设施获取运行状态）────────────
 import weakref
 
+
+def _message_kind(event: Any) -> str:
+    """把 Hermes MessageEvent.message_type 归一为 message/command.
+
+    Hermes 的 ``message_type`` 是 ``MessageType`` 枚举（value 为 str）；
+    直接与字符串比较恒 False。这里统一取 ``.value``，兼容裸字符串。
+    """
+    mt = getattr(event, "message_type", None)
+    mt_value = getattr(mt, "value", mt)
+    if isinstance(mt_value, str) and mt_value.strip().lower() == "command":
+        return "command"
+    return "message"
+
 _ACTIVE_ADAPTERS: weakref.WeakSet[Any] = weakref.WeakSet()
 
 
@@ -313,7 +326,9 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
             self._inbound_anchor[chat_id] = (mid, time.monotonic())
             # 本地修复：记录该锚点的事件类型（message/command）。命令 final 保持
             # oneshot；普通文本/媒体回合 final 走 turn 卡。
-            kind = "command" if getattr(event, "message_type", "") == "command" else "message"
+            # Hermes 的 message_type 是 MessageType 枚举（value 为 str）；
+            # 直接与字符串比较恒 False，会把命令 final 误判成普通消息。
+            kind = _message_kind(event)
             self._inbound_event_kind[mid] = (kind, time.monotonic())
             # 入站事件类型缓存与锚点缓存同生命周期（LRU 淘汰最旧一半）
             if len(self._inbound_event_kind) > _ANCHOR_CACHE_MAX:

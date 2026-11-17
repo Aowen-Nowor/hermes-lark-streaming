@@ -134,6 +134,21 @@ def _bare_adapter(client, composer):
 
 
 class TestFinalRouting:
+    def test_message_kind_accepts_enum_and_string(self):
+        from hermes_lark_streaming.plugin.adapter import _message_kind
+
+        class _CommandType:
+            value = "COMMAND"
+
+        class _TextType:
+            value = "TEXT"
+
+        assert _message_kind(SimpleNamespace(message_type=_CommandType())) == "command"
+        assert _message_kind(SimpleNamespace(message_type=_TextType())) == "message"
+        assert _message_kind(SimpleNamespace(message_type="command")) == "command"
+        assert _message_kind(SimpleNamespace(message_type="text")) == "message"
+        assert _message_kind(SimpleNamespace()) == "message"
+
     async def test_final_with_message_anchor_not_oneshot(self):
         """普通文本回合 final（锚点来源为 message）不转 oneshot，交 composer。"""
         adapter = _bare_adapter(_OneshotFakeClient(), SimpleNamespace(active_state=lambda chat: None))
