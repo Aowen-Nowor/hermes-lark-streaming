@@ -1,5 +1,23 @@
 # 更新日志
 
+## v2.0.36（2026-11-19）
+
+| 类型 | 问题/功能 | 原因 | 修复/说明 |
+|---|---|---|---|
+| 修复 | 澄清卡只支持单选，多选与开放题没有交互控件 | 内置 Clarify 卡的 `send_clarify` 只渲染“一题一排按钮”，开放题按纯文本发送，用户无法在飞书里完成多选或填写开放回答 | 多选改用官方 CardKit 2.0 `form` + `multi_select_static`，开放题用 `form` + `input`，提交回调从 `event.action.form_value` 读取；多选索引映射回原始选项标签，回传给 Hermes 的仍是多选 JSON 数组格式 |
+| 修复 | 表单卡提交/超时被飞书拒绝，报 `200830` | 飞书错误码 200830：JSON 2.0 卡片不能被更新为 JSON 1.0 卡片；表单卡是 2.0，但结算与收口复用了内置 1.0 结算卡 | 表单卡的提交确认卡、过期卡与超时收口卡全部改为 schema 2.0，并单独覆盖表单卡的 `retire_clarify_card`；按钮式单选卡继续走内置路径 |
+| 修复 | 澄清前的说明文字单独发成一条原生文本 | Hermes 的 `clarify_context_callback` 单独下发“问题前的说明”，此时还没有活跃回合卡，插件按普通 commentary 原生发送，用户看到“先一条文本、再一张交互卡” | 识别“无活跃卡 + 无回合锚 + `_interim_send` 的对话性说明”，在卡片建立前不再单独出文本；带锚的正常 commentary 仍走面板/early-create |
+| 优化 | 模型一次提交多题 Clarify 时，用户只看到第一题 | Hermes core 逐题调用 `send_clarify`，后续题目按顺序等待；多题会串成多张卡，而无 `choices` 的多选题实际是开放题 | 平台注册时声明 `platform_hint`：本平台一次 Clarify 只问一个问题，`multi_select=true` 必须同时给出 `choices`；多题行为在 README/SKILL/API 中写明 |
+| 架构 | 插件直接散落导入 Hermes 私有模块 | `gateway.run._resolve_gateway_model`、`gateway.session.build_session_key`、`gateway.platform_env.EnvCred`、`agent.async_utils.safe_schedule_threadsafe` 等私有接口散在业务代码里，Hermes 升级后排查面过大 | 新增 `compat/hermes_api.py` 集中承载这些私有调用，业务代码只经兼容层取用，升级时只需检查一个文件 |
+| 文档 | 开发路径与多 profile 规则缺失 | 文档未说明如何定位当前 profile 目录，也未提示多 profile 同名插件副本不可直接覆盖 | README/SKILL/API 补充：路径一律以 `hermes config path` 为准，多 profile 副本先逐份审计再同步；测试统一使用仓库本地 `.venv`，避免受 Hermes 托管 Python 影响 |
+| 验收 | 上述修复需要真实飞书证据 | mock 不能证明卡片渲染、提交回调与引用关系 | 真机确认：单选按钮卡、多选下拉表单卡、开放题输入表单卡提交均正常，无 `200830`；`pytest tests/` 969 passed；`hermes plugins validate` Passed |
+
+> 审计方法：以真实飞书会话（单选 / 多选 / 开放题三类澄清卡）与飞书 API 消息查询为准，按“飞书官方文档 → Hermes 0.23.2 源码 → 插件实现 → 生产日志”四方交叉核对；错误码语义取飞书官方《卡片回传交互回调》错误码表；每项修复先写失败测试再实现。
+>
+> 已知限制：表单组件需飞书客户端 7.20 及以上（CardKit 2.0 基础要求），低版本客户端会显示升级提示；一次 Clarify 仍只渲染一个题目，多题由 Hermes 串行成多张卡；「服务端已应用、响应丢失」类故障注入与慢网络停机 seal 仍属后续验收范围。
+
+---
+
 ## v2.0.35（2026-11-12）
 
 | 类型 | 问题/功能 | 原因 | 修复/说明 |

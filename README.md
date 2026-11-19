@@ -9,7 +9,7 @@
 [![python](https://img.shields.io/badge/python-%3E%3D3.11%2C%3C3.15-informational)](#环境与路径)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](#license)
 
-**v2.0.35 · 2026-11-12**
+**v2.0.36 · 2026-11-19**
 
 *回答流式入卡 · 工具与思考进入状态面板 · 澄清同卡续流 · 全程零 monkey-patch*
 

@@ -1,6 +1,6 @@
 # API.md — 配置与当前对外契约
 
-> 版本以 `plugin.yaml` 为单一事实源。本文对应 **v2.0.35（2026-11-12）**。安装与人类操作见 [`../README.md`](../README.md)，Agent 执行见 [`SKILL.md`](SKILL.md)。
+> 版本以 `plugin.yaml` 为单一事实源。本文对应 **v2.0.36（2026-11-19）**。安装与人类操作见 [`../README.md`](../README.md)，Agent 执行见 [`SKILL.md`](SKILL.md)。
 
 ## 1. 标识与注册契约
 

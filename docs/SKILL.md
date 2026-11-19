@@ -5,7 +5,7 @@ description: 在 Windows/Linux/macOS 上安装、配置、验证、更新、迁�
 
 # feishu-streaming-platform：Agent 执行手册
 
-人类说明见 [`../README.md`](../README.md)，配置与帧契约见 [`API.md`](API.md)。当前文档对应 **v2.0.35（2026-11-12）**。
+人类说明见 [`../README.md`](../README.md)，配置与帧契约见 [`API.md`](API.md)。当前文档对应 **v2.0.36（2026-11-19）**。
 
 ## 0. 先锁定事实与安全边界
 
