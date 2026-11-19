@@ -38,7 +38,7 @@
 | 流式回答 | 使用与内置飞书一致的 edit/send 通道，将回答以打字机效果写入 CardKit 卡片并定稿 |
 | 状态面板 | 工具进度、思考与对话性 interim 信息进入同一卡片；纯回答回合不创建空面板 |
 | 引用回复 | 有真实 `om_` 锚点时以回复形式发卡；已确认锚点不可用时直发，传输结果未知时禁止自动重试和原生二次投递 |
-| 澄清续流 | 澄清等待期暂停卡片，回答后尽量在同一张卡上继续；交互协议复用内置实现 |
+| 澄清续流 | 澄清等待期暂停卡片，回答后尽量在同一张卡上继续；单选复用内置按钮卡，多选与开放题使用 CardKit 2.0 表单卡（`multi_select_static` / `input` + 提交回调） |
 | 回合外投递 | cron、命令回复、主动发送与无活跃卡的回合外定稿使用一次性静态卡；普通文本/媒体回合即使无工具调用也建 turn 卡（reasoning 进折叠面板），短回复也不另设字数门槛 |
 | standalone 投递 | 无常驻网关的官方 standalone 发送也经过本插件适配器，而非绕回内置纯文本路径 |
 | 稳定性 | 每聊天帧串行化、sequence 自愈、流式会话续期、停机收口、孤儿卡看门狗与体积/元素预算 |
@@ -58,6 +58,8 @@ hermes config env-path   # 当前 profile 的 .env
 ```
 
 文档中的 `$HERMES_HOME` 表示**当前 profile 的实际 Hermes home**。Linux/macOS/Windows Git Bash 可用 `export HERMES_HOME=...`；Windows PowerShell 用 `$env:HERMES_HOME = "..."`。命名 profile 必须使用该 profile 对应的 CLI 上下文，不能复用默认 profile 的凭证或配置路径。
+
+开发和维护插件时，不要直接使用某台机器的 `~/.hermes`、`C:\Users\...` 或 `/home/...` 作为仓库路径。先用 `hermes config path` 确认当前 profile，再从该路径推导插件目录。多 profile 中若存在同名插件副本，先逐份检查分支、版本和本地改动，再决定同步；不要直接执行 `hermes plugins update` 覆盖开发副本。
 
 ## 快速开始
 
@@ -280,6 +282,22 @@ hermes config unset feishu_streaming
 再次重启并检查状态。**保留 `.env` 中的飞书凭证**，内置 `feishu` 仍需要它们；不要删除整个 profile、其他平台配置或 Hermes 托管环境。
 
 ## 测试与真实 E2E
+
+### 使用稳定的仓库本地 `.venv`
+
+Hermes 托管的 tools Python 可能随升级/环境重建被替换，不适合作为长期测试环境。请在仓库根目录使用自己的 `.venv`：
+
+```bash
+# POSIX（Linux/macOS/Git Bash）
+.venv/bin/python -m pytest tests -q
+```
+
+```powershell
+# Windows PowerShell
+.venv\Scripts\python.exe -m pytest tests -q
+```
+
+若还没有 `.venv`，用你自己的 Python 创建并安装开发依赖即可；不要把路径写死到某个用户的 Hermes 安装目录。
 
 ### 默认：mock，绝不因“有凭证”而自动发消息
 

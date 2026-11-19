@@ -49,7 +49,10 @@ hermes config set streaming.enabled true
 
 显式 `platforms.<name>.enabled: false` 优先于 env-enable。CLI 会把 `gateway.platforms.*` 规范化到顶层 `platforms.*`，且顶层优先；不要同时维护两种形状。
 
-## 3. 完整配置
+## 3. 跨平台路径与 profile
+
+所有路径以当前 Hermes profile 为准。使用 `hermes config path` 和 `hermes config env-path` 获取配置位置，不要在脚本、文档或 issue 中写死 `~/.hermes`、`C:\\Users\\...` 或 `/home/...`。多个 profile 存在同名插件副本时，先逐份核对分支、版本和本地改动，再执行同步。
+
 
 ### 3.1 平台与显示键
 
@@ -110,6 +113,7 @@ hermes config set streaming.enabled true
 - 统计字段只有在官方帧提供对应数据时才显示，无数据自动省略；`cost/tokens/cache/compression_exhausted` 在当前官方 V2 帧契约中通常不可达，默认页脚不收录它们。
 - `display.show_reasoning=true` 且能解析出有效 effort 时，默认页脚为 `status/elapsed/model/reasoning`。
 - `native_streaming` 已退役；V1 的 `linear/panel_expanded/flush_interval_ms/answer_flush_interval_ms/feishu_base_url/show_reasoning/gateway_cards/max_tool_steps/max_reasoning_rounds` 不是有效 V2 配置。
+- Clarify 在本平台按“一次调用一个问题”运行；多题调用由 Hermes 串行成多张卡。单选走内置按钮卡，多选走 CardKit 2.0 `multi_select_static` 表单，开放题走 `input` 表单；`multi_select=true` 必须提供 `choices`。
 
 非机密示例：
 

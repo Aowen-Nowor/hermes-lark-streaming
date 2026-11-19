@@ -362,6 +362,24 @@ def test_interim_commentary_is_recognized_without_reply_to():
     assert cls.meta.get("conversational_commentary") is True
 
 
+def test_clarify_context_commentary_is_not_treated_as_a_plain_message_without_a_card():
+    from hermes_lark_streaming.plugin.adapter import _is_unanchored_clarify_context
+
+    cls = classify_send("好，来一发测试。", {"_interim_send": True})
+    composer = SimpleNamespace(active_state=lambda chat_id: None)
+
+    assert _is_unanchored_clarify_context(cls, {"_interim_send": True}, composer, "oc_test") is True
+
+
+def test_unanchored_clarify_context_suppression_requires_interim_send_marker():
+    from hermes_lark_streaming.plugin.adapter import _is_unanchored_clarify_context
+
+    cls = classify_send("普通内容", None)
+    composer = SimpleNamespace(active_state=lambda chat_id: None)
+
+    assert _is_unanchored_clarify_context(cls, None, composer, "oc_test") is False
+
+
 @pytest.mark.parametrize("text", [
     "⏳ 正在处理——3 分钟",
     "⏳ 處理中 — 3 分鐘",

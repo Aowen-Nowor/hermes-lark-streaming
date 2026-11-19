@@ -233,7 +233,7 @@ def _resolve_async(adapter: Any, clarify_id: str, value: str, client_getter: Cal
 
     if loop is not None and loop.is_running():
         try:
-            from agent.async_utils import safe_schedule_threadsafe
+            from ..compat import safe_schedule_threadsafe
 
             safe_schedule_threadsafe(
                 _do(), loop, logger=_logger,

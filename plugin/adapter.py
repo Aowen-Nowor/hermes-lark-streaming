@@ -347,7 +347,7 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         # v2.0.31 页脚 model 会话化：记录本 chat 的 session_key（官方
         # build_session_key 单一事实源；失败不影响入站管线）。
         try:
-            from gateway.session import build_session_key
+            from ..compat import build_session_key
 
             sk = str(build_session_key(event.source) or "")
             if chat_id and sk:
@@ -421,6 +421,11 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         # 仅当 send 无显式锚、且 metadata 为空（回合内帧，非 cron/notify 投递）
         # 时回退最近入站用户消息 ID——与内置飞书"回复触发消息"同语义。
         reply_to = self._resolve_outbound_anchor(chat_id, reply_to, metadata)
+        # Hermes clarify context is internal prose before the first prompt; do not emit standalone text.
+        if _is_unanchored_clarify_context(cls, metadata, self._composer, chat_id, reply_to):
+            _logger.debug("feishu-streaming: suppressing pre-clarify context before card")
+            return type("_ClarifyContextResult", (), {"success": True, "message_id": None})()
+
         # 回合外/用户会话定稿 → 一次性静态定稿卡（cron 投递族 /
         # 回合外 final / 主动 plain）。三规则见 _send_oneshot_card；
         # 返回 None（不适用/降级）时维持下方既有路由，消息永不丢。
@@ -789,10 +794,122 @@ class FeishuStreamingAdapter(_FeishuAdapter):  # type: ignore[misc,valid-type]
         except Exception:
             _logger.debug(
                 "feishu-streaming: clarify suspend skipped chat=%s", chat_id, exc_info=True)
+        # Built-in Feishu renders one button per option and sends open-ended
+        # prompts as plain text. Use CardKit 2.0 form components for the two
+        # cases the built-in path cannot express: multi-select and free text.
+        entry = None
+        try:
+            from tools.clarify_gateway import get_pending
+
+            entry = get_pending(clarify_id)
+        except Exception:
+            _logger.debug("feishu-streaming: clarify entry lookup skipped", exc_info=True)
+        if entry is not None and ((entry.multi_select and choices) or not choices):
+            return await self._send_clarify_form_card(
+                chat_id, question, choices, clarify_id,
+                session_key or (entry.session_key if entry else ""), metadata,
+                multi_select=bool(entry.multi_select and choices),
+            )
         return await super().send_clarify(
             chat_id, question, choices, clarify_id, session_key=session_key,
             metadata=metadata, **kwargs,
         )
+
+    async def _send_clarify_form_card(
+        self, chat_id: str, question: str, choices: list | None, clarify_id: str,
+        session_key: str | None, metadata: dict[str, Any] | None, *, multi_select: bool,
+    ) -> Any:
+        from ..plugin.clarify_form import build_clarify_form_card
+
+        card = build_clarify_form_card(
+            question, list(choices) if choices else None, clarify_id, multi_select=multi_select,
+        )
+        return await self._send_interactive_card(
+            chat_id, card, metadata, "send_clarify form card failed",
+            state_map=self._clarify_state, state_id=clarify_id,
+            session_key=session_key or "",
+            extra_state={"question": str(question), "form_kind": "multi" if multi_select else "text"},
+        )
+
+    def _handle_clarify_card_action(self, *, event: Any, action_value: dict[str, Any], loop: Any) -> Any:
+        """Handle form submissions; all button-based prompts keep the built-in path."""
+        if str(action_value.get("hermes_clarify_action") or "") != "form_submit":
+            return super()._handle_clarify_card_action(
+                event=event, action_value=action_value, loop=loop,
+            )
+        clarify_id = str(action_value.get("clarify_id") or "")
+        state = self._clarify_state.get(clarify_id)
+        if not state:
+            return self._card_response()
+        checked = self._validate_card_action(
+            event=event, state=state, label="clarify", ident=clarify_id,
+        )
+        if checked is None:
+            return self._card_response()
+        open_id, _chat_id, user_name, user_id, _union_id = checked
+        from gateway.approval_actor import clarify_refusal, refusal_text
+
+        if requester := clarify_refusal(clarify_id, user_id or open_id, extra=self.config.extra):
+            return self._card_toast(refusal_text(requester))
+        from tools import clarify_gateway
+        from ..plugin.clarify_form import (
+            build_settled_form_card,
+            extract_form_answer,
+            extract_form_value,
+        )
+
+        entry = clarify_gateway.get_pending(clarify_id)
+        if entry is None or entry.session_key != state.get("session_key"):
+            self._clarify_state.pop(clarify_id, None)
+            return self._card_response(build_settled_form_card(
+                str(state.get("question") or ""), "已过期，请重新发起提问。", "grey",
+            ))
+        form_kind = str(state.get("form_kind") or action_value.get("form_kind") or "text")
+        answer = extract_form_answer(form_kind, extract_form_value(event), list(entry.choices or []))
+        if answer is None:
+            return self._card_toast("请完成必填项后再提交")
+        if self._clarify_state.pop(clarify_id, None) is None:
+            return self._card_response()
+        if not clarify_gateway.resolve_gateway_clarify(clarify_id, answer):
+            return self._card_response(build_settled_form_card(
+                str(state.get("question") or ""), "已过期，请重新发起提问。", "grey",
+            ))
+        shown = answer
+        if form_kind == "multi":
+            try:
+                import json
+
+                shown = "、".join(json.loads(answer))
+            except Exception:
+                pass
+        _logger.info("Feishu clarify form resolved (id=%s, kind=%s, user=%s)", clarify_id, form_kind, user_id or open_id)
+        return self._card_response(build_settled_form_card(
+            str(state.get("question") or ""), f"**{user_name}:** {shown}", "green",
+        ))
+
+    async def retire_clarify_card(self, clarify_id: str, notice: str) -> None:
+        """Retire form cards with a 2.0 settled card (200830: 2.0 cannot become 1.0)."""
+        state = self._clarify_state.pop(clarify_id, None)
+        if not state or not state.get("message_id") or not getattr(self, "_client", None):
+            return
+        if state.get("form_kind") not in {"multi", "text"}:
+            return await super().retire_clarify_card(clarify_id, notice)
+        from plugins.platforms.feishu import adapter as facade
+        from ..plugin.clarify_form import build_settled_form_card
+
+        card = build_settled_form_card(str(state.get("question") or ""), notice, "grey")
+        body = facade._sdk_build(
+            facade.PatchMessageRequestBody, content=json.dumps(card, ensure_ascii=False),
+        )
+        request = facade._sdk_build(
+            facade.PatchMessageRequest, message_id=state["message_id"], request_body=body,
+        )
+        response = await self._run_blocking(self._client.im.v1.message.patch, request)
+        if not self._response_succeeded(response):
+            _logger.debug(
+                "feishu-streaming: retiring form clarify card %s rejected: code=%s",
+                clarify_id, getattr(response, "code", None),
+            )
 
     async def _handle_card_action_event(self, data: Any) -> None:
         """卡片动作回调（仅兜底未命中路由的动作）.
@@ -818,6 +935,25 @@ def _strip_internal(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
         return metadata
     clean = {k: v for k, v in metadata.items() if k != "_interim_send"}
     return clean or None
+
+
+def _is_unanchored_clarify_context(
+    cls: Any, metadata: dict[str, Any] | None, composer: Any, chat_id: str,
+    reply_to: str | None = None,
+) -> bool:
+    """Identify Hermes' pre-clarify prose before a turn card exists."""
+    if cls is None or getattr(cls, "channel", "") != "interim":
+        return False
+    if not getattr(cls, "meta", {}).get("conversational_commentary"):
+        return False
+    if not isinstance(metadata, dict) or not metadata.get("_interim_send"):
+        return False
+    if (reply_to or "").strip():
+        return False
+    try:
+        return composer.active_state(chat_id) is None
+    except Exception:
+        return False
 
 
 def _upgrade_plain_to_progress(
@@ -930,8 +1066,9 @@ def _env_registration() -> tuple[tuple[Any, ...], tuple[str, str]]:
     def apply_env(config: Any) -> None:
         # 动态 Platform 只有在 register() 后才存在；Hermes 应用 overrides 时再创建。
         from gateway.config import Platform
-        from gateway.platform_env import EnvCred
+        from ..compat import env_cred_class
 
+        EnvCred = env_cred_class()
         EnvCred(
             Platform(PLATFORM_NAME), credentials,
             fixed=(
@@ -1063,6 +1200,11 @@ def register(ctx: Any) -> None:
         # 不声明时插件平台落 ""（全局默认），行为等价但受未来默认漂移影响；
         # 显式声明把流式卡片体验所需的显示基线固化下来。
         display_tier="high",
+        platform_hint=(
+            "Clarify on this Feishu/Lark surface: ask ONE question per clarify call "
+            "(never batch multiple questions). Set multi_select only with explicit "
+            "choices; omit choices only for a free-text question."
+        ),
     )
     _logger.info("feishu-streaming: platform registered (zero monkey-patch)")
 

@@ -76,9 +76,9 @@ def _summary_of(state: Any) -> str:
 def _resolve_model_name() -> str:
     """网关配置的模型名（hermes 官方解析器；无 hermes 环境返回空 → 页脚跳过）。"""
     try:
-        from gateway.run import _resolve_gateway_model
+        from ..compat import resolve_gateway_model
 
-        return str(_resolve_gateway_model() or "").strip()
+        return str(resolve_gateway_model() or "").strip()
     except Exception:  # noqa: BLE001 — 页脚 model 字段尽力而为
         return ""
 

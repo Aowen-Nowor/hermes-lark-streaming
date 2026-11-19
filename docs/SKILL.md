@@ -67,6 +67,8 @@ hermes config get platforms.feishu-streaming.enabled
 
 `plugins show` 在全新安装前报未安装是正常信息，不是继续执行的失败理由。其余输出若指向另一个 profile，先修正 CLI profile/HERMES_HOME 上下文。
 
+维护多个 profile 时，先分别核对每个 profile 的插件分支、版本和工作区改动，再同步；不要直接用插件更新命令覆盖带本地改动的副本。
+
 需要 shell 变量时：
 
 **Linux/macOS/Windows Git Bash**
@@ -221,6 +223,8 @@ hermes config get streaming.enabled
 | `card_style.text_size.aux` | map | 未配置 | 三档辅助字号；缺档回退 `notation`，token `cus-aux` |
 
 页脚基础字段为 `status/elapsed/model`，其余统计字段取决于官方帧是否供数。`card_style` 未配置时不注入样式。`native_streaming` 已退役；V1 死键为 `linear/panel_expanded/flush_interval_ms/answer_flush_interval_ms/feishu_base_url/show_reasoning/gateway_cards/max_tool_steps/max_reasoning_rounds`，不要迁移。
+
+Clarify 在本平台按“一次调用一个问题”运行：多题调用会被 Hermes 串行成多张卡；单选走内置按钮卡，多选走 CardKit 2.0 `multi_select_static` 表单，开放题走 `input` 表单，提交后由插件回传 `form_value`。`multi_select=true` 必须同时提供 `choices`。
 
 ## 5. V1 → V2：一次性迁移
 

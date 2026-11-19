@@ -49,6 +49,8 @@ def test_register_declares_scoped_env_enablement_and_custom_standalone() -> None
     assert captured["allow_bots_env"] == "FEISHU_ALLOW_BOTS"
     assert captured["allowlist_suppresses_pairing"] is True
     assert captured["standalone_sender_fn"] is adapter_module._standalone_send
+    assert "ONE question per clarify call" in captured["platform_hint"]
+    assert "multi_select" in captured["platform_hint"]
     # 平台注册前不得实例化 EnvCred：动态 Platform 此时尚未注册。
     assert env_cred_calls == []
     # Hermes 应用 env overrides 时平台已注册，此刻才应创建 EnvCred。
