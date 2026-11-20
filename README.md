@@ -1,3 +1,24 @@
+# 仓库终态公告（2026-11-20）
+
+**本项目已完成历史使命，即日起停止一切功能更新与常规修复。**
+
+**后继项目**：[lark-streaming-platform](https://github.com/Aowen-Nowor/lark-streaming-platform)
+—— 从头重设计的**独立**飞书 / Lark 流式卡片平台：任何 agent 通过统一事件
+协议（LSEP/1）接入，hermes 只是第一个接入方而非地基。本项目生产验证的
+全部知识（CardKit 怪癖表、竞态事故档案、性能守恒、行为验收基线）已冻结
+迁移至新项目 `docs/design/04-knowledge-freeze.md`。
+
+**仓库状态**：
+
+- 已设为只读（归档）：不再接受 issue 与 PR
+- **2027-01-01 起本仓库将转为私有，不再公开**
+- 文档与代码仍可继续浏览、克隆与参考
+- 正在使用本插件的用户：2027-01-01 前请自行 fork 存档，或迁移至后继项目
+
+感谢所有关注与使用。
+
+---
+
 <div align="center">
 
 # hermes-lark-streaming
